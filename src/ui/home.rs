@@ -1,6 +1,6 @@
-//! The projects home screen: a recents grid with thumbnails, plus the trash.
+//! The projects home screen: a recents grid with thumbnails, folders, plus the trash.
 
-use crate::project::{Entry, TrashEntry};
+use crate::project::{Entry, Folder, TrashEntry};
 use crate::theme::{self, Icon};
 use egui::{Color32, RichText, Ui};
 use std::collections::HashMap;
@@ -14,6 +14,12 @@ pub enum HomeAction {
     Open(PathBuf),
     Rename(PathBuf, String),
     Duplicate(PathBuf),
+    /// Move a project into a folder, or to the top level when None.
+    Move(PathBuf, Option<Folder>),
+    /// Make a folder and name it, moving this project into it if given.
+    NewFolder(Option<PathBuf>),
+    RenameFolder(PathBuf, String),
+    TrashFolder(PathBuf),
     Trash(PathBuf),
     Restore(PathBuf),
     DeleteForever(PathBuf),
@@ -23,8 +29,12 @@ pub enum HomeAction {
 #[derive(Default)]
 pub struct HomeView {
     pub entries: Vec<Entry>,
+    pub folders: Vec<Folder>,
     pub trash: Vec<TrashEntry>,
     pub show_trash: bool,
+    /// Id of the folder being viewed. None shows Recents, every project at once.
+    pub folder: Option<String>,
+    /// The project or folder being renamed inline.
     pub renaming: Option<(PathBuf, String)>,
     /// Requests for the app, drained after each frame.
     pub actions: Vec<HomeAction>,
@@ -37,13 +47,54 @@ pub struct HomeView {
 const CARD_W: f32 = 232.0;
 const THUMB_H: f32 = 148.0;
 
+/// Drag payload: a project card on its way to a folder.
+struct ProjectDrag {
+    dir: PathBuf,
+    name: String,
+}
+
 impl HomeView {
     /// Re-read the project list and trash from the store (keeps cached thumbnails).
     pub fn refresh(&mut self, store: &crate::project::Store, now_ms: u64) {
         self.root = store.root.clone();
         self.entries = store.list();
+        self.folders = store.folders();
         self.trash = store.list_trash();
         self.now_ms = now_ms;
+        if self.selected_folder().is_none() {
+            self.folder = None;
+        }
+    }
+
+    /// Show a folder that was just created, with its name ready to type over.
+    pub fn name_new_folder(&mut self, f: Folder) {
+        self.show_trash = false;
+        self.folder = Some(f.id);
+        self.renaming = Some((f.dir, f.name));
+    }
+
+    /// The folder being viewed, which New Project and Import put things in.
+    pub fn selected_folder(&self) -> Option<&Folder> {
+        let id = self.folder.as_ref()?;
+        self.folders.iter().find(|f| f.id == *id)
+    }
+
+    /// The projects in the current view.
+    fn visible(&self) -> Vec<Entry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                self.folder.is_none() || e.folder.as_ref().map(|f| &f.id) == self.folder.as_ref()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn folder_size(&self, f: &Folder) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.folder.as_ref().is_some_and(|c| c.id == f.id))
+            .count()
     }
 
     pub fn load(store: &crate::project::Store, now_ms: u64) -> HomeView {
@@ -113,8 +164,20 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
                     .color(p.secondary),
             );
             ui.add_space(4.0);
-            if sidebar_item(ui, Icon::Grid, "Recents", None, !hv.show_trash) {
+            let recents = sidebar_row(
+                ui,
+                Icon::Grid,
+                "Recents",
+                None,
+                !hv.show_trash && hv.folder.is_none(),
+            );
+            if recents.clicked() {
                 hv.show_trash = false;
+                hv.folder = None;
+            }
+            // Dropping on Recents is how a project leaves its folder without a menu.
+            if let Some(d) = recents.dnd_release_payload::<ProjectDrag>() {
+                hv.actions.push(HomeAction::Move(d.dir.clone(), None));
             }
             let n = hv.trash.len();
             if sidebar_item(
@@ -126,6 +189,7 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
             ) {
                 hv.show_trash = true;
             }
+            folder_list(ui, hv);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.add_space(4.0);
                 ui.label(
@@ -146,8 +210,12 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.label(
-                    RichText::new(if hv.show_trash { "Trash" } else { "Recents" })
-                        .font(theme::semibold(17.0)),
+                    RichText::new(match hv.selected_folder() {
+                        _ if hv.show_trash => "Trash",
+                        Some(f) => f.name.as_str(),
+                        None => "Recents",
+                    })
+                    .font(theme::semibold(17.0)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if hv.show_trash {
@@ -195,6 +263,113 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
                     }
                 });
         });
+    drag_label(ui);
+}
+
+/// The Folders section of the sidebar: a header with a + button, then one row per folder.
+fn folder_list(ui: &mut Ui, hv: &mut HomeView) {
+    let p = theme::pal(ui);
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Folders")
+                .font(theme::semibold(theme::SECONDARY))
+                .color(p.secondary),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::icon_button(ui, Icon::Plus, 20.0, false)
+                .on_hover_text("New Folder")
+                .clicked()
+            {
+                hv.actions.push(HomeAction::NewFolder(None));
+            }
+        });
+    });
+    ui.add_space(2.0);
+    let folders = hv.folders.clone();
+    egui::ScrollArea::vertical()
+        .max_height(ui.available_height() - 56.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for f in &folders {
+                folder_row(ui, hv, f);
+            }
+        });
+}
+
+fn folder_row(ui: &mut Ui, hv: &mut HomeView, f: &Folder) {
+    if hv.renaming.as_ref().is_some_and(|(d, _)| *d == f.dir) {
+        let (_, name) = hv.renaming.as_mut().unwrap();
+        let r = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+        if let Some(keep) = super::rename_ended(ui, &r, name) {
+            let (dir, name) = hv.renaming.take().unwrap();
+            let name = name.trim();
+            if keep && !name.is_empty() && name != f.name {
+                hv.actions
+                    .push(HomeAction::RenameFolder(dir, name.to_string()));
+            }
+        }
+        return;
+    }
+    let n = hv.folder_size(f);
+    let selected = !hv.show_trash && hv.folder.as_ref() == Some(&f.id);
+    let row = sidebar_row(
+        ui,
+        Icon::Folder,
+        &f.name,
+        (n > 0).then(|| n.to_string()),
+        selected,
+    );
+    if row.double_clicked() {
+        hv.renaming = Some((f.dir.clone(), f.name.clone()));
+    } else if row.clicked() {
+        hv.folder = Some(f.id.clone());
+        hv.show_trash = false;
+    }
+    if let Some(d) = row.dnd_release_payload::<ProjectDrag>() {
+        hv.actions
+            .push(HomeAction::Move(d.dir.clone(), Some(f.clone())));
+    }
+    row.context_menu(|ui| {
+        if ui.button("Rename").clicked() {
+            hv.renaming = Some((f.dir.clone(), f.name.clone()));
+            ui.close();
+        }
+        if ui
+            .button("Move to Trash")
+            .on_hover_text("Its projects go to the Trash, and restoring one brings the folder back")
+            .clicked()
+        {
+            hv.actions.push(HomeAction::TrashFolder(f.dir.clone()));
+            ui.close();
+        }
+    });
+}
+
+/// The name of the card being dragged, following the pointer.
+fn drag_label(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let Some(d) = egui::DragAndDrop::payload::<ProjectDrag>(&ctx) else {
+        return;
+    };
+    let Some(pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let p = theme::pal(ui);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("home-drag"),
+    ));
+    let g = painter.layout_no_wrap(
+        d.name.clone(),
+        egui::FontId::proportional(theme::BODY),
+        Color32::WHITE,
+    );
+    let rect = egui::Rect::from_min_size(pos + egui::vec2(12.0, 8.0), g.size())
+        .expand2(egui::vec2(8.0, 4.0));
+    painter.rect_filled(rect, 6.0, theme::accent());
+    painter.galley(rect.min + egui::vec2(8.0, 4.0), g, p.text);
 }
 
 fn sidebar_item(
@@ -204,6 +379,16 @@ fn sidebar_item(
     badge: Option<String>,
     selected: bool,
 ) -> bool {
+    sidebar_row(ui, icon, label, badge, selected).clicked()
+}
+
+fn sidebar_row(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    badge: Option<String>,
+    selected: bool,
+) -> egui::Response {
     let p = theme::pal(ui);
     let (row, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
@@ -217,23 +402,47 @@ fn sidebar_item(
         egui::vec2(15.0, 15.0),
     );
     theme::paint_icon(ui.painter(), ir, icon, theme::accent());
-    ui.painter().text(
-        egui::pos2(row.left() + 32.0, row.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(theme::BODY),
-        p.text,
-    );
+    let mut right = row.right() - 8.0;
     if let Some(b) = badge {
-        ui.painter().text(
-            egui::pos2(row.right() - 8.0, row.center().y),
+        let r = ui.painter().text(
+            egui::pos2(right, row.center().y),
             egui::Align2::RIGHT_CENTER,
             b,
             egui::FontId::proportional(theme::SECONDARY),
             p.secondary,
         );
+        right = r.left() - 6.0;
     }
-    resp.clicked()
+    let text = egui::Rect::from_min_max(
+        egui::pos2(row.left() + 32.0, row.top()),
+        egui::pos2(right, row.bottom()),
+    );
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        label.to_string(),
+        egui::FontId::proportional(theme::BODY),
+        p.text,
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(text.width());
+    let g = ui.painter().layout_job(job);
+    let elided = g.elided;
+    ui.painter().galley(
+        egui::pos2(text.left(), row.center().y - g.size().y / 2.0),
+        g,
+        p.text,
+    );
+    if resp.dnd_hover_payload::<ProjectDrag>().is_some() {
+        ui.painter().rect_stroke(
+            row,
+            6.0,
+            egui::Stroke::new(2.0, theme::accent()),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if elided {
+        resp.on_hover_text(label)
+    } else {
+        resp
+    }
 }
 
 fn columns(ui: &Ui) -> usize {
@@ -244,14 +453,27 @@ fn columns(ui: &Ui) -> usize {
 
 fn recents_grid(ui: &mut Ui, hv: &mut HomeView) {
     let p = theme::pal(ui);
-    if hv.entries.is_empty() {
+    let entries = hv.visible();
+    if entries.is_empty() {
+        let in_folder = hv.folder.is_some();
         ui.add_space(80.0);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("No projects yet").font(theme::semibold(17.0)));
+            ui.label(
+                RichText::new(if in_folder {
+                    "This folder is empty"
+                } else {
+                    "No projects yet"
+                })
+                .font(theme::semibold(17.0)),
+            );
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Projects are folders in your Documents, saved as you work.")
-                    .color(p.secondary),
+                RichText::new(if in_folder {
+                    "Create a project here, or drag one onto the folder from Recents."
+                } else {
+                    "Projects are folders in your Documents, saved as you work."
+                })
+                .color(p.secondary),
             );
             ui.add_space(12.0);
             if ui
@@ -267,7 +489,6 @@ fn recents_grid(ui: &mut Ui, hv: &mut HomeView) {
         return;
     }
     let cols = columns(ui);
-    let entries = hv.entries.clone();
     for row in entries.chunks(cols) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 20.0;
@@ -286,7 +507,8 @@ fn card_frame(
     id: egui::Id,
 ) -> egui::Response {
     let p = theme::pal(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(CARD_W, THUMB_H), egui::Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(CARD_W, THUMB_H), egui::Sense::click_and_drag());
     let hovered = resp.hovered();
     let painter = ui.painter();
     painter.rect_filled(rect, 8.0, p.thumbnail);
@@ -339,17 +561,19 @@ fn project_card(ui: &mut Ui, hv: &mut HomeView, e: &Entry) {
         if resp.double_clicked() {
             hv.actions.push(HomeAction::Open(e.dir.clone()));
         }
+        resp.dnd_set_drag_payload(ProjectDrag {
+            dir: e.dir.clone(),
+            name: e.manifest.name.clone(),
+        });
         resp.context_menu(|ui| card_menu(ui, hv, e));
         ui.add_space(6.0);
         let renaming = hv.renaming.as_ref().is_some_and(|(d, _)| *d == e.dir);
         if renaming {
             let (_, name) = hv.renaming.as_mut().unwrap();
             let r = ui.add(egui::TextEdit::singleline(name).desired_width(CARD_W));
-            r.request_focus();
-            if r.lost_focus() {
+            if let Some(keep) = super::rename_ended(ui, &r, name) {
                 let (dir, name) = hv.renaming.take().unwrap();
-                if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && name.trim() != e.manifest.name
-                {
+                if keep && name.trim() != e.manifest.name {
                     hv.actions.push(HomeAction::Rename(dir, name));
                 }
             }
@@ -372,18 +596,54 @@ fn project_card(ui: &mut Ui, hv: &mut HomeView, e: &Entry) {
                 });
             });
         }
+        // Recents mixes every folder, so name the folder there. It replaces the page count
+        // to keep the caption on one line.
+        let edited = relative_time(e.manifest.modified, hv.now_ms);
         let pages = e.manifest.pages.len();
-        ui.label(
-            RichText::new(format!(
-                "Edited {} · {} page{}",
-                relative_time(e.manifest.modified, hv.now_ms),
-                pages,
+        let caption = match e.folder.as_ref().filter(|_| hv.folder.is_none()) {
+            Some(f) => format!("{} · Edited {edited}", f.name),
+            None => format!(
+                "Edited {edited} · {pages} page{}",
                 if pages == 1 { "" } else { "s" }
-            ))
-            .size(theme::SECONDARY)
-            .color(p.secondary),
+            ),
+        };
+        ui.add(
+            egui::Label::new(
+                RichText::new(caption)
+                    .size(theme::SECONDARY)
+                    .color(p.secondary),
+            )
+            .truncate(),
         );
     });
+}
+
+fn move_menu(ui: &mut Ui, hv: &mut HomeView, e: &Entry) {
+    if ui.button("New Folder…").clicked() {
+        hv.actions.push(HomeAction::NewFolder(Some(e.dir.clone())));
+        ui.close();
+    }
+    ui.separator();
+    let current = e.folder.as_ref().map(|f| &f.id);
+    for f in hv.folders.clone() {
+        if ui
+            .add_enabled(current != Some(&f.id), egui::Button::new(&f.name))
+            .clicked()
+        {
+            hv.actions.push(HomeAction::Move(e.dir.clone(), Some(f)));
+            ui.close();
+        }
+    }
+    if !hv.folders.is_empty() {
+        ui.separator();
+    }
+    if ui
+        .add_enabled(current.is_some(), egui::Button::new("No Folder"))
+        .clicked()
+    {
+        hv.actions.push(HomeAction::Move(e.dir.clone(), None));
+        ui.close();
+    }
 }
 
 fn card_menu(ui: &mut Ui, hv: &mut HomeView, e: &Entry) {
@@ -399,6 +659,7 @@ fn card_menu(ui: &mut Ui, hv: &mut HomeView, e: &Entry) {
         hv.actions.push(HomeAction::Duplicate(e.dir.clone()));
         ui.close();
     }
+    ui.menu_button("Move to", |ui| move_menu(ui, hv, e));
     ui.separator();
     if ui.button("Move to Trash").clicked() {
         hv.actions.push(HomeAction::Trash(e.dir.clone()));
@@ -457,10 +718,17 @@ fn trash_grid(ui: &mut Ui, hv: &mut HomeView) {
                             }
                         });
                     });
-                    ui.label(
-                        RichText::new(format!("Deleted {}", relative_time(e.deleted, hv.now_ms)))
+                    let deleted = relative_time(e.deleted, hv.now_ms);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(match &e.folder {
+                                Some(f) => format!("{} · Deleted {deleted}", f.name),
+                                None => format!("Deleted {deleted}"),
+                            })
                             .size(theme::SECONDARY)
                             .color(p.secondary),
+                        )
+                        .truncate(),
                     );
                 });
             }

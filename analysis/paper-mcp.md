@@ -141,6 +141,7 @@ artboards when content clips; never show raw node ids; call `finish_working_on_n
 | Paper | Sketch |
 |---|---|
 | file (`fileId`) | project (manifest id, or folder path); the open project is "the file the user is viewing" |
+| folder (`parentId`) | folder: a directory under the store root with a `folder.json`, one level deep; `"root"` is the top level |
 | page (`pageId`) | page (`PageRef.id`); edits on parked pages go to that page's own document and undo history |
 | artboard | top-level `Frame` |
 | HTML element with `display:flex` | `Frame` with `AutoLayout` (direction, gap, padding, align/justify, wrap) |
@@ -152,7 +153,7 @@ artboards when content clips; never show raw node ids; call `finish_working_on_n
 | undo / live update | one undo step per tool call, through `Editor::edit`; the window repaints on every call |
 
 Not carried over (no equivalent in a local-first single-user app): comments,
-teams/folders/drafts, AI image generation (`paper-gen://`), video export, the per-agent
-"working" indicator (kept as a harmless no-op tool so agent prompts written for Paper work).
+teams/drafts, nested folders, archiving over MCP, AI image generation (`paper-gen://`), video
+export, the per-agent "working" indicator (kept as a harmless no-op tool so agent prompts written for Paper work).
 Design tokens came later: see `design-tokens.md`. Added for Sketch: whiteboard shapes and hand-drawn style (`create_shape`, Excalidraw keys
 in `update_styles`), `undo`/`redo`, and page/project listing.

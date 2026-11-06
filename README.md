@@ -30,11 +30,19 @@ Paper. No original Paper code or assets are included in this repository.
 ## Projects
 
 Sketch opens on a **home screen** of your projects (recents grid with thumbnails, New, Import,
-and Rename / Duplicate / Move to Trash from each card's ⋯ menu or right-click; restore from
-Trash). Each project is a plain folder in `~/Documents/sketch-rs/<name>/` holding `project.json`
-and one JSON file per page in `pages/`. Work is autosaved about a second after each change with
+and Rename / Duplicate / Move to / Move to Trash from each card's ⋯ menu or right-click; restore
+from Trash). Each project is a plain folder in `~/Documents/sketch-rs/<name>/` holding
+`project.json` and one JSON file per page in `pages/`. Work is autosaved about a second after each change with
 crash-safe atomic writes; files are versioned and older versions migrate on load. Set
 `SKETCH_RS_HOME` to use another folder.
+
+**Folders** group projects, one level deep. Press + next to Folders in the sidebar, then drag a
+card onto a folder, or use Move to on the card, which can also start a new folder. Drop a card on Recents to take it out of its
+folder. Recents shows every project; a folder shows its own, and New and Import add to the folder
+you're viewing. Names only have to be unique within a folder. A folder is a directory in the
+projects folder with a `folder.json`, so `~/Documents/sketch-rs/Acme/Landing page/` is a project
+in the Acme folder. Moving a folder to Trash trashes its projects, and restoring one brings the
+folder back.
 
 Sketch used to be called paper-rs. On first launch it moves `~/Documents/paper-rs` to
 `~/Documents/sketch-rs`, and it still opens `.paper-rs` files and older libraries. The old
@@ -157,6 +165,7 @@ written for Paper work here too.
 | Group | Tools |
 |---|---|
 | Projects & pages | `list_resources`, `open_file`, `create_file`, `create_page`, `rename_pages` |
+| Folders | `create_folder`, `move_resources`, `rename_resource`; `list_resources` and `create_file` take `parentId` |
 | Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `search_fonts`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |

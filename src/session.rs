@@ -3,7 +3,7 @@
 //! This layer has no windowing code so it can be driven by tests with a fake clock.
 
 use crate::editor::Editor;
-use crate::project::{FormatError, PageRef, Project, Store, now_ms};
+use crate::project::{Folder, FormatError, PageRef, Project, Store, now_ms};
 use crate::render::gpu::Headless;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -60,8 +60,30 @@ impl Session {
 
     /// Create a new project and open it.
     pub fn create(&mut self, ed: &mut Editor, name: &str) -> Result<(), FormatError> {
-        let (p, _) = self.store.create(name)?;
+        self.create_in(ed, name, None)
+    }
+
+    /// Create a new project, inside `folder` if given, and open it.
+    pub fn create_in(
+        &mut self,
+        ed: &mut Editor,
+        name: &str,
+        folder: Option<&Folder>,
+    ) -> Result<(), FormatError> {
+        let (p, _) = self.store.create_in(name, folder)?;
         self.open(ed, &p.dir)
+    }
+
+    /// The store moved or renamed the open project: point autosave at its new directory and
+    /// pick up the name and edit time. Without this the next save would recreate the old path.
+    pub fn relocate(&mut self, dir: &Path) -> Result<(), FormatError> {
+        if let Some(p) = &mut self.project {
+            let on_disk = Project::open(dir)?.manifest;
+            p.dir = dir.to_path_buf();
+            p.manifest.name = on_disk.name;
+            p.manifest.modified = on_disk.modified;
+        }
+        Ok(())
     }
 
     /// Note that time passed; returns true when a save is due now.

@@ -8,6 +8,7 @@
 
 use super::css::{self, Context, Styles};
 use super::html::{self, Element, Html};
+use super::tools::TOP_LEVEL;
 use super::{Out, ToolResult, tools};
 use crate::editor::{Editor, hit};
 use crate::geom::{Rect, V2, v2};
@@ -16,7 +17,7 @@ use crate::model::{
     AutoLayout, Binding, Color, Direction, Document, Head, ImageMode, Node, NodeId, NodeKind,
     Paint, PathPoint, Route, Sizing, SubPath, TextAlign, Token, TokenKind, TokenProp, TokenSet,
 };
-use crate::project::{Project, Store};
+use crate::project::{Entry, Folder, Project, Store};
 use crate::render::gpu::Headless;
 use crate::render::scene::CanvasStyle;
 use crate::session::Session;
@@ -36,6 +37,8 @@ pub trait Host {
     fn canvas_open(&self) -> bool;
     /// Open a project folder (saving the current one).
     fn open_project(&mut self, dir: &Path) -> Result<(), String>;
+    /// The open project now lives at `dir` because the store moved or renamed it.
+    fn project_moved(&mut self, dir: &Path) -> Result<(), String>;
     /// Save the open project now.
     fn save(&mut self) -> Result<(), String>;
     /// An offscreen renderer for screenshots and PNG export.
@@ -84,6 +87,9 @@ impl Host for SessionHost {
         self.session
             .open(&mut self.ed, dir)
             .map_err(|e| format!("{}: {e}", dir.display()))
+    }
+    fn project_moved(&mut self, dir: &Path) -> Result<(), String> {
+        self.session.relocate(dir).map_err(|e| e.to_string())
     }
     fn save(&mut self) -> Result<(), String> {
         if self.session.project.is_some() {
@@ -251,6 +257,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
         "list_resources" => list_resources(host, &a),
         "open_file" => open_file(host, &a),
         "create_file" => create_file(host, &a),
+        "create_folder" => create_folder(host, &a),
+        "move_resources" => move_resources(host, &a),
+        "rename_resource" => rename_resource(host, &a),
         "get_font_family_info" => font_info(&a),
         "search_fonts" => search_fonts(&a),
         "get_guide" => guide(&a),
@@ -304,7 +313,41 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
     }
 }
 
-/// Projects match by manifest id, name or folder path.
+/// Where a project sits, as "Folder/Project". Also accepted as a project key.
+fn location(e: &Entry) -> String {
+    match &e.folder {
+        Some(f) => format!("{}/{}", f.name, e.manifest.name),
+        None => e.manifest.name.clone(),
+    }
+}
+
+/// The only project `matches` selects, or an error listing the candidates, because guessing
+/// here could edit the wrong client's work. None when nothing matches.
+fn pick<'a>(
+    list: &'a [Entry],
+    key: &str,
+    matches: &dyn Fn(&Entry) -> bool,
+) -> Result<Option<&'a Entry>, String> {
+    let found: Vec<&Entry> = list.iter().filter(|e| matches(e)).collect();
+    match found[..] {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        _ => {
+            let options: Vec<String> = found
+                .iter()
+                .map(|e| format!("{} (id {})", location(e), e.manifest.id))
+                .collect();
+            Err(format!(
+                "`{key}` matches {} projects: {}. Pass an id or Folder/Project.",
+                found.len(),
+                options.join(", ")
+            ))
+        }
+    }
+}
+
+/// Projects match by manifest id, absolute path, name or "Folder/Project". Two folders can each
+/// hold a project with the same name, so a bare name can be ambiguous, and that's an error.
 fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
     let key = key.trim().trim_start_matches("/file/");
     let p = Path::new(key);
@@ -312,19 +355,54 @@ fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
         return Ok(p.to_path_buf());
     }
     let list = store.list();
-    list.iter()
-        .find(|e| e.manifest.id == key)
-        .or_else(|| list.iter().find(|e| e.manifest.name == key))
+    let tiers: [&dyn Fn(&Entry) -> bool; 5] = [
+        &|e| e.manifest.id == key,
+        &|e| e.manifest.name == key,
+        &|e| location(e) == key,
+        &|e| e.manifest.name.eq_ignore_ascii_case(key) || location(e).eq_ignore_ascii_case(key),
+        &|e| e.dir.file_name().is_some_and(|f| f == key),
+    ];
+    for matches in tiers {
+        if let Some(e) = pick(&list, key, matches)? {
+            return Ok(e.dir.clone());
+        }
+    }
+    Err(format!("project `{key}` not found (see list_resources)"))
+}
+
+/// Folders match by id, name (ignoring case) or absolute path. A miss lists the folders that
+/// exist, so an agent can correct a typo instead of creating a near-duplicate.
+fn find_folder(store: &Store, key: &str) -> Result<Folder, String> {
+    let key = key.trim();
+    let folders = store.folders();
+    folders
+        .iter()
+        .find(|f| f.id == key)
+        .or_else(|| folders.iter().find(|f| f.name == key))
         .or_else(|| {
-            list.iter()
-                .find(|e| e.manifest.name.eq_ignore_ascii_case(key))
+            folders
+                .iter()
+                .find(|f| f.name.to_lowercase() == key.to_lowercase())
         })
-        .or_else(|| {
-            list.iter()
-                .find(|e| e.dir.file_name().is_some_and(|f| f == key))
+        .or_else(|| folders.iter().find(|f| same_dir(&f.dir, Path::new(key))))
+        .cloned()
+        .ok_or_else(|| {
+            let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+            let have = if names.is_empty() {
+                "There are no folders yet".to_string()
+            } else {
+                format!("Existing folders: {}", names.join(", "))
+            };
+            format!("folder `{key}` not found. {have}. create_folder makes a new one.")
         })
-        .map(|e| e.dir.clone())
-        .ok_or_else(|| format!("project `{key}` not found (see list_resources)"))
+}
+
+/// A `parentId`: a folder, or None for the top level.
+fn parent_arg(store: &Store, key: &str) -> Result<Option<Folder>, String> {
+    if key.trim() == TOP_LEVEL {
+        return Ok(None);
+    }
+    find_folder(store, key).map(Some)
 }
 
 fn check_file(host: &mut dyn Host, a: &Args) -> Result<(), String> {
@@ -338,6 +416,10 @@ fn check_file(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     let Some(key) = a.str("fileId").filter(|k| !k.is_empty()) else {
         return Ok(());
     };
+    // The open project wins over a same-named one in another folder.
+    if host.project().is_some_and(|p| p.manifest.name == key) {
+        return Ok(());
+    }
     let open = host
         .project()
         .map(|p| (p.manifest.id.clone(), p.dir.clone()));
@@ -361,26 +443,53 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 
 fn list_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
     let limit = a.num("limit").unwrap_or(50.0).max(1.0) as usize;
+    let parent = a
+        .str("parentId")
+        .filter(|k| !k.is_empty())
+        .map(|k| parent_arg(host.store(), k))
+        .transpose()?;
     let open = host.project().map(|p| p.dir.clone());
-    let list = host.store().list();
+    let mut list = host.store().list();
+    // Folders come first and don't count toward `limit`, so agents always see all of them.
+    let mut items: Vec<Value> = Vec::new();
+    if parent.is_none() {
+        for f in host.store().folders() {
+            let files = list
+                .iter()
+                .filter(|e| e.folder.as_ref().is_some_and(|c| c.id == f.id))
+                .count();
+            items.push(json!({
+                "id": f.id,
+                "type": "folder",
+                "name": f.name,
+                "path": f.dir,
+                "fileCount": files,
+            }));
+        }
+    }
+    if let Some(p) = &parent {
+        list.retain(|e| e.folder.as_ref().map(|f| &f.id) == p.as_ref().map(|f| &f.id));
+    }
     let total = list.len();
-    let items: Vec<Value> = list
-        .into_iter()
-        .take(limit)
-        .map(|e| {
-            let is_open = open.as_ref().is_some_and(|d| same_dir(d, &e.dir));
-            json!({
-                "id": e.manifest.id,
-                "type": "file",
-                "name": e.manifest.name,
-                "path": e.dir,
-                "pages": e.manifest.pages.len(),
-                "updatedAt": e.manifest.modified,
-                "open": is_open,
-                "active": is_open && host.canvas_open(),
-            })
-        })
-        .collect();
+    items.extend(list.into_iter().take(limit).map(|e| {
+        let is_open = open.as_ref().is_some_and(|d| same_dir(d, &e.dir));
+        let mut item = json!({
+            "id": e.manifest.id,
+            "type": "file",
+            "name": e.manifest.name,
+            "location": location(&e),
+            "path": e.dir,
+            "pages": e.manifest.pages.len(),
+            "updatedAt": e.manifest.modified,
+            "open": is_open,
+            "active": is_open && host.canvas_open(),
+        });
+        if let Some(f) = &e.folder {
+            item["parentId"] = json!(f.id);
+            item["folder"] = json!(f.name);
+        }
+        item
+    }));
     let mut v = json!({"items": items, "root": host.store().root});
     if total > limit {
         v["truncated"] = json!(true);
@@ -407,14 +516,135 @@ fn create_file(host: &mut dyn Host, a: &Args) -> ToolResult {
         .str("name")
         .filter(|n| !n.is_empty())
         .unwrap_or("Untitled");
-    let (p, page) = host.store().create(name).map_err(|e| e.to_string())?;
-    text(json!({
+    let folder = match a.str("parentId").filter(|k| !k.is_empty()) {
+        Some(k) => parent_arg(host.store(), k)?,
+        None => None,
+    };
+    let (p, page) = host
+        .store()
+        .create_in(name, folder.as_ref())
+        .map_err(|e| e.to_string())?;
+    let mut v = json!({
         "fileId": p.manifest.id,
         "name": p.manifest.name,
         "path": p.dir,
         "pageId": page.id,
         "next": "call open_file with this fileId to work in it",
+    });
+    if let Some(f) = folder {
+        v["parentId"] = json!(f.id);
+        v["folder"] = json!(f.name);
+    }
+    text(v)
+}
+
+/// Asking for a folder that exists returns it, so "put this in Acme" never makes "Acme 2".
+fn create_folder(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let name = a.str("name").map(str::trim).filter(|n| !n.is_empty());
+    let store = host.store();
+    let existing = name.and_then(|n| {
+        store
+            .folders()
+            .into_iter()
+            .find(|f| f.name.to_lowercase() == n.to_lowercase())
+    });
+    let created = existing.is_none();
+    let f = match existing {
+        Some(f) => f,
+        None => store
+            .create_folder(name.unwrap_or("New Folder"))
+            .map_err(|e| e.to_string())?,
+    };
+    text(json!({
+        "folderId": f.id,
+        "name": f.name,
+        "path": f.dir,
+        "created": created,
     }))
+}
+
+/// Every id is checked before anything moves, so a bad id leaves everything in place.
+fn move_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let target = parent_arg(host.store(), a.req_str("parentId")?)?;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for key in a.strs("resourceIds")? {
+        let dir = find_project(host.store(), &key).map_err(|e| {
+            match find_folder(host.store(), &key) {
+                Ok(f) => format!("`{}` is a folder. Folders can't be nested.", f.name),
+                Err(_) => e,
+            }
+        })?;
+        if !dirs.iter().any(|d| same_dir(d, &dir)) {
+            dirs.push(dir);
+        }
+    }
+    if dirs.is_empty() {
+        return Err("resourceIds is empty".into());
+    }
+    let open = host.project().map(|p| p.dir.clone());
+    let (mut moved, mut unchanged) = (Vec::new(), Vec::new());
+    for dir in dirs {
+        let is_open = open.as_ref().is_some_and(|d| same_dir(d, &dir));
+        let new_dir = host
+            .store()
+            .move_project(&dir, target.as_ref())
+            .map_err(|e| {
+                format!(
+                    "moved {} project(s), then failed on {}: {e}",
+                    moved.len(),
+                    dir.display()
+                )
+            })?;
+        if is_open {
+            host.project_moved(&new_dir)?;
+        }
+        let m = Project::open(&new_dir).map_err(|e| e.to_string())?.manifest;
+        let item = json!({"id": m.id, "name": m.name, "path": new_dir});
+        if new_dir == dir {
+            unchanged.push(item);
+        } else {
+            moved.push(item);
+        }
+    }
+    text(json!({
+        "moved": moved,
+        "unchanged": unchanged,
+        "parentId": target.as_ref().map_or(TOP_LEVEL, |f| f.id.as_str()),
+        "folder": target.as_ref().map(|f| f.name.clone()),
+    }))
+}
+
+fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let key = a.req_str("resourceId")?;
+    let name = a.req_str("name")?;
+    let open = host.project().map(|p| p.dir.clone());
+    let file = find_project(host.store(), key);
+    let folder = find_folder(host.store(), key);
+    match (file, folder) {
+        (Ok(_), Ok(_)) => Err(format!(
+            "`{key}` is both a project and a folder. Pass its id from list_resources."
+        )),
+        (Ok(dir), Err(_)) => {
+            let is_open = open.as_ref().is_some_and(|d| same_dir(d, &dir));
+            let new_dir = host.store().rename(&dir, name).map_err(|e| e.to_string())?;
+            if is_open {
+                host.project_moved(&new_dir)?;
+            }
+            text(json!({"type": "file", "name": name.trim(), "path": new_dir}))
+        }
+        (_, Ok(f)) => {
+            let open_inside = open.filter(|d| d.parent().is_some_and(|p| same_dir(p, &f.dir)));
+            let renamed = host
+                .store()
+                .rename_folder(&f.dir, name)
+                .map_err(|e| e.to_string())?;
+            if let Some(leaf) = open_inside.as_deref().and_then(Path::file_name) {
+                host.project_moved(&renamed.dir.join(leaf))?;
+            }
+            text(json!({"type": "folder", "name": renamed.name, "path": renamed.dir}))
+        }
+        (Err(e), Err(_)) => Err(e),
+    }
 }
 
 fn create_page(ed: &mut Editor, a: &Args) -> ToolResult {
@@ -465,6 +695,9 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
             p.dir.clone(),
         )
     });
+    let folder = project
+        .as_ref()
+        .and_then(|(_, _, dir)| host.store().folder_of(dir));
     let ed = host.editor();
     let page = page_arg(ed, a)?;
     let doc = ed.page_doc(page);
@@ -497,6 +730,8 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
         "fileId": file_id,
         "fileName": file_name,
         "path": path,
+        "parentId": folder.as_ref().map(|f| f.id.clone()),
+        "folder": folder.map(|f| f.name),
         "page": {"id": ed.pages[page].id, "name": ed.pages[page].name, "isActive": page == ed.active_page},
         "pages": pages,
         "nodeCount": doc.nodes.len(),

@@ -471,6 +471,196 @@ fn pages_projects_and_whiteboard_shapes() {
     assert!(err.contains("open_file"), "{err}");
 }
 
+/// `call`, but the error text instead of a panic.
+fn err(h: &mut exec::SessionHost, name: &str, args: Value) -> String {
+    exec::call(h, name, &args).unwrap_err()
+}
+
+fn item<'a>(list: &'a Value, name: &str) -> &'a Value {
+    list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == name)
+        .unwrap_or_else(|| panic!("{name} not in {list}"))
+}
+
+#[test]
+fn agents_see_folders_and_file_projects_into_them() {
+    let mut h = host();
+    // "Put this in the Acme folder", when it doesn't exist yet.
+    let acme = call(&mut h, "create_folder", json!({"name": "Acme"}));
+    assert_eq!(acme["created"], true);
+    let again = call(&mut h, "create_folder", json!({"name": "acme"}));
+    assert_eq!(
+        again["created"], false,
+        "asking twice finds the same folder"
+    );
+    assert_eq!(again["folderId"], acme["folderId"]);
+
+    let made = call(
+        &mut h,
+        "create_file",
+        json!({"name": "Landing page", "parentId": "Acme"}),
+    );
+    assert_eq!(made["folder"], "Acme");
+    let moved = call(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["MCP test"], "parentId": acme["folderId"]}),
+    );
+    assert_eq!(moved["moved"][0]["name"], "MCP test");
+    assert_eq!(moved["unchanged"].as_array().unwrap().len(), 0);
+
+    // Where is everything?
+    let list = call(&mut h, "list_resources", json!({}));
+    assert_eq!(list["items"][0]["type"], "folder", "folders come first");
+    assert_eq!(item(&list, "Acme")["fileCount"], 2);
+    let landing = item(&list, "Landing page");
+    assert_eq!(landing["location"], "Acme/Landing page");
+    assert_eq!(landing["parentId"], acme["folderId"]);
+    let only = call(
+        &mut h,
+        "list_resources",
+        json!({"parentId": "Acme", "limit": 1}),
+    );
+    assert_eq!(only["items"].as_array().unwrap().len(), 1);
+    assert_eq!(only["truncated"], true);
+    let top = call(&mut h, "list_resources", json!({"parentId": "root"}));
+    assert_eq!(top["items"].as_array().unwrap().len(), 0);
+    let limited = call(&mut h, "list_resources", json!({"limit": 1}));
+    assert_eq!(
+        item(&limited, "Acme")["type"],
+        "folder",
+        "limit keeps folders"
+    );
+
+    // A second move is reported as unchanged, and root takes it back out.
+    let same = call(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["Acme/Landing page"], "parentId": "Acme"}),
+    );
+    assert_eq!(same["unchanged"][0]["name"], "Landing page");
+    call(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": [made["fileId"]], "parentId": "root"}),
+    );
+    let list = call(&mut h, "list_resources", json!({}));
+    assert_eq!(item(&list, "Landing page")["location"], "Landing page");
+    assert!(item(&list, "Landing page").get("parentId").is_none());
+}
+
+#[test]
+fn folder_mistakes_tell_the_agent_what_to_do_and_change_nothing() {
+    let mut h = host();
+    call(&mut h, "create_folder", json!({"name": "Acme"}));
+    let e = err(
+        &mut h,
+        "create_file",
+        json!({"name": "X", "parentId": "Acmee"}),
+    );
+    assert!(
+        e.contains("Existing folders: Acme") && e.contains("create_folder"),
+        "{e}"
+    );
+
+    let e = err(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["MCP test", "nope"], "parentId": "Acme"}),
+    );
+    assert!(e.contains("nope"), "{e}");
+    let list = call(&mut h, "list_resources", json!({"parentId": "root"}));
+    assert_eq!(list["items"][0]["name"], "MCP test", "nothing moved");
+
+    let e = err(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["Acme"], "parentId": "root"}),
+    );
+    assert!(e.contains("can't be nested"), "{e}");
+}
+
+#[test]
+fn same_named_projects_need_a_location() {
+    let mut h = host();
+    call(&mut h, "create_folder", json!({"name": "Acme"}));
+    call(&mut h, "create_folder", json!({"name": "Globex"}));
+    let a = call(
+        &mut h,
+        "create_file",
+        json!({"name": "Plan", "parentId": "Acme"}),
+    );
+    call(
+        &mut h,
+        "create_file",
+        json!({"name": "Plan", "parentId": "Globex"}),
+    );
+
+    let e = err(&mut h, "open_file", json!({"fileId": "Plan"}));
+    assert!(e.contains("Acme/Plan") && e.contains("Globex/Plan"), "{e}");
+    let info = call(&mut h, "open_file", json!({"fileId": "acme/plan"}));
+    assert_eq!(info["fileId"], a["fileId"]);
+    assert_eq!(info["folder"], "Acme");
+    // The open project answers to its plain name, whichever else shares it.
+    let e = exec::call(&mut h, "get_basic_info", &json!({"fileId": "Plan"}));
+    assert!(e.is_ok());
+}
+
+#[test]
+fn the_open_project_keeps_saving_after_it_moves_or_is_renamed() {
+    let mut h = host();
+    let page = call(&mut h, "get_basic_info", json!({}))["page"]["id"].clone();
+    let old = h.session.project.as_ref().unwrap().dir.clone();
+    let root = h.session.store.root.clone();
+
+    call(&mut h, "create_folder", json!({"name": "Acme"}));
+    call(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["MCP test"], "parentId": "Acme"}),
+    );
+    let in_acme = root.join("Acme").join("MCP test");
+    assert_eq!(h.session.project.as_ref().unwrap().dir, in_acme);
+
+    let renamed = call(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "Acme", "name": "Acme Corp"}),
+    );
+    assert_eq!(renamed["type"], "folder");
+    let in_corp = root.join("Acme Corp").join("MCP test");
+    assert_eq!(h.session.project.as_ref().unwrap().dir, in_corp);
+
+    let renamed = call(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "MCP test", "name": "Board"}),
+    );
+    assert_eq!(renamed["type"], "file");
+    let dir = root.join("Acme Corp").join("Board");
+    assert_eq!(h.session.project_name(), "Board");
+
+    // An edit made after all that lands in the new place, and no old path comes back.
+    let art = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "A", "styles": {"width": 100, "height": 100}, "pageId": page}),
+    );
+    assert!(
+        art.get("id").is_some() || art.get("nodeId").is_some(),
+        "{art}"
+    );
+    call(&mut h, "finish_working_on_nodes", json!({}));
+    assert!(!old.exists() && !in_acme.exists() && !in_corp.exists());
+    let info = call(&mut h, "open_file", json!({"fileId": "Acme Corp/Board"}));
+    assert_eq!(info["pages"][0]["nodeCount"], 1);
+    let manifest = std::fs::read_to_string(dir.join("project.json")).unwrap();
+    assert!(manifest.contains("\"Board\""), "{manifest}");
+}
+
 #[test]
 fn errors_are_reported_not_panics() {
     let mut h = host();
