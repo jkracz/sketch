@@ -142,9 +142,12 @@ fn http_get(url: &str) -> Result<Vec<u8>, String> {
 
 type Fetch = fn(&str) -> Result<Vec<u8>, String>;
 
-/// The font at `path`, downloading it through the CSS API when the cache doesn't have it.
+/// The font at `path`, downloading it through the CSS API when the cache doesn't have a usable
+/// copy. The download replaces a damaged file.
 fn cached_font(path: &Path, css_url: &str, fetch: Fetch) -> Result<Vec<u8>, String> {
-    if let Ok(bytes) = std::fs::read(path) {
+    if let Ok(bytes) = std::fs::read(path)
+        && ttf_parser::Face::parse(&bytes, 0).is_ok()
+    {
         return Ok(bytes);
     }
     let css = fetch(css_url)?;
@@ -565,6 +568,27 @@ mod tests {
         again.request(cached);
         assert!(has("Fixture Download", 500, false));
         assert!(again.shared.lock().unwrap().font_jobs.is_empty());
+        std::fs::remove_dir_all(&s.dir).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_cache_file_is_downloaded_again() {
+        let s = service(fixture_fetch);
+        let wanted = style("Fixture Damaged");
+        std::fs::create_dir_all(s.preview_path("AB").parent().unwrap()).unwrap();
+        std::fs::write(s.font_path(wanted), b"truncated").unwrap();
+        std::fs::write(s.preview_path("AB"), b"truncated").unwrap();
+
+        s.request(wanted);
+        run_all(&s);
+        assert!(has("Fixture Damaged", 400, false));
+        assert!(s.shared.lock().unwrap().fonts.is_empty());
+        assert_eq!(std::fs::read(s.font_path(wanted)).unwrap(), FIXTURE);
+
+        assert_eq!(s.take_preview("AB"), None);
+        run_all(&s);
+        assert!(s.take_preview("AB").is_some());
+        assert_eq!(std::fs::read(s.preview_path("AB")).unwrap(), FIXTURE);
         std::fs::remove_dir_all(&s.dir).unwrap();
     }
 
