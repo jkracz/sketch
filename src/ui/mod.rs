@@ -1,6 +1,7 @@
 //! egui chrome: menu bar, layers panel, design (properties) panel, floating toolbar, and the
 //! projects home screen.
 
+pub mod fonts;
 pub mod home;
 pub mod inspector;
 pub mod library;

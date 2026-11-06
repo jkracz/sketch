@@ -935,6 +935,8 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
             );
         }
     });
+    super::fonts::font_picker(ui, ed, ids);
+    super::fonts::weight_menu(ui, ed);
     let cs = ed.current_char_style();
     ui.horizontal(|ui| {
         let size = cs.map_or(*font_size, |c| c.size);

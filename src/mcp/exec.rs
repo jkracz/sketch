@@ -252,6 +252,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
         "open_file" => open_file(host, &a),
         "create_file" => create_file(host, &a),
         "get_font_family_info" => font_info(&a),
+        "search_fonts" => search_fonts(&a),
         "get_guide" => guide(&a),
         _ => {
             check_file(host, &a)?;
@@ -1000,29 +1001,64 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
 }
 
 fn font_info(a: &Args) -> ToolResult {
+    let style = |weight: u16, italic: bool| json!({"weight": weight, "style": if italic { "italic" } else { "normal" }});
     let fams: Vec<Value> = a
         .strs("familyNames")?
         .iter()
         .map(|f| {
-            let styles: Vec<Value> = crate::fonts::styles(f)
-                .into_iter()
-                .map(|(weight, italic)| {
-                    json!({"weight": weight, "style": if italic { "italic" } else { "normal" }})
-                })
-                .collect();
+            let loaded = crate::fonts::styles(f);
+            let styles: Vec<Value> = match crate::fonts::google::find(f) {
+                Some(g) => (g.weights.iter().map(|w| style(*w, false)))
+                    .chain(g.italics.iter().map(|w| style(*w, true)))
+                    .collect(),
+                None => loaded.iter().map(|(w, i)| style(*w, *i)).collect(),
+            };
+            let note = match (styles.is_empty(), loaded.is_empty()) {
+                (true, _) => "not available; text keeps this family and renders in Inter",
+                (false, true) => "downloads from Google Fonts the first time text uses it",
+                (false, false) => "",
+            };
             json!({
                 "family": f,
                 "available": !styles.is_empty(),
-                "note": if styles.is_empty() {
-                    "not loaded; text keeps this family and renders in Inter"
-                } else {
-                    ""
-                },
+                "loaded": !loaded.is_empty(),
+                "note": note,
                 "styles": styles,
             })
         })
         .collect();
-    text(json!({"families": fams, "weights": "fontWeight renders with the nearest loaded weight"}))
+    text(
+        json!({"families": fams, "weights": "fontWeight renders with the nearest available weight"}),
+    )
+}
+
+fn search_fonts(a: &Args) -> ToolResult {
+    let category = a.str("category").unwrap_or("");
+    if !category.is_empty() && !tools::FONT_CATEGORIES.contains(&category) {
+        return Err(format!(
+            "unknown category \"{category}\"; use one of {}",
+            tools::FONT_CATEGORIES.join(", ")
+        ));
+    }
+    let limit = a
+        .num("limit")
+        .unwrap_or(20.0)
+        .clamp(1.0, tools::MAX_FONT_RESULTS as f64) as usize;
+    let found = crate::fonts::google::search(a.str("query").unwrap_or(""), category);
+    let families: Vec<Value> = found
+        .iter()
+        .take(limit)
+        .map(|f| {
+            json!({
+                "family": f.family,
+                "category": f.category,
+                "weights": f.weights,
+                "italics": f.italics,
+                "loaded": !crate::fonts::styles(&f.family).is_empty(),
+            })
+        })
+        .collect();
+    text(json!({"total": found.len(), "families": families}))
 }
 
 fn guide(a: &Args) -> ToolResult {

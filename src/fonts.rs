@@ -7,12 +7,22 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
+
+pub mod google;
 
 /// Index of a loaded face. The bundled faces come first, in `BUNDLED` order.
 pub type FaceId = u16;
 
 const INTER: &str = "Inter";
+
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Changes whenever a face is added, so anything measured or drawn with fallback faces can redo it.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
 
 /// Bytes, weight and italic of each bundled face.
 static BUNDLED: [(&[u8], u16, bool); 6] = [
@@ -125,8 +135,22 @@ pub fn register(family: &str, weight: u16, italic: bool, bytes: Vec<u8>) -> Resu
         .map(|s| s.id);
     match known {
         Some(id) => Ok(id),
-        None => r.add(family, weight, italic, Box::leak(bytes.into_boxed_slice())),
+        None => {
+            let id = r.add(family, weight, italic, Box::leak(bytes.into_boxed_slice()))?;
+            GENERATION.fetch_add(1, Ordering::Relaxed);
+            Ok(id)
+        }
     }
+}
+
+/// Whether exactly this style is loaded.
+pub fn has(family: &str, weight: u16, italic: bool) -> bool {
+    let r = registry().read().unwrap();
+    r.families.get(&family_key(family)).is_some_and(|styles| {
+        styles
+            .iter()
+            .any(|s| s.weight == weight && s.italic == italic)
+    })
 }
 
 /// The weights and slants loaded for `family`, lightest first (empty when it isn't loaded).
@@ -187,8 +211,11 @@ mod tests {
     #[test]
     fn registered_faces_resolve_by_family_and_weight() {
         let light = register("Fixture Sans", 300, false, FIXTURE.to_vec()).unwrap();
+        let before = generation();
         let black = register("Fixture Sans", 900, false, FIXTURE.to_vec()).unwrap();
         assert_ne!(light, black);
+        assert!(generation() > before);
+        assert!(has("fixture sans", 900, false) && !has("Fixture Sans", 500, false));
         assert_eq!(resolve(Some("fixture sans"), 200, false), light);
         assert_eq!(resolve(Some(" Fixture Sans "), 800, false), black);
         assert_eq!(resolve(Some("Fixture Sans"), 300, true), light);

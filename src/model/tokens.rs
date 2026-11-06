@@ -729,6 +729,7 @@ pub enum TokenProp {
     Stroke,
     Radius,
     Opacity,
+    FontFamily,
     FontSize,
     FontWeight,
     LineHeight,
@@ -739,11 +740,12 @@ pub enum TokenProp {
 }
 
 impl TokenProp {
-    pub const ALL: [TokenProp; 10] = [
+    pub const ALL: [TokenProp; 11] = [
         TokenProp::Fill,
         TokenProp::Stroke,
         TokenProp::Radius,
         TokenProp::Opacity,
+        TokenProp::FontFamily,
         TokenProp::FontSize,
         TokenProp::FontWeight,
         TokenProp::LineHeight,
@@ -758,6 +760,7 @@ impl TokenProp {
             TokenProp::Fill | TokenProp::Stroke => TokenKind::Color,
             TokenProp::Radius => TokenKind::Radius,
             TokenProp::Opacity => TokenKind::Opacity,
+            TokenProp::FontFamily => TokenKind::FontFamily,
             TokenProp::FontSize => TokenKind::FontSize,
             TokenProp::FontWeight => TokenKind::FontWeight,
             TokenProp::LineHeight => TokenKind::LineHeight,
@@ -773,6 +776,7 @@ impl TokenProp {
             TokenProp::Stroke => "stroke",
             TokenProp::Radius => "radius",
             TokenProp::Opacity => "opacity",
+            TokenProp::FontFamily => "font",
             TokenProp::FontSize => "font size",
             TokenProp::FontWeight => "bold",
             TokenProp::LineHeight => "line height",
@@ -789,6 +793,7 @@ impl TokenProp {
             TokenProp::Stroke => "borderColor",
             TokenProp::Radius => "borderRadius",
             TokenProp::Opacity => "opacity",
+            TokenProp::FontFamily => "fontFamily",
             TokenProp::FontSize => "fontSize",
             TokenProp::FontWeight => "fontWeight",
             TokenProp::LineHeight => "lineHeight",
@@ -810,6 +815,7 @@ impl TokenProp {
             "borderColor" | "stroke" => TokenProp::Stroke,
             "borderRadius" => TokenProp::Radius,
             "opacity" => TokenProp::Opacity,
+            "fontFamily" if text => TokenProp::FontFamily,
             "fontSize" if text => TokenProp::FontSize,
             "fontWeight" if text => TokenProp::FontWeight,
             "lineHeight" if text => TokenProp::LineHeight,
@@ -826,7 +832,10 @@ impl TokenProp {
         match self {
             TokenProp::Fill | TokenProp::Stroke | TokenProp::Radius | TokenProp::Opacity => true,
             TokenProp::FontSize => n.kind.font_size().is_some(),
-            TokenProp::FontWeight | TokenProp::LineHeight | TokenProp::LetterSpacing => is_text,
+            TokenProp::FontFamily
+            | TokenProp::FontWeight
+            | TokenProp::LineHeight
+            | TokenProp::LetterSpacing => is_text,
             TokenProp::Gap | TokenProp::Padding => n.layout.is_some(),
         }
     }
@@ -838,6 +847,9 @@ impl TokenProp {
             (TokenProp::Stroke, TokenValue::Color(c)) => n.style.stroke == Some(*c),
             (TokenProp::Radius, TokenValue::Number(r)) => n.style.corner_radii() == [*r; 4],
             (TokenProp::Opacity, TokenValue::Number(o)) => n.style.opacity == *o,
+            (TokenProp::FontFamily, TokenValue::Text(f)) => {
+                n.text_style.family.as_deref().unwrap_or("Inter") == f
+            }
             (TokenProp::FontSize, TokenValue::Number(s)) => n.kind.font_size() == Some(*s),
             (TokenProp::FontWeight, TokenValue::Number(w)) => {
                 n.text_style.base_weight() == *w as u16
@@ -865,6 +877,7 @@ impl TokenProp {
                 n.style.radii = None;
             }
             (TokenProp::Opacity, TokenValue::Number(o)) => n.style.opacity = *o,
+            (TokenProp::FontFamily, TokenValue::Text(f)) => n.text_style.family = Some(f.clone()),
             (TokenProp::FontSize, TokenValue::Number(s)) => {
                 if let NodeKind::Text { font_size, .. } | NodeKind::Sticky { font_size, .. } =
                     &mut n.kind
@@ -893,6 +906,30 @@ impl TokenProp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_family_tokens_set_the_family() {
+        let mut n = Node::new(
+            crate::model::NodeId(1),
+            NodeKind::Text {
+                text: "Hi".into(),
+                font_size: 16.0,
+                auto_width: true,
+                align: Default::default(),
+            },
+            crate::geom::Rect::new(0.0, 0.0, 10.0, 10.0),
+        );
+        assert_eq!(
+            TokenProp::from_css_key("fontFamily", &n),
+            Some(TokenProp::FontFamily)
+        );
+        let inter = TokenValue::Text("Inter".into());
+        let lora = TokenValue::Text("Lora".into());
+        assert!(TokenProp::FontFamily.holds(&n, &inter));
+        TokenProp::FontFamily.write(&mut n, &lora);
+        assert_eq!(n.text_style.family.as_deref(), Some("Lora"));
+        assert!(TokenProp::FontFamily.holds(&n, &lora));
+    }
 
     #[test]
     fn font_weight_tokens_keep_the_exact_weight() {

@@ -157,7 +157,7 @@ written for Paper work here too.
 | Group | Tools |
 |---|---|
 | Projects & pages | `list_resources`, `open_file`, `create_file`, `create_page`, `rename_pages` |
-| Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `get_guide` |
+| Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `search_fonts`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
 | Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens` |
@@ -327,10 +327,12 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 * **Pen pressure.** winit 0.30 does not expose tablet pressure for pen events that arrive as
   mouse input, which is common with macOS and Wacom tablets. Pressure comes from touch/pen
   `force` when the platform reports it. Otherwise it is simulated from stroke velocity.
-* **Text** defaults to bundled Inter, and has no shaping, so there are no ligatures, kerning,
-  complex scripts or RTL. Layers store any font family, but only Inter renders until font
-  download lands, and there is no font picker yet. IME preedit is not displayed (committed
-  text works).
+* **Text** defaults to bundled Inter. Google Fonts download on first use into the system cache
+  folder, and text shows Inter until the font arrives. Sketch sends Google the font name and your
+  IP address whenever text needs a font that isn't cached, whether it comes from the font list,
+  an opened document or MCP. Scrolling the font list does the same for each row without a cached
+  preview. There is no shaping, so no ligatures, kerning, complex scripts or RTL, and color fonts
+  are left out. IME preedit is not displayed (committed text works).
 * **No rotation.** Nodes are axis-aligned boxes; rotated imports are baked into paths.
 * **Undo granularity.** Document renames from the Design panel are not undoable, and the
   selection is not part of history.

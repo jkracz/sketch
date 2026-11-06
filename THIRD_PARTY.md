@@ -20,14 +20,16 @@ Each ported module starts with a comment naming its source.
 ## Fonts
 
 `assets/fonts/google-fonts.json` lists family names, categories and styles from the Google Fonts
-Developer API, written by `scripts/update-google-fonts.py`. It holds no font data.
+Developer API, written by `scripts/update-google-fonts.py`. It holds no font data. The app
+downloads Google Fonts on request and keeps them in a cache folder. Each font stays under its
+own license, mostly the SIL OFL, and none of them ship with Sketch.
 `tests/fixtures/fonts/inter-ab.ttf` is a subset of Inter (SIL OFL 1.1) from Google Fonts, used
 only by tests.
 
 ## Dependencies
 
 Rust crates are pulled from crates.io under their own licenses (see `Cargo.lock`); notable ones
-are wgpu, winit, egui, lyon, ttf-parser, image, i_overlay (MIT), serde and rfd.
+are wgpu, winit, egui, lyon, ttf-parser, ab_glyph, ureq, image, i_overlay (MIT), serde and rfd.
 
 The macOS release embeds [Sparkle](https://sparkle-project.org) 2.10.0, unmodified, to install
 updates. Sparkle is MIT-licensed, copyright 2006-2013 Andy Matuschak and others, and bundles code

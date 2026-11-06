@@ -524,19 +524,19 @@ fn matches_search(search: &str, name: &str, value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::geom::Rect;
     use crate::model::{Color, Node, NodeKind};
 
     /// Runs a widget for real: each `step` is the input of one frame.
-    struct Harness {
-        ctx: egui::Context,
-        ed: Editor,
+    pub(in crate::ui) struct Harness {
+        pub(in crate::ui) ctx: egui::Context,
+        pub(in crate::ui) ed: Editor,
         st: UiState,
     }
 
-    fn key(key: egui::Key) -> egui::Event {
+    pub(in crate::ui) fn key(key: egui::Key) -> egui::Event {
         egui::Event::Key {
             key,
             physical_key: None,
@@ -546,11 +546,11 @@ mod tests {
         }
     }
 
-    fn typed(s: &str) -> egui::Event {
+    pub(in crate::ui) fn typed(s: &str) -> egui::Event {
         egui::Event::Text(s.into())
     }
 
-    fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
+    pub(in crate::ui) fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -560,7 +560,7 @@ mod tests {
     }
 
     impl Harness {
-        fn new() -> Harness {
+        pub(in crate::ui) fn new() -> Harness {
             Harness {
                 ctx: egui::Context::default(),
                 ed: Editor::default(),
@@ -568,7 +568,7 @@ mod tests {
             }
         }
 
-        fn step(
+        pub(in crate::ui) fn step(
             &mut self,
             events: Vec<egui::Event>,
             f: &mut dyn FnMut(&mut Ui, &mut Editor, &mut UiState),

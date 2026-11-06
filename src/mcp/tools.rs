@@ -19,7 +19,8 @@ switching the user's view. Node ids are opaque strings; never show them to the u
 - Build UI with create_artboard, then write_html into it, one visual group per call (a header, \
 a row, a card) so the user sees progress. Inline styles only; flexbox (display:flex, gap, \
 padding, align-items, justify-content) is the layout model; no margin, grid or tables.
-- Text defaults to Inter. Use px for font sizes. Check fonts with get_font_family_info.
+- Text defaults to Inter. Use px for font sizes. Find Google Fonts with search_fonts, by name \
+or category, then set font-family and font-weight.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
 delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
 update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
@@ -61,13 +62,22 @@ fn styles_schema(desc: &str) -> Value {
     })
 }
 
+pub const FONT_CATEGORIES: [&str; 5] =
+    ["sans-serif", "serif", "display", "handwriting", "monospace"];
+pub const MAX_FONT_RESULTS: usize = 100;
+
 fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
     let mut props = props;
     if let Some(m) = props.as_object_mut()
         && !m.contains_key("fileId")
         && !matches!(
             name,
-            "list_resources" | "create_file" | "get_font_family_info" | "get_guide" | "open_file"
+            "list_resources"
+                | "create_file"
+                | "get_font_family_info"
+                | "search_fonts"
+                | "get_guide"
+                | "open_file"
         )
     {
         m.insert("fileId".into(), file_id());
@@ -247,10 +257,32 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "get_font_family_info",
-            "Whether font families are loaded and their weights/styles. Inter is bundled (400 to \
-             700). Text keeps any other family and renders in Inter until that font is loaded.",
+            "Whether font families are available and their weights/styles. Inter is bundled and \
+             any Google Fonts family downloads the first time text uses it, showing Inter until \
+             it arrives. Other families stay in the document and render in Inter.",
             json!({"familyNames": {"type": "array", "items": {"type": "string"}}}),
             &["familyNames"],
+            true,
+        ),
+        tool(
+            "search_fonts",
+            "Find Google Fonts families to use as font-family, most popular first. Returns each \
+             family's weights and italics, whether it's loaded, and how many families match. \
+             Families download the first time text uses them.",
+            json!({
+                "query": {"type": "string", "description": "Part of a family name. Omit to browse."},
+                "category": {
+                    "type": "string",
+                    "enum": FONT_CATEGORIES,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_FONT_RESULTS,
+                    "description": "Most families to return. Defaults to 20.",
+                },
+            }),
+            &[],
             true,
         ),
         tool(
@@ -326,7 +358,8 @@ pub fn definitions() -> Vec<Value> {
              grid or tables.\n\
              - Text: font-family, font-size, font-weight (1 to 1000), font-style, color, \
              line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/\
-             <span style> make rich text. A family that isn't loaded renders in Inter.\n\
+             <span style> make rich text. Google Fonts families download on first use and show \
+             Inter until they arrive.\n\
              - Boxes: background(-color/-image: colors, linear/radial gradients, url()), border, \
              border-radius, opacity, overflow:hidden, mix-blend-mode, width/height (px, %, \
              fit-content).\n\

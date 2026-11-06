@@ -59,6 +59,8 @@ pub enum UserEvent {
     Menu(muda::MenuId),
     /// MCP tool calls are waiting in `App::mcp`.
     Mcp,
+    /// A font or a font picker preview finished downloading.
+    Fonts,
 }
 
 /// What to show at startup.
@@ -629,6 +631,7 @@ impl App {
     fn redraw(&mut self) {
         let now = self.now();
         self.ed.tick(now);
+        self.ed.sync_fonts();
         let Some(g) = self.gfx.as_mut() else { return };
         let input = g.egui.take_egui_input(&g.window);
         let appearance = self.st.appearance;
@@ -1239,6 +1242,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Mcp => self.run_mcp_calls(),
+            UserEvent::Fonts => {
+                if let Some(g) = &self.gfx {
+                    g.window.request_redraw();
+                }
+            }
         }
     }
 
@@ -1469,6 +1477,13 @@ pub fn run(start: Start) -> Result<(), String> {
             let _ = proxy.send_event(UserEvent::Menu(e.id));
         }));
     }
+    let font_cache = dirs::cache_dir()
+        .map_or_else(|| store.root.join("cache"), |d| d.join("sketch-rs"))
+        .join("fonts");
+    let proxy = event_loop.create_proxy();
+    crate::fonts::google::start(font_cache, move || {
+        let _ = proxy.send_event(UserEvent::Fonts);
+    });
     let mut app = App::new(start, store);
     app.mcp = start_mcp(event_loop.create_proxy());
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
