@@ -11,7 +11,8 @@ use sketch_rs::geom::{Rect, V2, v2};
 use sketch_rs::io::{file, png, svg};
 use sketch_rs::model::{Color, Node, NodeId, NodeKind};
 use sketch_rs::render::frame;
-use sketch_rs::render::scene::{self, ACCENT, CANVAS_BG, GUIDE};
+use sketch_rs::render::scene::{ACCENT, CanvasStyle, GUIDE};
+use sketch_rs::settings::Appearance;
 use sketch_rs::ui::UiState;
 
 #[test]
@@ -36,8 +37,8 @@ fn m1_infinite_canvas_pan_and_zoom() {
     a.save(shot("m1_canvas.png")).unwrap();
     assert!(close(px(&a, v2(160.0, 140.0)), ACCENT, 2));
     assert!(
-        close(px(&a, v2(400.0, 400.0)), CANVAS_BG, 2)
-            || close(px(&a, v2(400.0, 400.0)), scene::GRID_DOT, 4)
+        close(px(&a, v2(400.0, 400.0)), CanvasStyle::LIGHT.background, 2)
+            || close(px(&a, v2(400.0, 400.0)), CanvasStyle::LIGHT.grid_dot, 4)
     );
 
     // Pan with the wheel, then zoom 3x about a cursor point using Ctrl+wheel.
@@ -320,8 +321,8 @@ fn m3_shapes_frames_and_text() {
         "overflow rect drawn inside the frame"
     );
     assert!(
-        close(px(&img, v2(600.0, 440.0)), CANVAS_BG, 4)
-            || close(px(&img, v2(600.0, 440.0)), scene::GRID_DOT, 4),
+        close(px(&img, v2(600.0, 440.0)), CanvasStyle::LIGHT.background, 4)
+            || close(px(&img, v2(600.0, 440.0)), CanvasStyle::LIGHT.grid_dot, 4),
         "clipped by frame"
     );
     assert!(
@@ -565,7 +566,7 @@ fn app_full_ui_screenshot() {
     );
     let bg = img.get_pixel(1300, 1600).0;
     assert!(
-        close(bg, CANVAS_BG, 3) || close(bg, scene::GRID_DOT, 4),
+        close(bg, CanvasStyle::LIGHT.background, 3) || close(bg, CanvasStyle::LIGHT.grid_dot, 4),
         "canvas background {bg:?}"
     );
 }
@@ -612,7 +613,7 @@ fn m6_svg_export_matches_gpu_render() {
 fn skipped_first_frame_keeps_egui_textures_in_sync() {
     let Some(g) = gpu() else { return };
     let ctx = egui::Context::default();
-    sketch_rs::ui::setup_style(&ctx);
+    sketch_rs::ui::setup_style(&ctx, Default::default());
     let mut e = demo::showcase();
     let mut st = UiState::default();
     let (pts, ppp) = ([800.0f32, 600.0f32], 2.0f32);
@@ -654,4 +655,44 @@ fn skipped_first_frame_keeps_egui_textures_in_sync() {
         });
         painter.paint(&g.device, &g.queue, &view, size, &ctx, l, &e, true);
     }
+}
+
+/// Dark appearance: the canvas, grid and chrome all switch, and new ink stays visible.
+#[test]
+fn dark_appearance_renders_dark_canvas_and_chrome() {
+    let Some(g) = gpu() else { return };
+    let mut e = demo::showcase();
+    let mut st = UiState {
+        appearance: Appearance::Dark,
+        show_grid_off: true,
+        ..UiState::default()
+    };
+    let img = frame::capture(g, &mut e, &mut st, [1280.0, 760.0], 2.0, |e| {
+        e.zoom_to_fit()
+    });
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".artifacts/dark-mode");
+    std::fs::create_dir_all(&dir).unwrap();
+    img.save(dir.join("dark_editor.png")).unwrap();
+
+    assert!(e.canvas_dark);
+    let canvas = CanvasStyle::DARK.background;
+    let on_canvas = img.pixels().filter(|p| close(p.0, canvas, 1)).count();
+    assert!(
+        on_canvas > 100_000,
+        "dark canvas drawn ({on_canvas} px match)"
+    );
+    let panel = Color::rgb(0x2a, 0x2a, 0x2a);
+    let on_panel = img.pixels().filter(|p| close(p.0, panel, 0)).count();
+    assert!(on_panel > 50_000, "dark panels drawn ({on_panel} px match)");
+
+    // The default appearance is unchanged in headless rendering, which has no system theme.
+    let mut light = UiState::default();
+    let img = frame::capture(g, &mut e, &mut light, [1280.0, 760.0], 2.0, |e| {
+        e.zoom_to_fit()
+    });
+    assert!(!e.canvas_dark);
+    assert!(
+        !img.pixels().any(|p| close(p.0, canvas, 0)),
+        "no dark canvas pixels in light"
+    );
 }

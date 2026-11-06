@@ -611,3 +611,53 @@ fn wrap_in_frame_groups_siblings() {
     assert_eq!(rect_of(&e, f), Rect::new(100.0, 100.0, 350.0, 250.0));
     assert_eq!(rect_of(&e, b).min(), v2(400.0, 300.0));
 }
+
+#[test]
+fn new_ink_stays_visible_on_the_dark_canvas() {
+    let mut e = ed();
+    e.canvas_dark = true;
+
+    e.tool = Tool::Text;
+    down(&mut e, 50.0, 50.0, 0.0);
+    up(&mut e, 50.0, 50.0, 1.0);
+    let text = e.selection[0];
+    assert_eq!(e.doc.get(text).unwrap().style.fill(), Some(Color::WHITE));
+    e.end_text_edit();
+
+    e.tool = Tool::Line;
+    drag(&mut e, (100.0, 100.0), (200.0, 100.0), 10.0);
+    let line = e.selection[0];
+    assert_eq!(e.doc.get(line).unwrap().style.stroke, Some(Color::WHITE));
+
+    e.tool = Tool::Pencil;
+    drag(&mut e, (100.0, 200.0), (200.0, 240.0), 20.0);
+    let stroke = *e.doc.root.last().unwrap();
+    assert_eq!(e.doc.get(stroke).unwrap().style.fill(), Some(Color::WHITE));
+}
+
+#[test]
+fn ink_keeps_its_colour_on_the_light_canvas_and_on_white_frames() {
+    let mut e = ed();
+    e.tool = Tool::Line;
+    drag(&mut e, (100.0, 100.0), (200.0, 100.0), 0.0);
+    let line = e.selection[0];
+    assert_eq!(e.doc.get(line).unwrap().style.stroke, Some(Color::INK));
+
+    // A white frame on the dark canvas: black ink reads fine, so it stays.
+    e.canvas_dark = true;
+    e.tool = Tool::Frame;
+    drag(&mut e, (300.0, 300.0), (500.0, 500.0), 10.0);
+    assert_eq!(e.ink_at(Color::INK, v2(400.0, 400.0)), Color::INK);
+    assert_eq!(e.ink_at(Color::INK, v2(20.0, 20.0)), Color::WHITE);
+}
+
+#[test]
+fn appearance_action_reaches_the_chrome() {
+    use crate::settings::Appearance;
+    let mut e = ed();
+    e.run(shortcuts::Action::SetAppearance(Appearance::Dark));
+    assert_eq!(
+        e.ui_events,
+        vec![commands::UiEvent::SetAppearance(Appearance::Dark)]
+    );
+}

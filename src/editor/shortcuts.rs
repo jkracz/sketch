@@ -59,6 +59,7 @@ pub enum Action {
     ToggleUi,
     ToggleHelp,
     ToggleGrid,
+    SetAppearance(crate::settings::Appearance),
     SelectNext,
     SelectPrev,
     SelectParent,
@@ -419,6 +420,7 @@ pub fn category(a: Action) -> &'static str {
         | A::ZoomSelection
         | A::ToggleSnapping
         | A::ToggleGrid
+        | A::SetAppearance(_)
         | A::ToggleUi
         | A::ToggleHelp
         | A::NextPage
@@ -603,6 +605,14 @@ pub fn menus() -> Vec<(&'static str, Vec<MenuEntry>)> {
                 I("Dot Grid", A::ToggleGrid),
                 I("Show/Hide UI", A::ToggleUi),
                 I("Keyboard Shortcuts", A::ToggleHelp),
+                S,
+                Sub(
+                    "Appearance",
+                    crate::settings::Appearance::ALL
+                        .iter()
+                        .map(|a| I(a.label(), A::SetAppearance(*a)))
+                        .collect(),
+                ),
             ],
         ),
         (
@@ -654,7 +664,10 @@ mod tests {
                             // Delete is bound to the Delete key; everything should be reachable.
                             assert!(
                                 super::chord_of(*a).is_some()
-                                    || matches!(a, super::Action::ExportSvg),
+                                    || matches!(
+                                        a,
+                                        super::Action::ExportSvg | super::Action::SetAppearance(_)
+                                    ),
                                 "{label} has no shortcut"
                             );
                         }

@@ -12,13 +12,36 @@ use lyon::tessellation::{FillRule, LineCap};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub const CANVAS_BG: Color = Color::rgb(0xee, 0xee, 0xf0);
-pub const GRID_DOT: Color = Color::rgb(0xcf, 0xcf, 0xd6);
 pub const ACCENT: Color = Color::rgb(0x2f, 0x6f, 0xf3);
 pub const GUIDE: Color = Color::rgb(0xf2, 0x2f, 0x7a);
 
 pub fn rgba(c: Color) -> [f32; 4] {
     c.to_f32(1.0)
+}
+
+/// Canvas colours for one appearance. Selection and guides keep their colours in both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasStyle {
+    pub background: Color,
+    pub grid_dot: Color,
+    pub frame_label: [f32; 4],
+}
+
+impl CanvasStyle {
+    pub const LIGHT: CanvasStyle = CanvasStyle {
+        background: Color::rgb(0xee, 0xee, 0xf0),
+        grid_dot: Color::rgb(0xcf, 0xcf, 0xd6),
+        frame_label: [0.42, 0.42, 0.46, 1.0],
+    };
+    pub const DARK: CanvasStyle = CanvasStyle {
+        background: Color::rgb(0x28, 0x28, 0x28),
+        grid_dot: Color::rgb(0x44, 0x44, 0x44),
+        frame_label: [1.0, 1.0, 1.0, 0.65],
+    };
+
+    pub fn of(dark: bool) -> CanvasStyle {
+        if dark { Self::DARK } else { Self::LIGHT }
+    }
 }
 
 /// What to draw and where.
@@ -49,7 +72,7 @@ impl View<'_> {
 }
 
 /// Dot grid whose spacing adapts to the zoom so it never gets too dense or sparse.
-pub fn grid(mb: &mut MeshBuilder, v: &View) {
+pub fn grid(mb: &mut MeshBuilder, v: &View, color: Color) {
     let z = v.camera.zoom;
     let mut spacing = 20.0;
     while spacing * z < 14.0 {
@@ -63,7 +86,7 @@ pub fn grid(mb: &mut MeshBuilder, v: &View) {
     let y0 = (vis.y / spacing).floor() as i64;
     let x1 = (vis.right() / spacing).ceil() as i64;
     let y1 = (vis.bottom() / spacing).ceil() as i64;
-    let color = rgba(GRID_DOT);
+    let color = rgba(color);
     let r = 0.9;
     for yi in y0..=y1 {
         for xi in x0..=x1 {
@@ -293,6 +316,7 @@ pub fn overlay(mb: &mut MeshBuilder, ed: &Editor, offset: V2) {
         offset,
     };
     let accent = rgba(ACCENT);
+    let frame_label = CanvasStyle::of(ed.canvas_dark).frame_label;
     let z = ed.camera.zoom;
     mb.set_clip(Some(v.canvas_rect()));
 
@@ -300,11 +324,7 @@ pub fn overlay(mb: &mut MeshBuilder, ed: &Editor, offset: V2) {
     for (id, r) in ed.frame_labels() {
         let n = ed.doc.get(id).unwrap();
         let selected = ed.selection.contains(&id);
-        let color = if selected {
-            accent
-        } else {
-            [0.42, 0.42, 0.46, 1.0]
-        };
+        let color = if selected { accent } else { frame_label };
         let r = r.translate(offset);
         let mut name = n.name.clone();
         let max_w = r.w;
@@ -593,11 +613,12 @@ pub fn canvas(ed: &Editor, cache: &mut SceneCache, offset: V2, show_grid: bool) 
         viewport: ed.viewport,
         offset,
     };
+    let style = CanvasStyle::of(ed.canvas_dark);
     let mut under = MeshBuilder::default();
     under.set_clip(Some(v.canvas_rect()));
-    under.rect(v.canvas_rect(), rgba(CANVAS_BG));
+    under.rect(v.canvas_rect(), rgba(style.background));
     if show_grid {
-        grid(&mut under, &v);
+        grid(&mut under, &v, style.grid_dot);
     }
     let vis = ed.camera.visible_world(ed.viewport);
     let bucket = zoom_bucket(ed.camera.zoom);

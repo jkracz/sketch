@@ -33,6 +33,7 @@ pub fn layout(
     let output = ctx.run_ui(input, |ui| {
         canvas = ui::draw(ui, ed, st);
     });
+    ed.canvas_dark = ctx.theme() == egui::Theme::Dark;
     ed.viewport = v2(
         canvas.width().max(1.0) as f64,
         canvas.height().max(1.0) as f64,
@@ -74,7 +75,9 @@ impl Painter {
         let bg = if self.transparent {
             [0.0; 4]
         } else {
-            scene::CANVAS_BG.to_f32(1.0)
+            scene::CanvasStyle::of(ed.canvas_dark)
+                .background
+                .to_f32(1.0)
         };
         self.canvas.render(
             device,
@@ -172,7 +175,7 @@ pub fn capture(
     prepare: impl FnOnce(&mut Editor),
 ) -> image::RgbaImage {
     let ctx = egui::Context::default();
-    ui::setup_style(&ctx);
+    ui::setup_style(&ctx, st.appearance);
     let size = [
         (size_points[0] * ppp).round() as u32,
         (size_points[1] * ppp).round() as u32,

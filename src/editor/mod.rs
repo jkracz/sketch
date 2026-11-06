@@ -18,6 +18,7 @@ use crate::geom::{Camera, Rect, V2, next_zoom_step, v2};
 use crate::history::{History, Recording, Tx};
 use crate::ink::{self, InkBuilder};
 use crate::model::{Color, Document, Node, NodeId, NodeKind, StrokePoint, TextAlign};
+use crate::render::scene::CanvasStyle;
 use crate::text;
 pub use input::{Button, InputEvent, Key, Modifiers};
 pub use pages::{PageSlot, PageStash};
@@ -224,6 +225,8 @@ pub struct Editor {
     pub ink_width: f64,
     pub ink_smoothing: f64,
     pub ink_color: Color,
+    /// The canvas is drawn in its dark style. Set from the active theme every frame.
+    pub canvas_dark: bool,
     pub snapping: bool,
     pub file_path: Option<PathBuf>,
     pub requests: Vec<AppRequest>,
@@ -311,6 +314,7 @@ impl Editor {
             ink_width: 3.0,
             ink_smoothing: 0.5,
             ink_color: Color::INK,
+            canvas_dark: false,
             snapping: true,
             file_path: None,
             requests: Vec::new(),
@@ -460,6 +464,7 @@ impl Editor {
             ink_width: self.ink_width,
             ink_smoothing: self.ink_smoothing,
             ink_color: self.ink_color,
+            canvas_dark: self.canvas_dark,
             snapping: self.snapping,
             clipboard: std::mem::take(&mut self.clipboard),
             clipboard_roots: std::mem::take(&mut self.clipboard_roots),
@@ -587,6 +592,18 @@ impl Editor {
         })
     }
 
+    /// Ink for a new object at `p`: `base`, unless it would vanish against what's beneath.
+    pub(crate) fn ink_at(&self, base: Color, p: V2) -> Color {
+        let mut under = hit::hit_test(&self.doc, p, self.camera.zoom);
+        while let Some(n) = under.and_then(|id| self.doc.get(id)) {
+            if let Some(fill) = n.style.fill().filter(|c| c.a > 0) {
+                return base.or_contrast_with(fill);
+            }
+            under = n.parent;
+        }
+        base.or_contrast_with(CanvasStyle::of(self.canvas_dark).background)
+    }
+
     /// Screen-space frame label rectangles for top-level frames (also used by the renderer).
     pub fn frame_labels(&self) -> Vec<(NodeId, Rect)> {
         self.doc
@@ -700,7 +717,7 @@ impl Editor {
                 builder.push(world, pressure, time_ms, zoom);
                 let parent = self.frame_at(world, &[]);
                 let width = self.ink_width / zoom;
-                let color = self.ink_color;
+                let color = self.ink_at(self.ink_color, world);
                 let id = {
                     let mut tx = self.tx();
                     let id = tx.alloc_id();
@@ -742,10 +759,11 @@ impl Editor {
                 let size = (16.0 / self.camera.zoom.max(0.25)).round().max(1.0);
                 let lh = text::line_height(size);
                 let p = (world - origin - v2(0.0, lh * 0.5)).round();
+                let ink = self.ink_at(Color::INK, world);
                 let id = {
                     let mut tx = self.tx();
                     let id = tx.alloc_id();
-                    let n = Node::new(
+                    let mut n = Node::new(
                         id,
                         NodeKind::Text {
                             text: String::new(),
@@ -755,6 +773,7 @@ impl Editor {
                         },
                         Rect::new(p.x, p.y, 1.0, lh),
                     );
+                    n.style.set_fill(Some(ink));
                     tx.insert(n, parent, None)
                 };
                 self.selection = vec![id];
@@ -805,6 +824,7 @@ impl Editor {
                 };
                 let frame_count = self.doc.nodes.values().filter(|n| n.is_frame()).count();
                 let sketch = self.sketch;
+                let ink = self.ink_at(Color::INK, start);
                 let id = {
                     let mut tx = self.tx();
                     let id = tx.alloc_id();
@@ -823,6 +843,9 @@ impl Editor {
                     }
                     if matches!(n.kind, NodeKind::Polygon { sides: 4 }) {
                         n.name = "Diamond".into();
+                    }
+                    if matches!(n.kind, NodeKind::Line { .. }) {
+                        n.style.stroke = Some(ink);
                     }
                     tx.insert(n, parent, None)
                 };
@@ -1988,6 +2011,7 @@ impl Editor {
             A::ToggleUi => self.ui_events.push(commands::UiEvent::ToggleUi),
             A::ToggleHelp => self.ui_events.push(commands::UiEvent::ToggleHelp),
             A::ToggleGrid => self.ui_events.push(commands::UiEvent::ToggleGrid),
+            A::SetAppearance(a) => self.ui_events.push(commands::UiEvent::SetAppearance(a)),
             A::SelectNext => self.select_sibling(true),
             A::SelectPrev => self.select_sibling(false),
             A::SelectParent => self.select_parent(),

@@ -7,6 +7,7 @@ use crate::project::Store;
 use crate::render::frame::{self, Painter};
 use crate::render::gpu::Headless;
 use crate::session::Session;
+use crate::settings::{Appearance, Settings};
 use crate::theme;
 use crate::ui::home::HomeAction;
 use crate::ui::{self, UiState};
@@ -74,7 +75,8 @@ impl App {
     pub fn new(start: Start, store: Store) -> App {
         let ctx = egui::Context::default();
         theme::set_accent(theme::system_accent());
-        ui::setup_style(&ctx);
+        let settings = Settings::load(&Settings::path_in(&store.root));
+        ui::setup_style(&ctx, settings.appearance);
         let library = crate::library::Library::load(&crate::library::Library::path_in(&store.root));
         let mut app = App {
             gfx: None,
@@ -92,6 +94,7 @@ impl App {
             mcp: None,
         };
         app.st.library.library = library;
+        app.st.appearance = settings.appearance;
         app.ed.clipboard_io = crate::io::clipboard::System::new()
             .map(|c| Box::new(c) as Box<dyn crate::io::clipboard::Provider>);
         match start {
@@ -628,7 +631,12 @@ impl App {
         self.ed.tick(now);
         let Some(g) = self.gfx.as_mut() else { return };
         let input = g.egui.take_egui_input(&g.window);
+        let appearance = self.st.appearance;
         let mut l = frame::layout(&self.ctx, input, &mut self.ed, &mut self.st);
+        if self.st.appearance != appearance {
+            self.set_appearance();
+        }
+        let Some(g) = self.gfx.as_mut() else { return };
         self.canvas = l.canvas;
         let repaint_delay = l
             .output
@@ -732,6 +740,20 @@ impl App {
         }
     }
 
+    /// Apply and save `st.appearance` after the user changed it.
+    fn set_appearance(&mut self) {
+        let appearance = self.st.appearance;
+        self.ctx.set_theme(theme::preference(appearance));
+        if let Some(g) = &self.gfx {
+            g.window.set_theme(window_theme(appearance));
+            g.window.request_redraw();
+        }
+        let path = Settings::path_in(&self.session.store.root);
+        if let Err(e) = (Settings { appearance }).save(&path) {
+            log::warn!("could not save {}: {e}", path.display());
+        }
+    }
+
     /// Keep the native menu's check marks in step with the editor.
     fn sync_menu(&mut self) {
         #[cfg(target_os = "macos")]
@@ -744,6 +766,9 @@ impl App {
             set(&m.snapping, self.ed.snapping);
             set(&m.grid, !self.st.show_grid_off);
             set(&m.help, self.st.show_help);
+            for (appearance, item) in &m.appearance {
+                set(item, *appearance == self.st.appearance);
+            }
         }
     }
 
@@ -827,6 +852,15 @@ fn map_key(k: &WKey) -> Option<Key> {
     })
 }
 
+/// `None` lets the window follow the system.
+fn window_theme(a: Appearance) -> Option<winit::window::Theme> {
+    match a {
+        Appearance::System => None,
+        Appearance::Light => Some(winit::window::Theme::Light),
+        Appearance::Dark => Some(winit::window::Theme::Dark),
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
@@ -834,6 +868,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Sketch")
+            .with_theme(window_theme(self.st.appearance))
             .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(720.0, 480.0));
         // SKETCH_RS_OPAQUE=1 turns off vibrancy (and window transparency) on macOS.
@@ -966,7 +1001,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ThemeChanged(_) => {
                 // Light/dark switch: egui-winit swaps the style; refresh the accent too.
                 theme::set_accent(theme::system_accent());
-                ui::setup_style(&self.ctx);
+                ui::setup_style(&self.ctx, self.st.appearance);
                 redraw = true;
             }
             WindowEvent::Occluded(false) => redraw = true,

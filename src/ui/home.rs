@@ -289,15 +289,7 @@ fn card_frame(
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(CARD_W, THUMB_H), egui::Sense::click());
     let hovered = resp.hovered();
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        8.0,
-        if ui.visuals().dark_mode {
-            Color32::from_rgb(0x1f, 0x1f, 0x21)
-        } else {
-            Color32::from_rgb(0xee, 0xee, 0xf0)
-        },
-    );
+    painter.rect_filled(rect, 8.0, p.thumbnail);
     if let Some(t) = thumb.and_then(|t| hv.thumb(ui.ctx(), t)) {
         // Fit the thumbnail inside the card, centered.
         let [tw, th] = t.size();
