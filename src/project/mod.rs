@@ -277,16 +277,22 @@ impl Store {
             return Err(FormatError::Invalid("empty name".into()));
         }
         let mut p = Project::open(dir)?;
-        p.manifest.name = new_name.to_string();
+        let parent = dir.parent().unwrap_or(&self.root);
+        p.manifest.name = free_name(parent, new_name, Some(dir));
         p.manifest.modified = now_ms();
         p.write_manifest()?;
-        let parent = dir.parent().unwrap_or(&self.root);
-        let wanted = parent.join(folder_name(new_name));
+        self.rename_dir(dir, parent, &p.manifest.name)
+    }
+
+    /// Rename a directory to suit `name`, keeping clear of its neighbors. Changing only the case
+    /// counts as free: on a case-insensitive disk the "taken" path is the directory itself.
+    fn rename_dir(&self, dir: &Path, parent: &Path, name: &str) -> Result<PathBuf, FormatError> {
+        let wanted = parent.join(folder_name(name));
         if wanted == dir {
-            return Ok(dir.to_path_buf());
+            return Ok(wanted);
         }
-        let target = if wanted.exists() {
-            self.unique_dir(parent, new_name)
+        let target = if wanted.exists() && !same_path(&wanted, dir) {
+            self.unique_dir(parent, name)
         } else {
             wanted
         };
@@ -385,19 +391,8 @@ impl Store {
         }
         let mut manifest = read_folder_manifest(dir)?;
         manifest.name = self.unique_folder_name(new_name, Some(dir));
-        atomic::write(&dir.join(FOLDER_MANIFEST), manifest.to_json().as_bytes())?;
-        let wanted = self.root.join(folder_name(&manifest.name));
-        let target = if wanted == dir {
-            wanted
-        } else {
-            let target = if wanted.exists() {
-                self.unique_dir(&self.root, &manifest.name)
-            } else {
-                wanted
-            };
-            std::fs::rename(dir, &target)?;
-            target
-        };
+        let target = self.rename_dir(dir, &self.root, &manifest.name)?;
+        atomic::write(&target.join(FOLDER_MANIFEST), manifest.to_json().as_bytes())?;
         Ok(Folder {
             dir: target,
             id: manifest.id,
@@ -486,9 +481,19 @@ impl Store {
             }),
             None => None,
         };
-        let target = self.unique_dir(self.parent_dir(folder.as_ref()), &entry.original);
+        let parent = self.parent_dir(folder.as_ref());
+        let name = free_name(parent, &entry.manifest.name, None);
+        let target = self.unique_dir(parent, &entry.original);
         std::fs::rename(trash_dir, &target)?;
         let _ = std::fs::remove_file(target.join(TRASH_INFO));
+        if name != entry.manifest.name {
+            let mut restored = Project {
+                dir: target.clone(),
+                manifest: entry.manifest,
+            };
+            restored.manifest.name = name;
+            restored.write_manifest()?;
+        }
         Ok(target)
     }
 
@@ -517,13 +522,45 @@ fn read_folder_manifest(dir: &Path) -> Result<FolderManifest, FormatError> {
     FolderManifest::from_json(&std::fs::read_to_string(dir.join(FOLDER_MANIFEST))?)
 }
 
+/// The folder at `dir`. If its marker is damaged or from a newer version, keep showing the folder
+/// under its directory name so its projects don't vanish. Renaming or trashing it reads the
+/// marker and fails, which leaves the file alone for repair.
 fn read_folder(dir: &Path) -> Option<Folder> {
-    let m = read_folder_manifest(dir).ok()?;
-    Some(Folder {
-        dir: dir.to_path_buf(),
-        id: m.id,
-        name: m.name,
-    })
+    if !dir.join(FOLDER_MANIFEST).is_file() {
+        return None;
+    }
+    match read_folder_manifest(dir) {
+        Ok(m) => Some(Folder {
+            dir: dir.to_path_buf(),
+            id: m.id,
+            name: m.name,
+        }),
+        Err(e) => {
+            log::warn!("{}: {e}", dir.join(FOLDER_MANIFEST).display());
+            let name = dir.file_name()?.to_string_lossy().to_string();
+            Some(Folder {
+                dir: dir.to_path_buf(),
+                id: name.clone(),
+                name,
+            })
+        }
+    }
+}
+
+/// A display name no project directly in `parent` uses, besides the one at `except`.
+fn free_name(parent: &Path, name: &str, except: Option<&Path>) -> String {
+    let taken: Vec<String> = projects_in(parent, None)
+        .into_iter()
+        .filter(|e| except != Some(e.dir.as_path()))
+        .map(|e| e.manifest.name)
+        .collect();
+    let mut n = name.to_string();
+    let mut i = 2;
+    while taken.contains(&n) {
+        n = format!("{name} {i}");
+        i += 1;
+    }
+    n
 }
 
 /// The projects directly inside `parent`.
@@ -792,6 +829,63 @@ mod tests {
         assert_eq!(folders[0].id, acme.id);
         assert_eq!(s.folder_of(&back), Some(folders[0].clone()));
         assert_eq!(s.folder_of(&other), Some(folders[0].clone()));
+        std::fs::remove_dir_all(&s.root).ok();
+    }
+
+    #[test]
+    fn renaming_and_restoring_keep_names_unique_within_a_folder() {
+        let s = temp_store();
+        let acme = s.create_folder("Acme").unwrap();
+        let (a, _) = s.create_in("One", Some(&acme)).unwrap();
+        let (b, _) = s.create_in("Two", Some(&acme)).unwrap();
+
+        let renamed = s.rename(&b.dir, "One").unwrap();
+        assert_eq!(Project::open(&renamed).unwrap().manifest.name, "One 2");
+        assert_eq!(s.rename(&renamed, "One 2").unwrap(), renamed);
+
+        // The same name is fine in another folder, even one named like the project.
+        let (c, _) = s.create("Top").unwrap();
+        let top = s.rename(&c.dir, "Acme").unwrap();
+        assert_eq!(Project::open(&top).unwrap().manifest.name, "Acme");
+
+        let t = s.trash(&a.dir).unwrap();
+        s.create_in("One", Some(&acme)).unwrap();
+        let back = s.restore(&t).unwrap();
+        assert_eq!(Project::open(&back).unwrap().manifest.name, "One 3");
+        assert!(!back.join(TRASH_INFO).exists());
+        std::fs::remove_dir_all(&s.root).ok();
+    }
+
+    #[test]
+    fn changing_only_the_case_of_a_name_adds_no_suffix() {
+        let s = temp_store();
+        let acme = s.create_folder("acme").unwrap();
+        let folder = s.rename_folder(&acme.dir, "Acme").unwrap();
+        assert_eq!(folder.name, "Acme");
+        assert_eq!(folder.dir.file_name().unwrap(), "Acme");
+        let (p, _) = s.create_in("plan", Some(&folder)).unwrap();
+        let renamed = s.rename(&p.dir, "Plan").unwrap();
+        assert_eq!(renamed.file_name().unwrap(), "Plan");
+        assert!(renamed.join(MANIFEST).is_file());
+        std::fs::remove_dir_all(&s.root).ok();
+    }
+
+    #[test]
+    fn a_damaged_folder_marker_keeps_its_projects_listed() {
+        let s = temp_store();
+        let acme = s.create_folder("Acme").unwrap();
+        let (p, _) = s.create_in("Plan", Some(&acme)).unwrap();
+        let marker = acme.dir.join(FOLDER_MANIFEST);
+        std::fs::write(&marker, "{ damaged").unwrap();
+
+        let list = s.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].dir, p.dir);
+        assert_eq!(list[0].folder.as_ref().unwrap().name, "Acme");
+        // Nothing overwrites the file, so it can still be repaired.
+        assert!(s.rename_folder(&acme.dir, "Other").is_err());
+        assert!(s.trash_folder(&acme.dir).is_err());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "{ damaged");
         std::fs::remove_dir_all(&s.root).ok();
     }
 

@@ -180,8 +180,9 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "rename_resource",
-            "Renames a project or folder. The folder or project keeps its id and its contents. The \
-             project open in the app can be renamed and stays open.",
+            "Renames a project or folder and returns the stored name, which gets the next free \
+             name if the one asked for is taken. It keeps its id and contents. The project open \
+             in the app can be renamed and stays open.",
             json!({
                 "resourceId": {"type": "string", "minLength": 1, "description": "Project or folder id, or name."},
                 "name": {"type": "string", "minLength": 1, "description": "The new name."},

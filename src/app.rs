@@ -1466,8 +1466,8 @@ impl crate::mcp::exec::Host for App {
         self.ed.status.clear();
         Ok(())
     }
-    fn project_moved(&mut self, dir: &std::path::Path) -> Result<(), String> {
-        self.session.relocate(dir).map_err(|e| e.to_string())
+    fn project_moved(&mut self, dir: &std::path::Path) {
+        self.session.relocate(dir);
     }
     fn save(&mut self) -> Result<(), String> {
         if self.session.project.is_some() {

@@ -662,6 +662,49 @@ fn the_open_project_keeps_saving_after_it_moves_or_is_renamed() {
 }
 
 #[test]
+fn a_rename_reports_the_name_it_stored() {
+    let mut h = host();
+    call(&mut h, "create_file", json!({"name": "Taken"}));
+    let r = call(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "MCP test", "name": "Taken"}),
+    );
+    assert_eq!(r["name"], "Taken 2");
+    assert_eq!(h.session.project_name(), "Taken 2");
+}
+
+#[test]
+fn autosave_follows_a_renamed_folder_even_with_a_damaged_manifest() {
+    let mut h = host();
+    call(&mut h, "create_folder", json!({"name": "Acme"}));
+    call(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["MCP test"], "parentId": "Acme"}),
+    );
+    let root = h.session.store.root.clone();
+    let old = root.join("Acme").join("MCP test");
+    std::fs::write(old.join("project.json"), "{ damaged").unwrap();
+
+    call(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "Acme", "name": "Globex"}),
+    );
+    let new = root.join("Globex").join("MCP test");
+    assert_eq!(h.session.project.as_ref().unwrap().dir, new);
+    call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "A", "styles": {"width": 100, "height": 100}}),
+    );
+    call(&mut h, "finish_working_on_nodes", json!({}));
+    assert!(!root.join("Acme").exists(), "the old path never comes back");
+    assert!(sketch_rs::project::Project::open(&new).is_ok());
+}
+
+#[test]
 fn errors_are_reported_not_panics() {
     let mut h = host();
     for (name, args) in [

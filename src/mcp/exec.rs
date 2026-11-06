@@ -38,7 +38,7 @@ pub trait Host {
     /// Open a project folder (saving the current one).
     fn open_project(&mut self, dir: &Path) -> Result<(), String>;
     /// The open project now lives at `dir` because the store moved or renamed it.
-    fn project_moved(&mut self, dir: &Path) -> Result<(), String>;
+    fn project_moved(&mut self, dir: &Path);
     /// Save the open project now.
     fn save(&mut self) -> Result<(), String>;
     /// An offscreen renderer for screenshots and PNG export.
@@ -88,8 +88,8 @@ impl Host for SessionHost {
             .open(&mut self.ed, dir)
             .map_err(|e| format!("{}: {e}", dir.display()))
     }
-    fn project_moved(&mut self, dir: &Path) -> Result<(), String> {
-        self.session.relocate(dir).map_err(|e| e.to_string())
+    fn project_moved(&mut self, dir: &Path) {
+        self.session.relocate(dir);
     }
     fn save(&mut self) -> Result<(), String> {
         if self.session.project.is_some() {
@@ -596,7 +596,7 @@ fn move_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
                 )
             })?;
         if is_open {
-            host.project_moved(&new_dir)?;
+            host.project_moved(&new_dir);
         }
         let m = Project::open(&new_dir).map_err(|e| e.to_string())?.manifest;
         let item = json!({"id": m.id, "name": m.name, "path": new_dir});
@@ -628,9 +628,10 @@ fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
             let is_open = open.as_ref().is_some_and(|d| same_dir(d, &dir));
             let new_dir = host.store().rename(&dir, name).map_err(|e| e.to_string())?;
             if is_open {
-                host.project_moved(&new_dir)?;
+                host.project_moved(&new_dir);
             }
-            text(json!({"type": "file", "name": name.trim(), "path": new_dir}))
+            let m = Project::open(&new_dir).map_err(|e| e.to_string())?.manifest;
+            text(json!({"type": "file", "name": m.name, "path": new_dir}))
         }
         (_, Ok(f)) => {
             let open_inside = open.filter(|d| d.parent().is_some_and(|p| same_dir(p, &f.dir)));
@@ -639,7 +640,7 @@ fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
                 .rename_folder(&f.dir, name)
                 .map_err(|e| e.to_string())?;
             if let Some(leaf) = open_inside.as_deref().and_then(Path::file_name) {
-                host.project_moved(&renamed.dir.join(leaf))?;
+                host.project_moved(&renamed.dir.join(leaf));
             }
             text(json!({"type": "folder", "name": renamed.name, "path": renamed.dir}))
         }

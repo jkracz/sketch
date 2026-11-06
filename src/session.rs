@@ -75,15 +75,18 @@ impl Session {
     }
 
     /// The store moved or renamed the open project: point autosave at its new directory and
-    /// pick up the name and edit time. Without this the next save would recreate the old path.
-    pub fn relocate(&mut self, dir: &Path) -> Result<(), FormatError> {
-        if let Some(p) = &mut self.project {
-            let on_disk = Project::open(dir)?.manifest;
-            p.dir = dir.to_path_buf();
-            p.manifest.name = on_disk.name;
-            p.manifest.modified = on_disk.modified;
+    /// pick up the name and edit time. The path changes first, whatever the manifest holds,
+    /// because the next save would otherwise recreate the old path.
+    pub fn relocate(&mut self, dir: &Path) {
+        let Some(p) = &mut self.project else { return };
+        p.dir = dir.to_path_buf();
+        match Project::open(dir) {
+            Ok(on_disk) => {
+                p.manifest.name = on_disk.manifest.name;
+                p.manifest.modified = on_disk.manifest.modified;
+            }
+            Err(e) => log::warn!("{}: {e}", dir.display()),
         }
-        Ok(())
     }
 
     /// Note that time passed; returns true when a save is due now.
