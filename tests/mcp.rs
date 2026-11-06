@@ -45,6 +45,47 @@ fn num(id: &Value) -> sketch_rs::model::NodeId {
 }
 
 #[test]
+fn html_keeps_font_family_and_weight() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Fonts", "styles": {"width": "390px", "height": "844px"}}),
+    );
+    call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": ab["id"], "mode": "insert-children",
+            "html": r#"<div style="font-family:'Playfair Display', serif; font-weight:300">Light <span style="font-family:Lora; font-weight:600">serif</span></div>"#,
+        }),
+    );
+    let n =
+        h.ed.doc
+            .nodes
+            .values()
+            .find(|n| n.kind.text().is_some())
+            .unwrap();
+    assert_eq!(n.text_style.family.as_deref(), Some("Playfair Display"));
+    assert_eq!(n.text_style.base_weight(), 300);
+    let span = n.text_style.char_style(7, 16.0, Color::BLACK);
+    assert_eq!(
+        (n.text_style.family_at(7), span.weight),
+        (Some("Lora"), 600)
+    );
+    let info = call(&mut h, "get_basic_info", json!({}));
+    assert_eq!(info["fontFamilies"], json!(["Lora", "Playfair Display"]));
+    let fonts = call(
+        &mut h,
+        "get_font_family_info",
+        json!({"familyNames": ["Inter", "Lora"]}),
+    );
+    assert_eq!(fonts["families"][0]["available"], json!(true));
+    assert_eq!(fonts["families"][0]["styles"].as_array().unwrap().len(), 6);
+    assert_eq!(fonts["families"][1]["available"], json!(false));
+}
+
+#[test]
 fn artboard_and_html_become_auto_layout_frames_and_text() {
     let mut h = host();
     let ab = call(

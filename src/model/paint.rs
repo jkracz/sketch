@@ -264,6 +264,11 @@ pub struct TextSpan {
     pub start: usize,
     pub end: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// CSS weight (1 to 1000). Wins over `bold` when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
@@ -281,6 +286,12 @@ pub struct TextSpan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TextStyle {
+    /// Font family (None = Inter). Stored even when the font isn't loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// CSS weight when it isn't what `bold` already says (400 or 700).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u16>,
     pub bold: bool,
     pub italic: bool,
     /// Line height as a multiple of the font size (None = font default).
@@ -296,11 +307,34 @@ impl TextStyle {
     pub fn is_default(&self) -> bool {
         *self == TextStyle::default()
     }
+
+    /// The node-wide CSS weight, before spans.
+    pub fn base_weight(&self) -> u16 {
+        self.weight.unwrap_or(if self.bold { 700 } else { 400 })
+    }
+
+    /// Set the node-wide weight, keeping `bold` in step for the toggle.
+    pub fn set_weight(&mut self, weight: u16) {
+        self.bold = weight >= 600;
+        self.weight = (weight != 400 && weight != 700).then_some(weight);
+    }
+
+    /// The family of one character (None = Inter). Apart from `CharStyle` so that stays `Copy`.
+    pub fn family_at(&self, i: usize) -> Option<&str> {
+        self.spans
+            .iter()
+            .rev()
+            .filter(|sp| i >= sp.start && i < sp.end)
+            .find_map(|sp| sp.family.as_deref())
+            .or(self.family.as_deref())
+    }
 }
 
 /// Resolved style of one character.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharStyle {
+    /// CSS weight, which picks the face. `bold` says whether the toggle shows on.
+    pub weight: u16,
     pub bold: bool,
     pub italic: bool,
     pub size: f64,
@@ -312,6 +346,7 @@ pub struct CharStyle {
 impl TextStyle {
     pub fn char_style(&self, i: usize, size: f64, color: Color) -> CharStyle {
         let mut s = CharStyle {
+            weight: self.base_weight(),
             bold: self.bold,
             italic: self.italic,
             size,
@@ -323,6 +358,11 @@ impl TextStyle {
             if i >= sp.start && i < sp.end {
                 if let Some(b) = sp.bold {
                     s.bold = b;
+                    s.weight = if b { 700 } else { 400 };
+                }
+                if let Some(w) = sp.weight {
+                    s.weight = w;
+                    s.bold = w >= 600;
                 }
                 if let Some(b) = sp.italic {
                     s.italic = b;
@@ -408,6 +448,7 @@ impl TextStyle {
             let mut any = false;
             for s in self.spans.iter().filter(|s| s.start <= a && s.end >= b) {
                 any = true;
+                m.family = s.family.clone().or(m.family.take());
                 m.bold = s.bold.or(m.bold);
                 m.italic = s.italic.or(m.italic);
                 m.size = s.size.or(m.size);
@@ -417,6 +458,10 @@ impl TextStyle {
                 // Later spans take precedence.
                 if s.bold.is_some() {
                     m.bold = s.bold;
+                    m.weight = None;
+                }
+                if s.weight.is_some() {
+                    m.weight = s.weight;
                 }
                 if s.italic.is_some() {
                     m.italic = s.italic;
@@ -434,7 +479,9 @@ impl TextStyle {
                     m.strike = s.strike;
                 }
             }
-            let empty = m.bold.is_none()
+            let empty = m.family.is_none()
+                && m.weight.is_none()
+                && m.bold.is_none()
                 && m.italic.is_none()
                 && m.size.is_none()
                 && m.color.is_none()
@@ -446,6 +493,8 @@ impl TextStyle {
             match out.last_mut() {
                 Some(l)
                     if l.end == a
+                        && l.family == m.family
+                        && l.weight == m.weight
                         && (l.bold, l.italic, l.size, l.color, l.underline, l.strike)
                             == (m.bold, m.italic, m.size, m.color, m.underline, m.strike) =>
                 {
@@ -571,6 +620,65 @@ pub struct InstanceLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_weight_keeps_bold_in_step_and_plain_weights_out_of_the_file() {
+        let mut t = TextStyle::default();
+        t.set_weight(700);
+        assert_eq!((t.bold, t.weight, t.base_weight()), (true, None, 700));
+        t.set_weight(400);
+        assert!(t.is_default());
+        t.set_weight(600);
+        assert_eq!((t.bold, t.weight, t.base_weight()), (true, Some(600), 600));
+        t.set_weight(300);
+        assert_eq!((t.bold, t.weight, t.base_weight()), (false, Some(300), 300));
+    }
+
+    #[test]
+    fn spans_set_family_and_weight_per_character() {
+        let mut t = TextStyle {
+            family: Some("Base".into()),
+            ..TextStyle::default()
+        };
+        t.apply_range(2, 4, |s| {
+            s.family = Some("Span".into());
+            s.weight = Some(650);
+        });
+        assert_eq!(t.family_at(0), Some("Base"));
+        assert_eq!(t.family_at(2), Some("Span"));
+        let s = t.char_style(2, 12.0, Color::BLACK);
+        assert_eq!((s.weight, s.bold), (650, true));
+        assert_eq!(t.char_style(0, 12.0, Color::BLACK).weight, 400);
+    }
+
+    #[test]
+    fn a_later_bold_replaces_an_earlier_weight() {
+        let mut t = TextStyle::default();
+        t.apply_range(0, 4, |s| s.weight = Some(300));
+        t.apply_range(1, 3, |s| s.bold = Some(true));
+        assert_eq!(t.char_style(0, 12.0, Color::BLACK).weight, 300);
+        assert_eq!(t.char_style(1, 12.0, Color::BLACK).weight, 700);
+        t.apply_range(1, 3, |s| s.bold = Some(false));
+        assert_eq!(t.char_style(1, 12.0, Color::BLACK).weight, 400);
+    }
+
+    #[test]
+    fn spans_with_different_families_stay_separate() {
+        let mut t = TextStyle::default();
+        t.apply_range(0, 2, |s| s.family = Some("A".into()));
+        t.apply_range(2, 4, |s| s.family = Some("B".into()));
+        assert_eq!(t.spans.len(), 2);
+        t.apply_range(2, 4, |s| s.family = Some("A".into()));
+        assert_eq!(t.spans.len(), 1);
+    }
+
+    #[test]
+    fn documents_without_fonts_serialize_as_before() {
+        let json = serde_json::to_value(TextStyle::default()).unwrap();
+        assert!(json.get("family").is_none() && json.get("weight").is_none());
+        let old: TextStyle = serde_json::from_str(r#"{"bold":true}"#).unwrap();
+        assert_eq!((old.family.as_deref(), old.base_weight()), (None, 700));
+    }
 
     #[test]
     fn spans_follow_edits() {

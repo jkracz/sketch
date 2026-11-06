@@ -1,9 +1,11 @@
 //! Text layout and glyph outlines.
 //!
 //! Text is rendered as vector glyph outlines, so it stays crisp at every zoom level and
-//! exports to SVG without font dependencies. The face is Inter Regular (SIL OFL, bundled in assets/fonts),
-//! not anything taken from Paper.
+//! exports to SVG without font dependencies. Faces come from `crate::fonts`: bundled Inter
+//! (SIL OFL) plus whatever is registered at runtime, never anything taken from Paper.
 
+use crate::fonts::resolve;
+pub use crate::fonts::{FaceId, face_bytes, face_of};
 use crate::geom::{V2, v2};
 use crate::model::{CharStyle, Color, TextAlign, TextStyle};
 use crate::vector::VPath;
@@ -12,51 +14,24 @@ use lyon::tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVerte
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub static FONT_BYTES: &[u8] = crate::theme::INTER_REGULAR;
-static BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
-static ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic.ttf");
-static BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-BoldItalic.ttf");
-
-/// Face index: bit 0 = bold, bit 1 = italic.
-pub type FaceId = u8;
-
-pub fn face_id(bold: bool, italic: bool) -> FaceId {
-    bold as u8 | (italic as u8) << 1
-}
-
-pub fn face_bytes(id: FaceId) -> &'static [u8] {
-    match id & 3 {
-        0 => FONT_BYTES,
-        1 => BOLD,
-        2 => ITALIC,
-        _ => BOLD_ITALIC,
-    }
-}
-
-pub fn face_of(id: FaceId) -> &'static ttf_parser::Face<'static> {
-    static FACES: OnceLock<[ttf_parser::Face<'static>; 4]> = OnceLock::new();
-    &FACES.get_or_init(|| {
-        [0, 1, 2, 3]
-            .map(|i| ttf_parser::Face::parse(face_bytes(i), 0).expect("bundled font parses"))
-    })[(id & 3) as usize]
-}
-
-pub fn face() -> &'static ttf_parser::Face<'static> {
-    face_of(0)
-}
-
-fn units_per_em() -> f64 {
-    face().units_per_em() as f64
-}
-
-pub fn line_height(font_size: f64) -> f64 {
-    let f = face();
-    let h = (f.ascender() as f64 - f.descender() as f64 + f.line_gap() as f64) / units_per_em();
+fn line_height_in(face: FaceId, font_size: f64) -> f64 {
+    let f = face_of(face);
+    let h = (f.ascender() as f64 - f.descender() as f64 + f.line_gap() as f64)
+        / f.units_per_em() as f64;
     font_size * h.max(1.1)
 }
 
+fn ascent_in(face: FaceId, font_size: f64) -> f64 {
+    let f = face_of(face);
+    f.ascender() as f64 / f.units_per_em() as f64 * font_size
+}
+
+pub fn line_height(font_size: f64) -> f64 {
+    line_height_in(0, font_size)
+}
+
 pub fn ascent(font_size: f64) -> f64 {
-    face().ascender() as f64 / units_per_em() * font_size
+    ascent_in(0, font_size)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,20 +72,22 @@ pub struct TextLayout {
     pub font_size: f64,
 }
 
-fn advance_in(face: FaceId, c: char, font_size: f64) -> (u16, f64) {
+/// The glyph for `c` and its advance: from `face`, then `fallback`, then `face`'s '?'.
+fn advance_in(face: FaceId, fallback: FaceId, c: char, font_size: f64) -> (FaceId, u16, f64) {
+    let (face, gid) = [face, fallback]
+        .into_iter()
+        .find_map(|id| Some((id, face_of(id).glyph_index(c)?.0)))
+        .or_else(|| Some((face, face_of(face).glyph_index('?')?.0)))
+        .unwrap_or((face, 0));
     let f = face_of(face);
-    let gid = f
-        .glyph_index(c)
-        .or_else(|| f.glyph_index('?'))
-        .map(|g| g.0)
-        .unwrap_or(0);
     let adv = f.glyph_hor_advance(ttf_parser::GlyphId(gid)).unwrap_or(0) as f64;
-    (gid, adv / f.units_per_em() as f64 * font_size)
+    (face, gid, adv / f.units_per_em() as f64 * font_size)
 }
 
 #[cfg(test)]
 fn advance(c: char, font_size: f64) -> (u16, f64) {
-    advance_in(0, c, font_size)
+    let (_, gid, adv) = advance_in(0, 0, c, font_size);
+    (gid, adv)
 }
 
 /// Lay out plain text with optional wrapping at `max_width`.
@@ -125,7 +102,7 @@ pub fn layout(text: &str, font_size: f64, max_width: Option<f64>, align: TextAli
     )
 }
 
-/// Lay out text whose characters may each have their own weight, slant, size and color.
+/// Lay out text whose characters may each have their own family, weight, slant, size and color.
 pub fn layout_rich(
     text: &str,
     font_size: f64,
@@ -139,18 +116,32 @@ pub fn layout_rich(
         .map(|i| ts.char_style(i, font_size, color))
         .collect();
     let ls = ts.letter_spacing;
-    let adv: Vec<(u16, f64)> = chars
+    // The face each character asks for, and the Inter face for glyphs that face doesn't have.
+    // Runs share a style, so resolve only when it changes.
+    let mut last = None;
+    let mut wanted = (0, 0);
+    let faces: Vec<(FaceId, FaceId)> = styles
         .iter()
-        .zip(&styles)
-        .map(|(c, s)| {
-            let (g, a) = advance_in(face_id(s.bold, s.italic), *c, s.size);
-            (g, a + ls)
+        .enumerate()
+        .map(|(i, s)| {
+            let key = (ts.family_at(i), s.weight, s.italic);
+            if last != Some(key) {
+                wanted = (
+                    resolve(key.0, s.weight, s.italic),
+                    resolve(None, s.weight, s.italic),
+                );
+                last = Some(key);
+            }
+            wanted
         })
         .collect();
-    let lh_of = |size: f64| match ts.line_height {
-        Some(m) => size * m,
-        None => line_height(size),
-    };
+    let adv: Vec<(FaceId, u16, f64)> = (0..chars.len())
+        .map(|i| {
+            let (f, g, a) = advance_in(faces[i].0, faces[i].1, chars[i], styles[i].size);
+            (f, g, a + ls)
+        })
+        .collect();
+    let base_face = resolve(ts.family.as_deref(), ts.base_weight(), ts.italic);
     // Break into lines: hard breaks on '\n', soft breaks at spaces when wrapping.
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut start = 0;
@@ -165,7 +156,7 @@ pub fn layout_rich(
             let mut last_space: Option<usize> = None;
             let mut i = line_start;
             while i < hard_end {
-                let a = adv[i].1;
+                let a = adv[i].2;
                 if chars[i] == ' ' {
                     last_space = Some(i);
                 }
@@ -195,27 +186,26 @@ pub fn layout_rich(
     let mut max_line_w: f64 = 0.0;
     let mut top = 0.0;
     for (s, e) in ranges.iter().copied() {
-        // Line metrics from the largest size on the line (or the char before an empty line).
-        let sizes = styles[s..e].iter().map(|c| c.size);
-        let max_size = sizes
-            .clone()
-            .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |m| m.max(z))))
-            .unwrap_or_else(|| {
-                styles
-                    .get(s.saturating_sub(1))
-                    .map_or(font_size, |c| c.size)
-            });
-        let lh = lh_of(max_size);
-        let natural = line_height(max_size);
-        let baseline = top + ascent(max_size) + (lh - natural) * 0.5;
+        // Line metrics from the largest character on the line (or the one before an empty line).
+        let largest = (s..e).fold(None, |m: Option<usize>, i| match m {
+            Some(j) if styles[j].size >= styles[i].size => Some(j),
+            _ => Some(i),
+        });
+        let (max_size, line_face) = match largest.or(s.checked_sub(1)) {
+            Some(i) if i < styles.len() => (styles[i].size, faces[i].0),
+            _ => (font_size, base_face),
+        };
+        let natural = line_height_in(line_face, max_size);
+        let lh = ts.line_height.map_or(natural, |m| max_size * m);
+        let baseline = top + ascent_in(line_face, max_size) + (lh - natural) * 0.5;
         let mut x = 0.0;
         let mut carets = vec![0.0];
         for i in s..e {
             let st = styles[i];
-            let (gid, a) = adv[i];
+            let (face, gid, a) = adv[i];
             glyphs.push(PlacedGlyph {
                 gid,
-                face: face_id(st.bold, st.italic),
+                face,
                 size: st.size,
                 color: st.color,
                 x,
@@ -354,7 +344,7 @@ fn tessellate_glyph(face: FaceId, gid: u16) -> GlyphMesh {
     }
     let path = b.b.build();
     let mut buffers: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
-    let tol = (units_per_em() / 2000.0) as f32;
+    let tol = (face_of(face).units_per_em() as f64 / 2000.0) as f32;
     let _ = FillTessellator::new().tessellate_path(
         &path,
         &FillOptions::tolerance(tol).with_fill_rule(lyon::tessellation::FillRule::NonZero),
@@ -544,6 +534,53 @@ mod tests {
             let (x, top, h) = l.caret(i);
             assert_eq!(l.hit(v2(x, top + h * 0.5)), i);
         }
+    }
+
+    #[test]
+    fn spans_pick_their_family_and_missing_glyphs_fall_back_to_inter() {
+        let face = crate::fonts::register(
+            "Fixture Layout",
+            400,
+            false,
+            include_bytes!("../tests/fixtures/fonts/inter-ab.ttf").to_vec(),
+        )
+        .unwrap();
+        let mut ts = TextStyle::default();
+        ts.apply_range(1, 3, |s| s.family = Some("Fixture Layout".into()));
+        let l = layout_rich("AAz", 20.0, Color::INK, &ts, None, TextAlign::Left);
+        let got: Vec<FaceId> = l.glyphs.iter().map(|g| g.face).collect();
+        assert_eq!(got, [0, face, 0]);
+    }
+
+    #[test]
+    fn weight_picks_the_face_and_unloaded_families_keep_inter() {
+        let mut ts = TextStyle {
+            family: Some("Not Loaded".into()),
+            ..TextStyle::default()
+        };
+        ts.set_weight(600);
+        let l = layout_rich("A", 20.0, Color::INK, &ts, None, TextAlign::Left);
+        assert_eq!(l.glyphs[0].face, 5);
+    }
+
+    #[test]
+    fn line_metrics_follow_the_largest_characters_face() {
+        // An empty layout in a family uses that family's metrics.
+        let face = crate::fonts::register(
+            "Fixture Metrics",
+            400,
+            false,
+            include_bytes!("../tests/fixtures/fonts/inter-ab.ttf").to_vec(),
+        )
+        .unwrap();
+        let ts = TextStyle {
+            family: Some("Fixture Metrics".into()),
+            ..TextStyle::default()
+        };
+        let empty = layout_rich("", 20.0, Color::INK, &ts, None, TextAlign::Left);
+        assert_eq!(empty.lines[0].height, line_height_in(face, 20.0));
+        let one = layout_rich("A", 20.0, Color::INK, &ts, None, TextAlign::Left);
+        assert_eq!(one.lines[0].baseline, ascent_in(face, 20.0));
     }
 
     #[test]

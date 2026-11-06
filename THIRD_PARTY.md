@@ -17,6 +17,13 @@ assets from them are used.
 
 Each ported module starts with a comment naming its source.
 
+## Fonts
+
+`assets/fonts/google-fonts.json` lists family names, categories and styles from the Google Fonts
+Developer API, written by `scripts/update-google-fonts.py`. It holds no font data.
+`tests/fixtures/fonts/inter-ab.ttf` is a subset of Inter (SIL OFL 1.1) from Google Fonts, used
+only by tests.
+
 ## Dependencies
 
 Rust crates are pulled from crates.io under their own licenses (see `Cargo.lock`); notable ones

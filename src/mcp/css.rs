@@ -529,6 +529,43 @@ fn layout_mut(n: &mut Node) -> &mut AutoLayout {
     })
 }
 
+/// The first named family in a CSS `font-family` list. Generic families and keywords have no
+/// font of their own, so they mean the default.
+pub fn font_family(v: &str) -> Option<String> {
+    let first = v.split(',').next()?.trim();
+    let name = first.trim_matches(|c| c == '"' || c == '\'').trim();
+    let generic = matches!(
+        name.to_ascii_lowercase().as_str(),
+        "" | "serif"
+            | "sans-serif"
+            | "monospace"
+            | "cursive"
+            | "fantasy"
+            | "system-ui"
+            | "ui-serif"
+            | "ui-sans-serif"
+            | "ui-monospace"
+            | "ui-rounded"
+            | "-apple-system"
+            | "blinkmacsystemfont"
+            | "inherit"
+            | "initial"
+            | "unset"
+    );
+    (!generic).then(|| name.to_string())
+}
+
+/// A CSS `font-weight` as a number from 1 to 1000. Relative keywords act as if on regular text.
+pub fn font_weight(v: &str) -> u16 {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "bold" | "bolder" => 700,
+        "normal" | "lighter" => 400,
+        s => s
+            .parse::<f64>()
+            .map_or(400, |w| w.clamp(1.0, 1000.0) as u16),
+    }
+}
+
 fn set_text_flag(n: &mut Node, f: impl Fn(&mut crate::model::TextSpan)) {
     let len = n.kind.text().map_or(0, |t| t.chars().count());
     if len > 0 {
@@ -850,9 +887,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 _ => false,
             },
             "flexShrink" | "flexBasis" | "boxSizing" | "minWidth" | "minHeight" | "maxWidth"
-            | "maxHeight" | "zIndex" | "cursor" | "whiteSpace" | "fontFamily" | "wordBreak"
-            | "overflowWrap" => {
-                // Accepted without an equivalent; harmless. fontFamily: Inter is the only face.
+            | "maxHeight" | "zIndex" | "cursor" | "whiteSpace" | "wordBreak" | "overflowWrap" => {
+                // Accepted without an equivalent; harmless.
                 !matches!(
                     k.as_str(),
                     "minWidth" | "minHeight" | "maxWidth" | "maxHeight"
@@ -903,13 +939,12 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 None => false,
             },
             "color" => true, // inherited by text children; meaningless on boxes
+            "fontFamily" if is_text => {
+                n.text_style.family = font_family(v);
+                true
+            }
             "fontWeight" if is_text => {
-                let w = match lower.as_str() {
-                    "bold" | "bolder" => 700.0,
-                    "normal" | "lighter" => 400.0,
-                    _ => v.parse().unwrap_or(400.0),
-                };
-                n.text_style.bold = w >= 600.0;
+                n.text_style.set_weight(font_weight(v));
                 true
             }
             "fontStyle" if is_text => {
@@ -958,8 +993,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 });
                 true
             }
-            "fontWeight" | "fontStyle" | "lineHeight" | "letterSpacing" | "textAlign"
-            | "textDecoration" => true, // inherited by text children
+            "fontFamily" | "fontWeight" | "fontStyle" | "lineHeight" | "letterSpacing"
+            | "textAlign" | "textDecoration" => true, // inherited by text children
             "border" | "outline" | "borderTop" | "borderRight" | "borderBottom" | "borderLeft" => {
                 apply_border(n, v, fs)
             }
@@ -1297,12 +1332,12 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         NodeKind::Text {
             font_size, align, ..
         } => {
-            put("fontFamily", "Inter".into());
-            put("fontSize", px(*font_size));
             put(
-                "fontWeight",
-                if n.text_style.bold { "700" } else { "400" }.into(),
+                "fontFamily",
+                n.text_style.family.as_deref().unwrap_or("Inter").into(),
             );
+            put("fontSize", px(*font_size));
+            put("fontWeight", n.text_style.base_weight().to_string());
             if n.text_style.italic {
                 put("fontStyle", "italic".into());
             }
@@ -1403,6 +1438,32 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_family_takes_the_first_named_family() {
+        assert_eq!(font_family("Inter").as_deref(), Some("Inter"));
+        assert_eq!(
+            font_family("'Playfair Display', serif").as_deref(),
+            Some("Playfair Display")
+        );
+        assert_eq!(font_family("\"Geist\"").as_deref(), Some("Geist"));
+        assert_eq!(font_family("sans-serif"), None);
+        assert_eq!(font_family("-apple-system, Roboto"), None);
+    }
+
+    #[test]
+    fn font_weight_reads_keywords_and_numbers() {
+        for (v, w) in [
+            ("bold", 700),
+            ("normal", 400),
+            ("550", 550),
+            ("0", 1),
+            ("2000", 1000),
+            ("nope", 400),
+        ] {
+            assert_eq!(font_weight(v), w, "{v}");
+        }
+    }
     use crate::geom::Rect;
     use crate::model::NodeId;
 
