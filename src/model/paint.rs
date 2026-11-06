@@ -282,6 +282,43 @@ pub struct TextSpan {
     pub strike: Option<bool>,
 }
 
+/// Extra advance per character. An em value follows the node's font size, spans included,
+/// because CSS resolves em on the element that sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LetterSpacing {
+    /// Saved as a bare number, the shape every file had before em existed.
+    Px(f64),
+    Em {
+        em: f64,
+    },
+}
+
+impl Default for LetterSpacing {
+    fn default() -> Self {
+        LetterSpacing::Px(0.0)
+    }
+}
+
+impl LetterSpacing {
+    pub fn px(self, font_size: f64) -> f64 {
+        match self {
+            LetterSpacing::Px(v) => v,
+            LetterSpacing::Em { em } => em * font_size,
+        }
+    }
+
+    /// The same spacing at `font_size`, in em or px.
+    pub fn converted(self, to_em: bool, font_size: f64) -> Self {
+        let px = self.px(font_size);
+        match self {
+            LetterSpacing::Px(_) if to_em => LetterSpacing::Em { em: px / font_size },
+            LetterSpacing::Em { .. } if !to_em => LetterSpacing::Px(px),
+            same => same,
+        }
+    }
+}
+
 /// Node-wide text attributes beyond size and alignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -297,8 +334,7 @@ pub struct TextStyle {
     /// Line height as a multiple of the font size (None = font default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_height: Option<f64>,
-    /// Extra advance per character, in px.
-    pub letter_spacing: f64,
+    pub letter_spacing: LetterSpacing,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<TextSpan>,
 }
@@ -627,6 +663,27 @@ pub struct InstanceLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letter_spacing_keeps_old_files_readable_and_saves_its_unit() {
+        let old: TextStyle = serde_json::from_str(r#"{"letter_spacing": 1.5}"#).unwrap();
+        assert_eq!(old.letter_spacing, LetterSpacing::Px(1.5));
+        let ts = TextStyle {
+            letter_spacing: LetterSpacing::Em { em: -0.025 },
+            ..TextStyle::default()
+        };
+        let saved = serde_json::to_string(&ts).unwrap();
+        assert_eq!(serde_json::from_str::<TextStyle>(&saved).unwrap(), ts);
+    }
+
+    #[test]
+    fn converting_letter_spacing_keeps_how_it_looks() {
+        let px = LetterSpacing::Px(-0.8);
+        let em = px.converted(true, 32.0);
+        assert_eq!(em, LetterSpacing::Em { em: -0.025 });
+        assert_eq!(em.converted(true, 16.0), em);
+        assert_eq!(em.converted(false, 32.0), px);
+    }
 
     #[test]
     fn set_weight_keeps_bold_in_step_and_plain_weights_out_of_the_file() {

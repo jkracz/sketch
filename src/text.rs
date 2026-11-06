@@ -239,7 +239,7 @@ pub fn layout_rich(
     let input = ShapeInput {
         picks: &picks,
         styles: &styles,
-        letter_spacing: ts.letter_spacing,
+        letter_spacing: ts.letter_spacing.px(font_size),
     };
     let base_face = resolve(ts.family.as_deref(), ts.base_weight(), ts.italic);
     // Break into lines: hard breaks on '\n', soft breaks at spaces when wrapping.
@@ -604,6 +604,7 @@ pub fn layout_node(n: &crate::model::Node) -> Option<TextLayout> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::LetterSpacing;
 
     #[test]
     fn layout_basic_and_newlines() {
@@ -724,7 +725,7 @@ mod tests {
     #[test]
     fn letter_spacing_turns_ligatures_off() {
         let ts = TextStyle {
-            letter_spacing: 2.0,
+            letter_spacing: LetterSpacing::Px(2.0),
             ..ligature_style()
         };
         let spaced = laid_out("fi", &ts);
@@ -773,9 +774,23 @@ mod tests {
     }
 
     #[test]
+    fn em_letter_spacing_follows_the_font_size() {
+        let ts = TextStyle {
+            letter_spacing: LetterSpacing::Em { em: 0.5 },
+            ..TextStyle::default()
+        };
+        let width = |ts: &TextStyle, size| {
+            layout_rich("ab", size, Color::INK, ts, None, TextAlign::Left).width
+        };
+        let plain = TextStyle::default();
+        assert!((width(&ts, 40.0) - width(&plain, 40.0) - 40.0).abs() < 1e-9);
+        assert!((width(&ts, 20.0) - width(&plain, 20.0) - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn letter_spacing_adds_to_every_character() {
         let ts = TextStyle {
-            letter_spacing: 3.0,
+            letter_spacing: LetterSpacing::Px(3.0),
             ..TextStyle::default()
         };
         let plain = laid_out("ab", &TextStyle::default());

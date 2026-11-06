@@ -52,7 +52,8 @@ fn token_type() -> Value {
 fn token_value() -> Value {
     json!({
         "anyOf": [{"type": "string"}, {"type": "number"}],
-        "description": "A CSS color for color tokens; px for sizes (\"8px\"); a number for \
+        "description": "A CSS color for color tokens; px for sizes (\"8px\"); px or em for \
+                        letterSpacing (\"-0.025em\" follows the text's font size); a number for \
                         fontWeight; a multiple or percent for lineHeight (1.5, \"150%\"); 0 to 1 \
                         or a percent for opacity. `var(--other-token)` aliases another token.",
     })
@@ -666,7 +667,8 @@ so changing the token updates it on every page. Bindable: background and text co
 color, border radius, opacity, gap, padding, font size, weight, line height and letter spacing.
 Inside a longer value (1px solid var(--line)) or on an inline span, the token's value is used
 without a binding. Setting a plain value on a bound property detaches it. get_computed_styles
-and get_jsx show bound properties as var(--token).
+and get_jsx show bound properties as var(--token). Letter spacing in em, plain or from a token,
+follows the text's font size.
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 

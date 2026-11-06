@@ -5,7 +5,7 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 use sketch_rs::mcp::{Out, exec};
-use sketch_rs::model::{Color, NodeId, NodeKind, TokenProp};
+use sketch_rs::model::{Color, LetterSpacing, NodeId, NodeKind, TokenProp};
 use sketch_rs::project::Store;
 use sketch_rs::render::frame;
 use sketch_rs::ui::{SidebarTab, UiState};
@@ -354,6 +354,81 @@ fn tokens_and_bindings_survive_closing_the_project() {
     third.session.open(&mut third.ed, &dir).unwrap();
     let n = third.ed.doc.get(id).unwrap();
     assert_eq!(n.style.fill(), Some(Color::rgb(255, 0, 0)));
+}
+
+/// The MCP id of a 32px text node bound to `--tracking-tight`, which is -0.025em.
+fn tracked_text(h: &mut exec::SessionHost) -> Value {
+    call(
+        h,
+        "create_tokens",
+        json!({"tokens": [{"name": "--tracking-tight", "type": "letterSpacing", "value": "-0.025em"}]}),
+    );
+    let ab = artboard(h);
+    call(
+        h,
+        "write_html",
+        json!({
+            "targetNodeId": ab, "mode": "insert-children",
+            "html": "<div style=\"font-size: 32px; letter-spacing: var(--tracking-tight)\">Heading</div>",
+        }),
+    );
+    let text = (h.ed.doc.nodes.values())
+        .find(|n| matches!(n.kind, NodeKind::Text { .. }))
+        .unwrap();
+    let (page, _) = ab.as_str().unwrap().rsplit_once(':').unwrap();
+    json!(format!("{page}:{}", text.id.0))
+}
+
+#[test]
+fn em_tracking_tokens_stay_bound_when_the_font_size_changes() {
+    let mut h = host();
+    let text = tracked_text(&mut h);
+    let id = node(&text);
+
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [text], "styles": {"fontSize": "16px"}}]}),
+    );
+    let n = h.ed.doc.get(id).unwrap();
+    assert!(n.tokens.contains_key(&TokenProp::LetterSpacing));
+    assert_eq!(
+        n.text_style.letter_spacing,
+        LetterSpacing::Em { em: -0.025 }
+    );
+
+    let listed = call(&mut h, "get_tokens", json!({}));
+    assert!(listed.to_string().contains("-0.025em"), "{listed}");
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [text]}));
+    let s = styles.as_object().unwrap().values().next().unwrap();
+    assert_eq!(s["letterSpacing"], "var(--tracking-tight)", "{s}");
+
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--tracking-tight", "value": "2px"}]}),
+    );
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(n.text_style.letter_spacing, LetterSpacing::Px(2.0));
+    assert!(n.tokens.contains_key(&TokenProp::LetterSpacing));
+}
+
+#[test]
+fn em_tracking_survives_closing_the_project() {
+    let mut h = host();
+    let id = node(&tracked_text(&mut h));
+    let dir = h.session.project.as_ref().unwrap().dir.clone();
+    h.session.save(&mut h.ed).unwrap();
+
+    let mut again = exec::SessionHost::new(h.session.store.clone());
+    again.session.open(&mut again.ed, &dir).unwrap();
+    assert_eq!(again.ed.tokens, h.ed.tokens);
+    let n = again.ed.doc.get(id).unwrap();
+    assert_eq!(
+        n.text_style.letter_spacing,
+        LetterSpacing::Em { em: -0.025 }
+    );
+    assert!(n.tokens.contains_key(&TokenProp::LetterSpacing));
 }
 
 #[test]

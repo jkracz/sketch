@@ -8,8 +8,8 @@ use crate::editor::vector_ops::BoolOp;
 use crate::editor::{AppRequest, Editor};
 use crate::geom::v2;
 use crate::model::{
-    Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, ImageMode, Join, Node, NodeId,
-    NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign, TokenProp,
+    Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, ImageMode, Join,
+    LetterSpacing, Node, NodeId, NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign, TokenProp,
 };
 use crate::render::scene::CanvasStyle;
 use crate::theme;
@@ -56,6 +56,32 @@ fn row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
         add(ui)
     })
     .inner
+}
+
+/// The letter spacing field, in the unit of the value it shows.
+fn letter_spacing_field(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    value: LetterSpacing,
+) -> Option<LetterSpacing> {
+    let (mut v, speed, range, decimals) = match value {
+        LetterSpacing::Px(v) => (v, 0.1, -50.0..=200.0, 2),
+        LetterSpacing::Em { em } => (em, 0.001, -100.0..=100.0, 4),
+    };
+    let before = v;
+    let r = ui.add_sized(
+        egui::vec2(66.0, 20.0),
+        egui::DragValue::new(&mut v)
+            .speed(speed)
+            .range(range)
+            .max_decimals(decimals)
+            .prefix("LS "),
+    );
+    seal_on_release(ed, &r);
+    (r.changed() && v != before).then_some(match value {
+        LetterSpacing::Px(_) => LetterSpacing::Px(v),
+        LetterSpacing::Em { .. } => LetterSpacing::Em { em: v },
+    })
 }
 
 /// A compact number field with a leading letter (like Figma's "X 120").
@@ -978,7 +1004,8 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 });
             }
         }
-        ui.add_space(6.0);
+    });
+    ui.horizontal(|ui| {
         let lh = first.text_style.line_height.unwrap_or(0.0) * 100.0;
         if let Some(v) = num_field(ui, ed, "LH ", lh, 1.0, 0.0..=1000.0, 64.0) {
             apply(ed, "line height", ids, |n| {
@@ -986,17 +1013,18 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
             });
         }
         picker(ui, ed, ids, TokenProp::LineHeight);
-        if let Some(v) = num_field(
-            ui,
-            ed,
-            "LS ",
-            first.text_style.letter_spacing,
-            0.1,
-            -50.0..=200.0,
-            60.0,
-        ) {
+        let spacing = first.text_style.letter_spacing;
+        if let Some(v) = letter_spacing_field(ui, ed, spacing) {
             apply(ed, "letter spacing", ids, |n| {
                 n.text_style.letter_spacing = v
+            });
+        }
+        let em = matches!(spacing, LetterSpacing::Em { .. });
+        let tip = "Switch between px and em. Em follows the font size.";
+        if icon_toggle(ui, if em { "em" } else { "px" }, em, tip) {
+            apply(ed, "letter spacing", ids, |n| {
+                let size = n.kind.font_size().unwrap_or(16.0);
+                n.text_style.letter_spacing = n.text_style.letter_spacing.converted(!em, size);
             });
         }
         picker(ui, ed, ids, TokenProp::LetterSpacing);
