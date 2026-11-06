@@ -432,7 +432,7 @@ impl App {
                     let n = items.len();
                     self.st.library.library.items.extend(items);
                     self.st.library.dirty = true;
-                    self.st.show_library = true;
+                    self.st.sidebar = crate::ui::SidebarTab::Library;
                     format!("Added {n} item(s) to the library")
                 }),
             "svg" | "excalidraw" | "json" => text().and_then(|t| {

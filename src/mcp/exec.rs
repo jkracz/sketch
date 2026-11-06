@@ -14,7 +14,7 @@ use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::model::{
     AutoLayout, Binding, Color, Direction, Document, Head, ImageMode, Node, NodeId, NodeKind,
-    Paint, PathPoint, Route, Sizing, SubPath, TextAlign,
+    Paint, PathPoint, Route, Sizing, SubPath, TextAlign, Token, TokenKind, TokenProp, TokenSet,
 };
 use crate::project::{Project, Store};
 use crate::render::gpu::Headless;
@@ -283,6 +283,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "move_nodes" => move_nodes(ed, &a),
                 "select_nodes" => select_nodes(ed, &a),
                 "undo" | "redo" => undo_redo(ed, &a, name == "undo"),
+                "get_tokens" => get_tokens(ed, &a),
+                "create_tokens" => create_tokens(ed, &a),
+                "set_tokens" => set_tokens(ed, &a),
                 "finish_working_on_nodes" => {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
@@ -497,6 +500,7 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
         "artboards": artboards,
         "otherTopLevelLayers": others,
         "fontFamilies": ["Inter"],
+        "tokens": token_list(&ed.tokens),
         "selectionCount": if page == ed.active_page { ed.selection.len() } else { 0 },
         "nodeIdFormat": "\"<page>:<n>\", e.g. \"".to_string() + &node_key(ed, page, NodeId(1)) + "\"",
     }))
@@ -690,14 +694,9 @@ fn computed_styles(ed: &mut Editor, a: &Args) -> ToolResult {
         let (page, id) = resolve(ed, &k, def)?;
         let doc = ed.page_doc(page);
         let n = doc.get(id).unwrap();
-        out.insert(
-            node_key(ed, page, id),
-            Value::Object(css::computed(
-                n,
-                parent_layout(doc, n).as_ref(),
-                n.parent.is_none(),
-            )),
-        );
+        let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
+        show_token_vars(&ed.tokens, n, &mut st);
+        out.insert(node_key(ed, page, id), Value::Object(st));
     }
     text(Value::Object(out))
 }
@@ -723,6 +722,156 @@ fn fill_image(ed: &mut Editor, a: &Args) -> ToolResult {
         },
         Out::Text(json!({"asset": asset, "width": img.width, "height": img.height}).to_string()),
     ])
+}
+
+// ------------------------------------------------------------------ design tokens
+
+fn token_json(tokens: &TokenSet, t: &Token) -> Value {
+    let mut v = json!({
+        "name": tokens.css_name(t),
+        "type": t.kind.key(),
+        "value": tokens.css_value(t),
+    });
+    if let Some(d) = &t.description {
+        v["description"] = json!(d);
+    }
+    v
+}
+
+fn token_list(tokens: &TokenSet) -> Vec<Value> {
+    tokens
+        .sorted()
+        .into_iter()
+        .map(|t| token_json(tokens, t))
+        .collect()
+}
+
+/// A token value from JSON: strings as they are, numbers in plain form.
+fn token_input(v: &Value) -> Result<String, String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Number(n) => Ok(n.to_string()),
+        _ => Err("a token value must be a string or a number".into()),
+    }
+}
+
+/// In computed styles, show a bound property as the variable that owns it.
+fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
+    for (prop, id) in &n.tokens {
+        let Some(t) = tokens.get(id) else { continue };
+        let var = format!("var({})", tokens.css_name(t));
+        let key = prop.css_key(n);
+        if st.contains_key(key) {
+            st.insert(key.into(), json!(var));
+        } else if *prop == TokenProp::Stroke
+            && let Some((rest, _)) = st
+                .get("border")
+                .and_then(Value::as_str)
+                .and_then(|b| b.rsplit_once(' '))
+        {
+            let border = format!("{rest} {var}");
+            st.insert("border".into(), json!(border));
+        }
+    }
+}
+
+fn get_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
+    let kinds: Option<Vec<TokenKind>> = match a.get("types") {
+        Some(_) => {
+            let names = a.strs("types")?;
+            let kinds: Option<Vec<TokenKind>> =
+                names.iter().map(|k| TokenKind::from_key(k)).collect();
+            Some(kinds.ok_or("unknown token type in `types`")?).filter(|k| !k.is_empty())
+        }
+        None => None,
+    };
+    let pattern = a.str("namePattern");
+    let tokens = &ed.tokens;
+    let chosen: Vec<&Token> = tokens
+        .sorted()
+        .into_iter()
+        .filter(|t| kinds.as_ref().is_none_or(|k| k.contains(&t.kind)))
+        .filter(|t| pattern.is_none_or(|p| glob(p, &tokens.css_name(t))))
+        .collect();
+    match a.str("format").unwrap_or("json") {
+        "json" => {
+            let list: Vec<Value> = chosen.iter().map(|t| token_json(tokens, t)).collect();
+            text(json!({"tokens": list}))
+        }
+        "css" => Ok(vec![Out::Text(tokens.stylesheet(&chosen, false))]),
+        "tailwind" => Ok(vec![Out::Text(tokens.stylesheet(&chosen, true))]),
+        f => Err(format!(
+            "format must be \"json\", \"css\" or \"tailwind\", not `{f}`"
+        )),
+    }
+}
+
+fn create_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
+    let entries = a.arr("tokens")?;
+    if entries.is_empty() {
+        return Err("`tokens` needs at least one entry".into());
+    }
+    let results: Vec<Value> = ed.edit_tokens("Create tokens", None, |tokens| {
+        entries
+            .iter()
+            .map(|e| {
+                let made = (|| {
+                    let e = Args(e.as_object().ok_or("each token must be an object")?);
+                    let kind =
+                        TokenKind::from_key(e.req_str("type")?).ok_or("unknown token type")?;
+                    let value = token_input(e.get("value").ok_or("missing `value`")?)?;
+                    tokens.create(kind, e.req_str("name")?, &value, e.str("description"))
+                })();
+                match made {
+                    Ok(id) => {
+                        let t = tokens.get(&id).unwrap();
+                        json!({"name": tokens.css_name(t), "result": "created"})
+                    }
+                    Err(message) => json!({"result": "error", "message": message}),
+                }
+            })
+            .collect()
+    });
+    text(json!({"count": results.len(), "tokens": results}))
+}
+
+fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
+    let entries = a.arr("tokens")?;
+    if entries.is_empty() {
+        return Err("`tokens` needs at least one entry".into());
+    }
+    let results: Vec<Value> = ed.edit_tokens("Update tokens", None, |tokens| {
+        entries
+            .iter()
+            .map(|e| {
+                let done = (|| {
+                    let e = Args(e.as_object().ok_or("each token must be an object")?);
+                    let name = e.req_str("name")?;
+                    let t = tokens.by_css_name(name).ok_or_else(|| {
+                        format!("Token not found: \"{name}\". No token has that CSS variable name.")
+                    })?;
+                    let (id, css_name) = (t.id.clone(), tokens.css_name(t));
+                    if e.get("delete").and_then(Value::as_bool) == Some(true) {
+                        tokens.delete(std::slice::from_ref(&id));
+                        return Ok::<_, String>((css_name, "deleted"));
+                    }
+                    let value = e.get("value").map(token_input).transpose()?;
+                    tokens.update(
+                        &id,
+                        e.str("newName"),
+                        value.as_deref(),
+                        e.str("description"),
+                    )?;
+                    Ok((tokens.css_name(tokens.get(&id).unwrap()), "updated"))
+                })();
+                match done {
+                    Ok((name, result)) => json!({"name": name, "result": result}),
+                    Err(message) => json!({"result": "error", "message": message}),
+                }
+            })
+            .collect()
+    });
+    text(json!({"count": results.len(), "tokens": results}))
 }
 
 /// Case-insensitive glob with `*`, anchored at both ends.
@@ -884,7 +1033,15 @@ fn jsx(host: &mut dyn Host, a: &Args) -> ToolResult {
     let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
     let doc = ed.page_doc(page);
     let mut out = String::new();
-    jsx_node(doc, id, 0, true, assets_dir.as_deref(), &mut out);
+    jsx_node(
+        doc,
+        &ed.tokens,
+        id,
+        0,
+        true,
+        assets_dir.as_deref(),
+        &mut out,
+    );
     Ok(vec![Out::Text(out)])
 }
 
@@ -908,6 +1065,7 @@ fn jsx_text(t: &str) -> String {
 
 fn jsx_node(
     doc: &Document,
+    tokens: &TokenSet,
     id: NodeId,
     depth: usize,
     root: bool,
@@ -917,6 +1075,7 @@ fn jsx_node(
     let n = doc.get(id).unwrap();
     let ind = "  ".repeat(depth);
     let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
+    show_token_vars(tokens, n, &mut st);
     if root {
         for k in ["position", "left", "top"] {
             st.remove(k);
@@ -936,7 +1095,7 @@ fn jsx_node(
                     style_obj(&st)
                 ));
                 for c in &n.children {
-                    jsx_node(doc, *c, depth + 1, false, assets, out);
+                    jsx_node(doc, tokens, *c, depth + 1, false, assets, out);
                 }
                 out.push_str(&format!("{ind}</div>\n"));
             }
@@ -1421,7 +1580,13 @@ fn has_text(el: &Element) -> bool {
     })
 }
 
-fn collect_runs(nodes: &[Html], run: Run, base_fs: f64, out: &mut Vec<(char, Run)>) {
+fn collect_runs(
+    nodes: &[Html],
+    tokens: &TokenSet,
+    run: Run,
+    base_fs: f64,
+    out: &mut Vec<(char, Run)>,
+) {
     for c in nodes {
         match c {
             Html::Text(t) => out.extend(t.chars().map(|ch| (ch, run))),
@@ -1429,6 +1594,7 @@ fn collect_runs(nodes: &[Html], run: Run, base_fs: f64, out: &mut Vec<(char, Run
             Html::Element(e) => {
                 let mut st = ua_styles(&e.tag);
                 st.extend(css::parse_inline(e.attr("style").unwrap_or("")));
+                tokens.expand(&mut st);
                 let mut r = run;
                 for (k, v) in &st {
                     let lower = v.to_ascii_lowercase();
@@ -1450,7 +1616,7 @@ fn collect_runs(nodes: &[Html], run: Run, base_fs: f64, out: &mut Vec<(char, Run
                         _ => {}
                     }
                 }
-                collect_runs(&e.children, r, base_fs, out);
+                collect_runs(&e.children, tokens, r, base_fs, out);
             }
         }
     }
@@ -1487,6 +1653,7 @@ fn collapse(chars: Vec<(char, Run)>, pre: bool) -> Vec<(char, Run)> {
 
 struct Builder<'t, 'a> {
     tx: &'t mut Tx<'a>,
+    tokens: &'t TokenSet,
     page_id: String,
     ignored: BTreeSet<String>,
     warnings: Vec<String>,
@@ -1599,6 +1766,7 @@ impl Builder<'_, '_> {
     ) -> Option<NodeId> {
         let mut own = ua_styles(&el.tag);
         own.extend(css::parse_inline(el.attr("style").unwrap_or("")));
+        self.tokens.expand(&mut own);
         match el.tag.as_str() {
             "head" | "meta" | "link" | "title" | "script" | "style" => None,
             "html" | "body" => {
@@ -1664,7 +1832,7 @@ impl Builder<'_, '_> {
             .unwrap_or(16.0);
         let pre = get(&styles, "whiteSpace").is_some_and(|v| v.starts_with("pre"));
         let mut chars = Vec::new();
-        collect_runs(&el.children, Run::default(), fs, &mut chars);
+        collect_runs(&el.children, self.tokens, Run::default(), fs, &mut chars);
         let chars = collapse(chars, pre);
         if chars.is_empty() {
             return None;
@@ -2037,10 +2205,11 @@ fn free_spot(doc: &Document, w: f64) -> V2 {
 fn create_artboard(ed: &mut Editor, a: &Args) -> ToolResult {
     let page = page_arg(ed, a)?;
     let name = a.str("name").unwrap_or("Artboard").to_string();
-    let styles = css::from_json(
+    let mut styles = css::from_json(
         a.get("styles")
             .ok_or("missing `styles` (width and height are required)")?,
     )?;
+    ed.tokens.expand(&mut styles);
     if get(&styles, "width").is_none() || get(&styles, "height").is_none() {
         return Err("styles.width and styles.height are required (e.g. \"1440px\")".into());
     }
@@ -2122,6 +2291,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     }
     let tree = html::parse(src);
     let page_id = ed.pages[page].id.clone();
+    let tokens = ed.tokens.clone();
     let (created, ignored, warnings) = ed.with_page(page, |ed| {
         ed.edit("Write HTML", |tx| {
             // Where the new content goes.
@@ -2147,6 +2317,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             }
             let mut b = Builder {
                 tx,
+                tokens: &tokens,
                 page_id: page_id.clone(),
                 ignored: BTreeSet::new(),
                 warnings: Vec::new(),
@@ -2259,10 +2430,11 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
                 .collect()
         })
         .unwrap_or_default();
-    let styles = match a.get("styles") {
+    let mut styles = match a.get("styles") {
         Some(s) => css::from_json(s)?,
         None => Vec::new(),
     };
+    ed.tokens.expand(&mut styles);
     let sides = a.num("sides").map(|s| s.clamp(3.0, 64.0) as u32);
     let txt = a.str("text").unwrap_or("").to_string();
     let (x, y) = (a.num("x").unwrap_or(0.0), a.num("y").unwrap_or(0.0));
@@ -2380,7 +2552,8 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
     for u in a.arr("updates")? {
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, ids) = resolve_all(ed, &u.strs("nodeIds")?, def)?;
-        let styles = css::from_json(u.get("styles").ok_or("each update needs `styles`")?)?;
+        let mut styles = css::from_json(u.get("styles").ok_or("each update needs `styles`")?)?;
+        ed.tokens.expand(&mut styles);
         jobs.push((page, ids, styles));
     }
     let mut ignored: Map<String, Value> = Map::new();
@@ -2774,7 +2947,13 @@ mod tests {
         let tree = html::parse("<p>  Hello\n   <b>bold</b> world<br> next </p>");
         let Html::Element(p) = &tree[0] else { panic!() };
         let mut chars = Vec::new();
-        collect_runs(&p.children, Run::default(), 16.0, &mut chars);
+        collect_runs(
+            &p.children,
+            &TokenSet::default(),
+            Run::default(),
+            16.0,
+            &mut chars,
+        );
         let s: String = collapse(chars.clone(), false)
             .iter()
             .map(|(c, _)| *c)

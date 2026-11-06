@@ -73,7 +73,7 @@ are credited in `THIRD_PARTY.md`.
 
   Done when the "Mac check" project is open in the window with the "Hello" frame and its
   heading (and the sticky note) visible, and ⌘Z removes each agent edit in one step.
-* **Not carried over**: comments, design tokens, AI image generation, video export, teams;
+* **Not carried over**: comments, AI image generation, video export, teams;
   moving layers between pages; remote image URLs (see README Known gaps).
 
 ### P6 notes

@@ -461,7 +461,7 @@ fn m4_whiteboard_screenshot() {
     let mut st = UiState {
         project_name: "Retro board".into(),
         save_state: "Saved".into(),
-        show_library: true,
+        sidebar: sketch_rs::ui::SidebarTab::Library,
         ..Default::default()
     };
     st.library.library = sketch_rs::library::starter();

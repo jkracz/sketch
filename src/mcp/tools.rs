@@ -4,6 +4,7 @@
 //! (`analysis/paper-mcp.md` §2), so agent prompts written for Paper carry over. Sketch
 //! additions: `create_shape` (whiteboard shapes and arrows), `select_nodes`, `undo`, `redo`.
 
+use crate::model::TokenKind;
 use serde_json::{Value, json};
 
 pub const INSTRUCTIONS: &str = "\
@@ -22,6 +23,9 @@ padding, align-items, justify-content) is the layout model; no margin, grid or t
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
 delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
 update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
+- Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
+var(--token) in update_styles and write_html styles to bind a property to a token, so later \
+token changes reach it.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
@@ -32,6 +36,20 @@ fn file_id() -> Value {
 
 fn page_id() -> Value {
     json!({"type": "string", "description": "The page to operate on. When omitted the page the user is viewing is used. The user's page can change between calls; prefer explicit page ids."})
+}
+
+fn token_type() -> Value {
+    let kinds: Vec<&str> = TokenKind::ALL.iter().map(|k| k.key()).collect();
+    json!({"type": "string", "enum": kinds, "description": "Design token type."})
+}
+
+fn token_value() -> Value {
+    json!({
+        "anyOf": [{"type": "string"}, {"type": "number"}],
+        "description": "A CSS color for color tokens; px for sizes (\"8px\"); a number for \
+                        fontWeight; a multiple or percent for lineHeight (1.5, \"150%\"); 0 to 1 \
+                        or a percent for opacity. `var(--other-token)` aliases another token.",
+    })
 }
 
 fn styles_schema(desc: &str) -> Value {
@@ -453,6 +471,60 @@ pub fn definitions() -> Vec<Value> {
             &[],
             false,
         ),
+        // ------------------------------------------------------------------ design tokens
+        tool(
+            "get_tokens",
+            "Lists the project's design tokens (colors, spacing, typography...), grouped by \
+             type. Tokens belong to the project, so every page shares them.",
+            json!({
+                "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
+                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case. `*` is the wildcard: \"--color-*\", \"*-500\", \"*brand*\"."},
+                "types": {"type": "array", "items": token_type(), "description": "Only these token types. Omit for all."},
+            }),
+            &[],
+            true,
+        ),
+        tool(
+            "create_tokens",
+            "Creates design tokens. Each entry needs `type`, `name` and `value`; use \
+             `var(--other-token)` as the value to alias a token of the same type. Returns one \
+             result per entry, in order, with errors reported per entry. Creating a token that \
+             already exists with the same type, name and value returns it. Define color tokens \
+             semantically first, neutrals before accents; order other types smallest first. \
+             Reuse tokens before adding new ones.",
+            json!({"tokens": {"type": "array", "minItems": 1, "description": "Tokens to create.", "items": {
+                "type": "object",
+                "properties": {
+                    "type": token_type(),
+                    "name": {"type": "string", "description": "CSS custom property name, e.g. \"--color-primary\"."},
+                    "value": token_value(),
+                    "description": {"type": "string", "maxLength": 1024, "description": "What the token is for and how to use it."},
+                },
+                "required": ["type", "name", "value"],
+            }}}),
+            &["tokens"],
+            false,
+        ),
+        tool(
+            "set_tokens",
+            "Updates or deletes design tokens by CSS variable name, applied in order. Set \
+             `newName` to rename, `value` to change the value (`var(--other)` aliases), \
+             `delete: true` to delete. Changing a value updates every layer bound to the token, \
+             on all pages. Deleting keeps those layers' current values. Results are per entry.",
+            json!({"tokens": {"type": "array", "minItems": 1, "description": "Changes to apply.", "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The token's CSS variable name, e.g. \"--color-primary\"."},
+                    "newName": {"type": "string", "description": "New CSS variable name."},
+                    "value": token_value(),
+                    "description": {"type": "string", "maxLength": 1024, "description": "New description. An empty string clears it."},
+                    "delete": {"type": "boolean", "description": "Delete the token."},
+                },
+                "required": ["name"],
+            }}}),
+            &["tokens"],
+            false,
+        ),
         tool(
             "finish_working_on_nodes",
             "Call when done creating or editing. Saves the project.",
@@ -486,6 +558,15 @@ height/width fit-content hug the content. position:absolute + left/top places fr
 Whiteboard: create_shape makes rectangles, ellipses, diamonds, stickies, text and arrows that
 bind to shapes (they re-route when shapes move). Turn on the hand-drawn look with
 {sketch: true, roughness: 1, fillStyle: \"hachure\"}.
+
+Design tokens: get_tokens first, and reuse what's there. create_tokens adds project-wide CSS
+variables; set_tokens renames, changes or deletes them. A style whose whole value is
+var(--token) in create_artboard, write_html, update_styles or create_shape binds that property,
+so changing the token updates it on every page. Bindable: background and text color, border
+color, border radius, opacity, gap, padding, font size, weight, line height and letter spacing.
+Inside a longer value (1px solid var(--line)) or on an inline span, the token's value is used
+without a binding. Setting a plain value on a bound property detaches it. get_computed_styles
+and get_jsx show bound properties as var(--token).
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 

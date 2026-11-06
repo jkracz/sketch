@@ -337,6 +337,7 @@ pub enum Icon {
     Laser,
     Library,
     Sketch,
+    Token,
 }
 
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -483,6 +484,22 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
                 medium(9.5 * u),
                 color,
             );
+        }
+        Icon::Token => {
+            line(&[
+                pt(8.0, 2.5),
+                pt(13.5, 8.0),
+                pt(8.0, 13.5),
+                pt(2.5, 8.0),
+                pt(8.0, 2.5),
+            ]);
+            line(&[
+                pt(8.0, 6.0),
+                pt(10.0, 8.0),
+                pt(8.0, 10.0),
+                pt(6.0, 8.0),
+                pt(8.0, 6.0),
+            ]);
         }
         Icon::Plus => {
             line(&[pt(8.0, 3.0), pt(8.0, 13.0)]);

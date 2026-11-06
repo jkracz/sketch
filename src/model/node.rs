@@ -3,8 +3,10 @@
 use super::paint::{
     BlendMode, Cap, InstanceLink, Join, LayoutChild, Paint, StrokeAlign, TextStyle,
 };
+use super::tokens::TokenProp;
 use crate::geom::{Rect, V2};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(
@@ -396,6 +398,9 @@ pub struct Node {
     /// Instance link (instance roots and every node inside an instance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<InstanceLink>,
+    /// Properties bound to design tokens, by token id. The fields keep the resolved values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<TokenProp, String>,
 }
 
 /// One anchor of a vector path, with optional bezier handles (node-local, absolute).
@@ -472,6 +477,7 @@ impl Node {
             layout_child: LayoutChild::default(),
             component: false,
             instance: None,
+            tokens: BTreeMap::new(),
         }
     }
 

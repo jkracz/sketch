@@ -10,6 +10,7 @@ pub mod shortcuts;
 pub mod snap;
 pub mod structure;
 pub mod text_edit;
+pub mod tokens;
 pub mod vector_ops;
 pub mod whiteboard;
 
@@ -268,6 +269,10 @@ pub struct Editor {
     /// Hand-drawn style for new shapes (None = clean lines).
     pub sketch: Option<crate::model::rough::Rough>,
     pub sticky_color: Color,
+    /// The project's design tokens, shared by all pages.
+    pub tokens: crate::model::TokenSet,
+    /// Tokens copied in the Tokens panel; kept across projects like `clipboard`.
+    token_clipboard: crate::model::TokenClip,
     /// Requests for the chrome (command palette, rename...).
     pub ui_events: Vec<commands::UiEvent>,
     /// System clipboard (set by the app; None in tests unless injected).
@@ -338,6 +343,8 @@ impl Editor {
             clipboard_style: None,
             clipboard_io: None,
             clipboard_written: None,
+            tokens: Default::default(),
+            token_clipboard: Default::default(),
         }
     }
 
@@ -397,9 +404,11 @@ impl Editor {
         self.cancel_gesture();
         self.end_text_edit();
         self.commit();
-        if let Some(l) = self.history.undo(&mut self.doc) {
+        let tokens = self.tokens.clone();
+        if let Some(l) = self.history.undo(&mut self.doc, &mut self.tokens) {
             self.status = format!("Undo {l}");
         }
+        self.meta_dirty |= tokens != self.tokens;
         self.after_history();
     }
 
@@ -407,9 +416,11 @@ impl Editor {
         self.cancel_gesture();
         self.end_text_edit();
         self.commit();
-        if let Some(l) = self.history.redo(&mut self.doc) {
+        let tokens = self.tokens.clone();
+        if let Some(l) = self.history.redo(&mut self.doc, &mut self.tokens) {
             self.status = format!("Redo {l}");
         }
+        self.meta_dirty |= tokens != self.tokens;
         self.after_history();
     }
 
@@ -417,6 +428,8 @@ impl Editor {
         self.revision += 1;
         self.doc_stamp = next_stamp();
         self.selection.retain(|id| self.doc.nodes.contains_key(id));
+        // Node snapshots in the history hold token values from when they were taken.
+        self.sync_tokens();
     }
 
     /// A pointer gesture (drag, draw, resize...) is in progress.
@@ -452,6 +465,7 @@ impl Editor {
             clipboard_roots: std::mem::take(&mut self.clipboard_roots),
             clipboard_page: self.clipboard_page.take(),
             clipboard_world: std::mem::take(&mut self.clipboard_world),
+            token_clipboard: std::mem::take(&mut self.token_clipboard),
             sketch: self.sketch,
             arrow_route: self.arrow_route,
             sticky_color: self.sticky_color,
@@ -2007,7 +2021,7 @@ impl Editor {
                 if let Some((rec, key)) = self.rec.take() {
                     let mut h = History::default();
                     if h.commit(&self.doc, rec, key) {
-                        h.undo(&mut self.doc);
+                        h.undo(&mut self.doc, &mut self.tokens);
                     }
                     self.after_history();
                 }
