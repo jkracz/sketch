@@ -2,6 +2,7 @@ pub mod document;
 pub mod node;
 pub mod paint;
 pub mod rough;
+pub mod tokens;
 
 pub use document::Document;
 pub use node::{
@@ -9,3 +10,4 @@ pub use node::{
     SubPath, TextAlign,
 };
 pub use paint::*;
+pub use tokens::{Token, TokenClip, TokenKind, TokenProp, TokenSet, TokenValue};

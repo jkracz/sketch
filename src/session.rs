@@ -46,6 +46,7 @@ impl Session {
         crate::assets::load_dir(&dir.join(crate::project::ASSETS_DIR));
         let pages = p.load_pages()?;
         ed.open_pages(pages, p.manifest.active_page.as_deref());
+        ed.tokens = p.manifest.tokens.clone();
         // Freshly loaded pages are saved by definition.
         for i in 0..ed.pages.len() {
             ed.mark_page_saved(i);
@@ -117,6 +118,7 @@ impl Session {
         let wrote = !dirty.is_empty() || ed.meta_dirty;
         p.manifest.pages = pages;
         p.manifest.active_page = Some(ed.active_page_id().to_string());
+        p.manifest.tokens = ed.tokens.clone();
         if wrote {
             p.manifest.modified = now_ms();
             self.thumb_stale = true;

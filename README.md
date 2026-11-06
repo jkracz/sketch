@@ -160,6 +160,7 @@ written for Paper work here too.
 | Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
+| Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens` |
 | Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `select_nodes`, `undo`, `redo` |
 
 `write_html` takes HTML with inline styles: flexbox (`display:flex`, direction, gap, padding,
@@ -168,7 +169,8 @@ text gets size, weight, italic, color, line height, letter spacing, alignment an
 runs (`<b>`, `<i>`, `<span style>`); boxes get backgrounds (colors, gradients, images),
 borders, radii, opacity and blend modes; `<img>` takes local paths or `data:` URIs and `<svg>`
 is imported as vectors. `update_styles` takes the same CSS as JSON, plus the hand-drawn keys
-`sketch`, `roughness`, `fillStyle`, `strokeStyle`. Node ids look like `3fa9c1:14` (page and
+`sketch`, `roughness`, `fillStyle`, `strokeStyle`. A style that is exactly `var(--token)` binds
+the property to that design token. Node ids look like `3fa9c1:14` (page and
 node); `pageId` lets an agent work on another page without switching the user's view.
 
 ## Tests
@@ -221,6 +223,26 @@ select, Shift-click to add, double-click to rename, and use 👁 / 🔒 to hide 
 * The pencil keeps a constant on-screen width at any zoom. With nothing selected, set width,
   smoothing and color in the Design panel.
 * Hold ⌘/Ctrl while dragging to suspend snapping.
+
+### Design tokens
+
+![Design tokens](docs/screenshots/milestone6_tokens.png)
+
+Tokens are named colors, sizes and type settings that every page of a project shares. The
+**Tokens** tab in the left sidebar lists them. Press **+** to add one, click a token to edit
+its name, value and note, and right-click to duplicate, copy, paste or delete. ⌘-click and
+Shift-click select several. A value can point at another token of the same type with
+`var(--other-token)`. The **⋯** menu copies every token as CSS or Tailwind, and tokens pasted
+into another project are independent copies.
+
+In the Design panel, the diamond next to a property opens the token picker. It appears once
+the project has a token of the right type, and lights up when a token owns the property.
+Changing a token updates every layer bound to it, on all pages. Tokens work for fill, stroke,
+radius, opacity, gap, padding, font size, weight, line height and letter spacing.
+
+Typing a plain value into a bound property, or choosing **Detach**, unlinks it and keeps the
+value. Deleting a token leaves the layers looking the same. Token edits undo on the page they
+were made on.
 
 ### Keyboard shortcuts
 
@@ -283,12 +305,14 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 | Import .excalidraw / SVG, copy-paste across projects | – | ✓ (SVG) | ✓ | ✅ .excalidraw scenes, .excalidrawlib libraries, SVG (paths, gradients, images, text), system clipboard between pages, projects and apps |
 | Freehand ink with pressure | – | (pencil) | ✓ | ✅ Smoothing, pressure, eraser |
 | MCP server for AI agents | ✓ | ✓ (Dev Mode) | ✓ (community) | ✅ Streamable HTTP in the app + stdio bridge; Paper-compatible tool names, `write_html`, screenshots, whiteboard shapes |
+| Design tokens | ✓ | ✓ (variables) | – | ✅ Colors, sizes and type shared across pages; aliases, CSS and Tailwind output, MCP tools |
 | Multiplayer, cloud sync, plugins | ✓ | ✓ | ✓ | ❌ local-first by design |
 
 ## Known gaps
 
 * **Paper's document model is HTML/CSS.** Sketch uses geometric nodes with flexbox-like auto
-  layout on frames; there are no variables, CSS export or code generation.
+  layout on frames. Design tokens export as CSS variables, but there's no CSS export of
+  layers and no code generation.
 * **Rendering approximations.** Frame clipping is a rectangle (scissor), so rounded frames
   don't clip their corners. Group opacity multiplies into children instead of compositing the
   group. Overlay, color dodge/burn, hard/soft light, difference, exclusion, hue, saturation,
@@ -319,8 +343,8 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
   inside shapes stays a separate text layer (except sticky notes), and fonts map to Inter.
   SVG patterns, filters, masks and clip paths are not imported.
 * **MCP**: one project is open at a time, so `fileId` must name the open project (call
-  `open_file` to switch; the user's window switches too). No design tokens, comments or AI
-  image generation (Paper has them). Moving or duplicating layers between pages isn't
+  `open_file` to switch; the user's window switches too). No comments or AI image
+  generation (Paper has them). Moving or duplicating layers between pages isn't
   supported. Remote `http(s)` images aren't fetched; pass a local path or a `data:` URI.
   CSS margin, grid, shadows and transforms are reported back as ignored styles.
 * **Linux file dialogs** need an XDG desktop portal. Without one, Save/Open dialogs return
@@ -331,7 +355,7 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 ```
 src/geom.rs        vectors, rects, camera
 src/vector.rs      bezier paths: flatten, hit test, SVG data, shapes, dashes
-src/model/         Node / NodeKind / paints / Document arena
+src/model/         Node / NodeKind / paints / Document arena / design tokens
 src/history.rs     transactions, undo/redo
 src/layout.rs      auto layout, constraints, group bounds
 src/ink.rs         stroke smoothing, pressure, outline
@@ -345,7 +369,7 @@ src/io/            PNG, SVG, PDF, export scopes, Excalidraw + SVG import, clipbo
                    atomic writes
 src/connector.rs   arrow bindings, elbow router, arrowheads
 src/library.rs     shared shape library
-src/ui/            home screen, pages, layers, inspector
+src/ui/            home screen, pages, layers, tokens, inspector
 src/app.rs         winit application
 src/mcp/           MCP server (rmcp): tools, HTML/CSS mapping, HTTP service
 src/bin/sketch-rs-mcp.rs  stdio bridge to the running app

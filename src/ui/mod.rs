@@ -6,6 +6,7 @@ pub mod inspector;
 pub mod library;
 pub mod pages;
 pub mod palette;
+pub mod tokens;
 
 use crate::editor::shortcuts::{self, Action};
 use crate::editor::{Editor, Tool};
@@ -35,8 +36,9 @@ pub struct UiState {
     pub save_state: String,
     pub pages: pages::PagesUi,
     pub library: library::LibraryUi,
-    /// Left sidebar shows the library instead of the layers.
-    pub show_library: bool,
+    pub tokens: tokens::TokensUi,
+    /// What the lower part of the left sidebar shows.
+    pub sidebar: SidebarTab,
     pub palette: palette::PaletteUi,
     /// All panels hidden (⌘\\): just the canvas.
     pub hide_ui: bool,
@@ -44,6 +46,15 @@ pub struct UiState {
     pub layer_drag: Option<(NodeId, Option<LayerDrop>)>,
     /// Row rects of the last layers-panel frame (for drop targeting).
     pub layer_rows: Vec<(NodeId, egui::Rect, usize)>,
+}
+
+/// The tabs of the left sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarTab {
+    #[default]
+    Layers,
+    Library,
+    Tokens,
 }
 
 /// Where a dragged layer lands relative to a row.
@@ -94,7 +105,7 @@ pub fn draw(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) -> egui::Rect {
             UiEvent::Rename(id) => {
                 if let Some(n) = ed.doc.get(id) {
                     st.renaming = Some((id, n.name.clone()));
-                    st.show_library = false;
+                    st.sidebar = SidebarTab::Layers;
                     st.hide_ui = false;
                 }
             }
@@ -290,8 +301,12 @@ fn layers(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     ui.add_space(6.0);
     let p = theme::pal(ui);
     ui.horizontal(|ui| {
-        for (lib, label) in [(false, "Layers"), (true, "Library")] {
-            let on = st.show_library == lib;
+        for (tab, label) in [
+            (SidebarTab::Layers, "Layers"),
+            (SidebarTab::Library, "Library"),
+            (SidebarTab::Tokens, "Tokens"),
+        ] {
+            let on = st.sidebar == tab;
             let r = ui.add(
                 egui::Label::new(
                     RichText::new(label)
@@ -301,10 +316,10 @@ fn layers(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                 .sense(egui::Sense::click()),
             );
             if r.clicked() {
-                st.show_library = lib;
+                st.sidebar = tab;
             }
         }
-        if st.show_library {
+        if st.sidebar != SidebarTab::Layers {
             return;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -327,9 +342,10 @@ fn layers(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
         });
     });
     ui.add_space(2.0);
-    if st.show_library {
-        library::panel(ui, ed, st);
-        return;
+    match st.sidebar {
+        SidebarTab::Library => return library::panel(ui, ed, st),
+        SidebarTab::Tokens => return tokens::panel(ui, ed, st),
+        SidebarTab::Layers => {}
     }
     egui::ScrollArea::vertical()
         .auto_shrink(false)

@@ -7,6 +7,7 @@
 //! back into CSS for `get_computed_styles` / `get_jsx`.
 
 use crate::geom::v2;
+use crate::model::TokenProp;
 use crate::model::rough::{FillStyle, Rough};
 use crate::model::{
     Align, AutoLayout, BlendMode, Color, Direction, ImageMode, Node, NodeKind, Paint, Sizing, Stop,
@@ -489,6 +490,10 @@ pub fn url(s: &str) -> Option<String> {
 
 // ------------------------------------------------------------------------------ apply
 
+/// Style key prefix that binds a property to a token: `<marker><cssKey>` holds the token id.
+/// [`crate::model::TokenSet::expand`] adds these after replacing `var(--token)`.
+pub const TOKEN_MARKER: &str = "--token:";
+
 /// Where the node sits, for properties whose meaning depends on the parent.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Context {
@@ -628,6 +633,12 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let fs = n.kind.font_size().unwrap_or(16.0);
     for (k, v) in styles {
         let v = v.trim();
+        if let Some(key) = k.strip_prefix(TOKEN_MARKER) {
+            if let Some(prop) = TokenProp::from_css_key(key, n) {
+                n.tokens.insert(prop, v.to_string());
+            }
+            continue;
+        }
         let lower = v.to_ascii_lowercase();
         let ok = match k.as_str() {
             "fontSize" => true, // applied above; inherited by text children

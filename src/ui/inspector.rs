@@ -2,13 +2,14 @@
 //! constraints, text, fills, stroke and layer properties. Edits are coalesced per field so a
 //! drag on a number is one undo step, and edits inside instances become overrides.
 
+use super::tokens::picker;
 use super::{UiState, c32, from32, section, title_text};
 use crate::editor::vector_ops::BoolOp;
 use crate::editor::{AppRequest, Editor};
 use crate::geom::v2;
 use crate::model::{
     Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, ImageMode, Join, Node, NodeId,
-    NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign,
+    NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign, TokenProp,
 };
 use crate::theme;
 use egui::{RichText, Ui};
@@ -250,6 +251,7 @@ fn sticky_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                     }
                 });
             }
+            picker(ui, ed, ids, TokenProp::FontSize);
         });
     }
 }
@@ -695,6 +697,7 @@ fn geometry(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 ) {
                     apply(ed, "radius", ids, |n| n.style.corner_radius = v);
                 }
+                picker(ui, ed, ids, TokenProp::Radius);
             } else {
                 let rr = first.style.corner_radii();
                 for (i, p) in ["TL", "TR", "BR", "BL"].iter().enumerate() {
@@ -886,6 +889,7 @@ fn auto_layout(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         if icon_btn(ui, theme::Icon::SpaceBetween, l.gap_auto, "Space between") {
             set(ed, &|l| l.gap_auto = !l.gap_auto);
         }
+        picker(ui, ed, ids, TokenProp::Gap);
     });
     ui.horizontal(|ui| {
         for (i, p) in ["T ", "R ", "B ", "L "].iter().enumerate() {
@@ -893,6 +897,7 @@ fn auto_layout(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 set(ed, &|l| l.padding[i] = v);
             }
         }
+        picker(ui, ed, ids, TokenProp::Padding);
     });
     let opts = [
         (Align::Start, "Start"),
@@ -933,14 +938,17 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         if let Some(v) = num_field(ui, ed, "Size ", size, 0.5, 1.0..=1000.0, 80.0) {
             ed.style_text("font size", |s| s.size = Some(v));
         }
+        picker(ui, ed, ids, TokenProp::FontSize);
         let c = cs.map(|c| c.color).unwrap_or(Color::INK);
         if let Some(nc) = color_button(ui, ed, c) {
             ed.style_text("color", |s| s.color = Some(nc));
         }
+        picker(ui, ed, ids, TokenProp::Fill);
         ui.add_space(4.0);
         if icon_toggle(ui, "B", cs.is_some_and(|c| c.bold), "Bold (⌘B)") {
             ed.toggle_bold();
         }
+        picker(ui, ed, ids, TokenProp::FontWeight);
         if icon_toggle(ui, "I", cs.is_some_and(|c| c.italic), "Italic (⌘I)") {
             ed.toggle_italic();
         }
@@ -972,6 +980,7 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 n.text_style.line_height = (v > 0.0).then_some(v / 100.0)
             });
         }
+        picker(ui, ed, ids, TokenProp::LineHeight);
         if let Some(v) = num_field(
             ui,
             ed,
@@ -985,6 +994,7 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 n.text_style.letter_spacing = v
             });
         }
+        picker(ui, ed, ids, TokenProp::LetterSpacing);
     });
     if ids.len() == 1 && ed.text_edit.is_none() {
         let NodeKind::Text { text, .. } = &first.kind else {
@@ -1024,11 +1034,12 @@ fn fills(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
     // Top fill first, as in Figma.
     for i in (0..fills.len()).rev() {
         let p = fills[i].clone();
-        ui.push_id(i, |ui| fill_row(ui, ed, ids, i, &p));
+        let top = i + 1 == fills.len();
+        ui.push_id(i, |ui| fill_row(ui, ed, ids, i, top, &p));
     }
 }
 
-fn fill_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, p: &Paint) {
+fn fill_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, top: bool, p: &Paint) {
     let set = |ed: &mut Editor, np: Paint| {
         apply(ed, "fills", ids, |n| {
             if let Some(slot) = n.style.fills.get_mut(i) {
@@ -1064,7 +1075,18 @@ fn fill_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, p: &Paint) {
                 if let Some(c) = color_button(ui, ed, *color) {
                     set(ed, Paint::solid(c));
                 }
-                ui.label(RichText::new(color.to_hex()).monospace().weak());
+                let bound = ids
+                    .first()
+                    .and_then(|id| ed.doc.get(*id))
+                    .filter(|_| top)
+                    .and_then(|n| ed.bound_token(n, TokenProp::Fill));
+                match bound {
+                    Some(t) => ui.label(RichText::new(t.name.as_str()).weak()),
+                    None => ui.label(RichText::new(color.to_hex()).monospace().weak()),
+                };
+                if top {
+                    picker(ui, ed, ids, TokenProp::Fill);
+                }
             }
             Paint::Image {
                 mode,
@@ -1192,6 +1214,7 @@ fn stroke(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         if let Some(nc) = color_button(ui, ed, c) {
             apply(ed, "stroke", ids, |n| n.style.stroke = Some(nc));
         }
+        picker(ui, ed, ids, TokenProp::Stroke);
         if let Some(v) = num_field(ui, ed, "W ", s.stroke_width, 0.1, 0.0..=500.0, 64.0) {
             apply(ed, "stroke width", ids, |n| n.style.stroke_width = v);
         }
@@ -1262,5 +1285,6 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
             apply(ed, "opacity", ids, |n| n.style.opacity = op / 100.0);
         }
         seal_on_release(ed, &r);
+        picker(ui, ed, ids, TokenProp::Opacity);
     });
 }

@@ -1,6 +1,6 @@
 //! ⌘K command palette: fuzzy search over every action, tool, page, layer and library item.
 
-use super::UiState;
+use super::{SidebarTab, UiState};
 use crate::editor::shortcuts::{self, Action};
 use crate::editor::{Editor, Tool};
 use crate::model::NodeId;
@@ -32,6 +32,7 @@ pub enum Command {
     Layer(NodeId),
     Library(String),
     ToggleLibrary,
+    ToggleTokens,
 }
 
 pub struct Entry {
@@ -122,13 +123,22 @@ pub fn entries(ed: &Editor, st: &UiState) -> Vec<Entry> {
         }
     }
     out.push(Entry {
-        label: if st.show_library {
+        label: if st.sidebar == SidebarTab::Library {
             "Show layers".into()
         } else {
             "Show library".into()
         },
         detail: String::new(),
         cmd: Command::ToggleLibrary,
+    });
+    out.push(Entry {
+        label: if st.sidebar == SidebarTab::Tokens {
+            "Show layers".into()
+        } else {
+            "Show tokens".into()
+        },
+        detail: String::new(),
+        cmd: Command::ToggleTokens,
     });
     for (i, p) in ed.pages.iter().enumerate() {
         out.push(Entry {
@@ -189,8 +199,17 @@ pub fn run(ed: &mut Editor, st: &mut UiState, cmd: Command) {
                 ed.insert_library_item(&item, at);
             }
         }
-        Command::ToggleLibrary => st.show_library = !st.show_library,
+        Command::ToggleLibrary => toggle_tab(st, SidebarTab::Library),
+        Command::ToggleTokens => toggle_tab(st, SidebarTab::Tokens),
     }
+}
+
+fn toggle_tab(st: &mut UiState, tab: SidebarTab) {
+    st.sidebar = if st.sidebar == tab {
+        SidebarTab::Layers
+    } else {
+        tab
+    };
 }
 
 pub fn draw(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState, canvas: egui::Rect) {

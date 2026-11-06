@@ -5,7 +5,9 @@ use super::Editor;
 use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::layout;
-use crate::model::{AutoLayout, Direction, InstanceLink, Node, NodeId, NodeKind, Sizing};
+use crate::model::{
+    AutoLayout, Direction, InstanceLink, Node, NodeId, NodeKind, Sizing, TokenProp,
+};
 use std::collections::{BTreeSet, HashSet};
 
 /// Property groups an instance can override (and that sync copies from the main component).
@@ -96,6 +98,14 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("layout") {
         inst.layout = main.layout;
         inst.layout_child = main.layout_child;
+    }
+    for prop in TokenProp::ALL {
+        if !ov(override_key(prop.field())) {
+            match main.tokens.get(&prop) {
+                Some(token) => inst.tokens.insert(prop, token.clone()),
+                None => inst.tokens.remove(&prop),
+            };
+        }
     }
     if !is_root && !ov("position") {
         inst.rect.x = main.rect.x;
@@ -298,6 +308,7 @@ impl Editor {
             .map(|(r, _)| r.touched().iter().copied().collect())
             .unwrap_or_default();
         self.reroute_connectors(&touched);
+        self.drop_broken_bindings();
     }
 
     /// Record that `prop` was explicitly changed on nodes inside instances.

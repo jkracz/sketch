@@ -5,7 +5,8 @@
 //! and pushes a [`Change`] that can be applied in either direction.
 
 use crate::geom::V2;
-use crate::model::{Document, Node, NodeId};
+use crate::model::tokens::{TokenEdit, merge_edits};
+use crate::model::{Document, Node, NodeId, TokenSet};
 use std::collections::HashMap;
 
 const MAX_DEPTH: usize = 500;
@@ -23,11 +24,15 @@ pub struct Change {
     entries: Vec<Entry>,
     root: Option<(Vec<NodeId>, Vec<NodeId>)>,
     next_id: (u64, u64),
+    /// Design tokens live in the project, not the page, but undo with the page they were
+    /// edited on.
+    tokens: Vec<TokenEdit>,
     coalesce_key: Option<String>,
 }
 
 impl Change {
-    fn apply(&self, doc: &mut Document, forward: bool) {
+    fn apply(&self, doc: &mut Document, tokens: &mut TokenSet, forward: bool) {
+        tokens.apply_edits(&self.tokens, forward);
         for e in &self.entries {
             let state = if forward { &e.after } else { &e.before };
             match state {
@@ -62,6 +67,7 @@ pub struct Recording {
     order: Vec<NodeId>,
     root_before: Option<Vec<NodeId>>,
     next_id_before: u64,
+    tokens: Vec<TokenEdit>,
 }
 
 impl Recording {
@@ -72,6 +78,10 @@ impl Recording {
     /// The state of a touched node when the transaction began (None if it didn't exist).
     pub fn before(&self, id: NodeId) -> Option<&Option<Node>> {
         self.before.get(&id)
+    }
+    /// Record token changes made during this transaction.
+    pub fn set_tokens(&mut self, edits: Vec<TokenEdit>) {
+        self.tokens = edits;
     }
     pub fn new(label: impl Into<String>, doc: &Document) -> Recording {
         Recording {
@@ -229,7 +239,7 @@ impl History {
             .root_before
             .filter(|b| *b != doc.root)
             .map(|b| (b, doc.root.clone()));
-        if entries.is_empty() && root.is_none() {
+        if entries.is_empty() && root.is_none() && rec.tokens.is_empty() {
             return false;
         }
         let change = Change {
@@ -237,6 +247,7 @@ impl History {
             entries,
             root,
             next_id: (rec.next_id_before, doc.next_id),
+            tokens: rec.tokens,
             coalesce_key,
         };
         self.generation += 1;
@@ -255,18 +266,18 @@ impl History {
         true
     }
 
-    pub fn undo(&mut self, doc: &mut Document) -> Option<String> {
+    pub fn undo(&mut self, doc: &mut Document, tokens: &mut TokenSet) -> Option<String> {
         let c = self.undo.pop()?;
-        c.apply(doc, false);
+        c.apply(doc, tokens, false);
         self.generation += 1;
         let label = c.label.clone();
         self.redo.push(c);
         Some(label)
     }
 
-    pub fn redo(&mut self, doc: &mut Document) -> Option<String> {
+    pub fn redo(&mut self, doc: &mut Document, tokens: &mut TokenSet) -> Option<String> {
         let c = self.redo.pop()?;
-        c.apply(doc, true);
+        c.apply(doc, tokens, true);
         self.generation += 1;
         let label = c.label.clone();
         self.undo.push(c);
@@ -312,6 +323,7 @@ fn merge(older: &mut Change, newer: Change) {
         _ => {}
     }
     older.next_id.1 = newer.next_id.1;
+    merge_edits(&mut older.tokens, newer.tokens);
 }
 
 #[cfg(test)]
@@ -348,15 +360,15 @@ mod tests {
         assert!(doc.nodes.is_empty());
         doc.validate().unwrap();
 
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, s2);
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, s1);
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, Document::default());
-        assert!(h.undo(&mut doc).is_none());
-        h.redo(&mut doc);
-        h.redo(&mut doc);
+        assert!(h.undo(&mut doc, &mut TokenSet::default()).is_none());
+        h.redo(&mut doc, &mut TokenSet::default());
+        h.redo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, s2);
         doc.validate().unwrap();
     }
@@ -389,7 +401,7 @@ mod tests {
             });
         }
         assert_eq!(h.undo_len(), 2);
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc.get(NodeId(1)).unwrap().style.opacity, 1.0);
         assert!(h.can_redo());
         edit(&mut doc, &mut h, None, |tx| {
@@ -424,7 +436,7 @@ mod tests {
         // Can't parent a frame into its own child.
         edit(&mut doc, &mut h, None, |tx| tx.reparent(f, Some(r), None));
         doc.validate().unwrap();
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, before);
     }
 
@@ -444,7 +456,7 @@ mod tests {
         let full = doc.clone();
         edit(&mut doc, &mut h, None, |tx| tx.remove(NodeId(1)));
         assert!(doc.nodes.is_empty() && doc.root.is_empty());
-        h.undo(&mut doc);
+        h.undo(&mut doc, &mut TokenSet::default());
         assert_eq!(doc, full);
     }
 }

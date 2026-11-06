@@ -1,0 +1,480 @@
+//! Design tokens in the editor: undoable token edits, binding node properties to tokens, and
+//! keeping bound properties on every page in step with their tokens.
+
+use super::Editor;
+use crate::history::Recording;
+use crate::model::{Node, NodeId, TokenClip, TokenProp, TokenSet};
+
+impl Editor {
+    /// Change the project's tokens as one undo step on the active page. Bound properties on
+    /// every page follow. `key` merges repeated edits, as a drag on a color picker makes.
+    pub fn edit_tokens<R>(
+        &mut self,
+        label: &str,
+        key: Option<&str>,
+        f: impl FnOnce(&mut TokenSet) -> R,
+    ) -> R {
+        self.begin_coalescing(label, key);
+        let before = self.tokens.clone();
+        let r = f(&mut self.tokens);
+        let edits = self.tokens.diff(&before);
+        if !edits.is_empty() {
+            self.meta_dirty = true;
+            self.revision += 1;
+            if let Some((rec, _)) = &mut self.rec {
+                rec.set_tokens(edits);
+            }
+        }
+        self.commit();
+        self.sync_tokens();
+        r
+    }
+
+    /// Bind `prop` of these layers to a token and take on its value. Layers without the
+    /// property are skipped.
+    pub fn bind_token(&mut self, ids: &[NodeId], prop: TokenProp, token: &str) {
+        let Some(value) = self.tokens.resolve(token) else {
+            return;
+        };
+        let targets: Vec<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.doc.get(*id).is_some_and(|n| prop.applies_to(n)))
+            .collect();
+        let field = prop.field();
+        self.begin(&format!("Apply token to {field}"));
+        {
+            let mut tx = self.tx();
+            for id in &targets {
+                if let Some(n) = tx.node_mut(*id) {
+                    prop.write(n, &value);
+                    n.tokens.insert(prop, token.to_string());
+                }
+            }
+        }
+        self.mark_overrides(&targets, field);
+        for id in &targets {
+            self.fit_text(*id);
+        }
+        self.commit();
+    }
+
+    /// Unbind `prop`, keeping the value the layers show now.
+    pub fn detach_token(&mut self, ids: &[NodeId], prop: TokenProp) {
+        let field = prop.field();
+        self.begin(&format!("Detach token from {field}"));
+        {
+            let mut tx = self.tx();
+            for id in ids {
+                if let Some(n) = tx.node_mut(*id) {
+                    n.tokens.remove(&prop);
+                }
+            }
+        }
+        self.mark_overrides(ids, field);
+        self.commit();
+    }
+
+    /// The token `prop` is bound to on `n`, if it still exists.
+    pub fn bound_token(&self, n: &Node, prop: TokenProp) -> Option<&crate::model::Token> {
+        self.tokens.get(n.tokens.get(&prop)?)
+    }
+
+    /// End-of-transaction check: a bound property that no longer shows its token was edited
+    /// by hand, so it is now a plain value. Runs for every edit path. Bindings to tokens that
+    /// don't exist (deleted, or pasted from another project) go too.
+    pub(super) fn drop_broken_bindings(&mut self) {
+        let Some((rec, _)) = &self.rec else { return };
+        let mut broken: Vec<(NodeId, TokenProp)> = Vec::new();
+        for id in rec.touched() {
+            let Some(n) = self.doc.get(*id) else { continue };
+            for (prop, token) in &n.tokens {
+                let kept = self
+                    .tokens
+                    .get(token)
+                    .filter(|t| t.kind == prop.kind())
+                    .and_then(|t| self.tokens.resolve(&t.id))
+                    .is_some_and(|v| prop.holds(n, &v));
+                if !kept {
+                    broken.push((*id, *prop));
+                }
+            }
+        }
+        if broken.is_empty() {
+            return;
+        }
+        let mut tx = self.tx();
+        for (id, prop) in broken {
+            if let Some(n) = tx.node_mut(id) {
+                n.tokens.remove(&prop);
+            }
+        }
+    }
+
+    /// Bring every page's bound properties up to their tokens. The values are derived from
+    /// the tokens, so this isn't an undo step, and undo calls it again afterwards.
+    pub fn sync_tokens(&mut self) {
+        if self.tokens.is_empty() {
+            return;
+        }
+        for i in 0..self.pages.len() {
+            let tokens = &self.tokens;
+            let stale: Vec<NodeId> = self
+                .page_doc(i)
+                .nodes
+                .values()
+                .filter(|n| {
+                    n.tokens.iter().any(|(prop, token)| {
+                        tokens.resolve(token).is_some_and(|v| !prop.holds(n, &v))
+                    })
+                })
+                .map(|n| n.id)
+                .collect();
+            if stale.is_empty() {
+                continue;
+            }
+            self.with_page(i, |ed| ed.write_token_values(&stale));
+            self.pages[i].saved_gen = u64::MAX;
+        }
+    }
+
+    fn write_token_values(&mut self, ids: &[NodeId]) {
+        self.commit();
+        self.rec = Some((Recording::new("Sync tokens", &self.doc), None));
+        let tokens = self.tokens.clone();
+        {
+            let mut tx = self.tx();
+            for id in ids {
+                let Some(n) = tx.node_mut(*id) else { continue };
+                for (prop, token) in n.tokens.clone() {
+                    if let Some(v) = tokens.resolve(&token) {
+                        prop.write(n, &v);
+                    }
+                }
+            }
+        }
+        for id in ids {
+            self.fit_text(*id);
+        }
+        self.fixup();
+        self.rec = None;
+    }
+
+    /// Copy tokens to the in-app clipboard, which survives switching projects.
+    pub fn copy_tokens(&mut self, ids: &[String]) {
+        self.token_clipboard = self.tokens.copy(ids);
+        self.status = match ids.len() {
+            1 => "Copied 1 token".into(),
+            n => format!("Copied {n} tokens"),
+        };
+    }
+
+    pub fn can_paste_tokens(&self) -> bool {
+        !self.token_clipboard.tokens.is_empty()
+    }
+
+    /// Paste copied tokens as independent copies. Returns the new ids.
+    pub fn paste_tokens(&mut self) -> Vec<String> {
+        let clip: TokenClip = self.token_clipboard.clone();
+        self.edit_tokens("Paste tokens", None, |t| t.paste(&clip))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Rect;
+    use crate::model::{Color, NodeKind, Paint, TokenKind};
+
+    fn editor_with_rect() -> (Editor, NodeId, String) {
+        let mut e = Editor::default();
+        let id = e.edit("add", |tx| {
+            let id = tx.alloc_id();
+            tx.insert(
+                Node::new(id, NodeKind::Rect, Rect::new(0.0, 0.0, 10.0, 10.0)),
+                None,
+                None,
+            )
+        });
+        let t = e.edit_tokens("add", None, |t| {
+            t.create(TokenKind::Color, "brand", "#ff0000", None)
+        });
+        (e, id, t.unwrap())
+    }
+
+    const RED: Color = Color::rgb(255, 0, 0);
+    const BLUE: Color = Color::rgb(0, 0, 255);
+
+    fn fill(e: &Editor, id: NodeId) -> Option<Color> {
+        e.doc.get(id).unwrap().style.fill()
+    }
+
+    fn set_brand(e: &mut Editor, token: &str, v: &str) {
+        e.edit_tokens("edit", None, |t| t.update(token, None, Some(v), None))
+            .unwrap();
+    }
+
+    #[test]
+    fn binding_applies_the_value_and_token_edits_follow() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        assert_eq!(fill(&e, id), Some(RED));
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, id), Some(BLUE));
+    }
+
+    #[test]
+    fn aliases_carry_changes_through() {
+        let (mut e, id, t) = editor_with_rect();
+        let alias = e
+            .edit_tokens("add", None, |s| {
+                s.create(TokenKind::Color, "cta", "var(--brand)", None)
+            })
+            .unwrap();
+        e.bind_token(&[id], TokenProp::Fill, &alias);
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, id), Some(BLUE));
+    }
+
+    #[test]
+    fn editing_a_bound_property_by_hand_detaches_it() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        e.edit("paint", |tx| {
+            tx.node_mut(id)
+                .unwrap()
+                .style
+                .set_fill(Some(Color::rgb(1, 2, 3)));
+        });
+        assert!(e.doc.get(id).unwrap().tokens.is_empty());
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, id), Some(Color::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn unrelated_edits_keep_the_binding() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        e.edit("move", |tx| tx.node_mut(id).unwrap().rect.x = 50.0);
+        assert!(e.doc.get(id).unwrap().tokens.contains_key(&TokenProp::Fill));
+    }
+
+    #[test]
+    fn detaching_keeps_the_value() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        e.detach_token(&[id], TokenProp::Fill);
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, id), Some(RED));
+    }
+
+    #[test]
+    fn deleting_a_token_keeps_values_and_undo_rebinds() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        let ids = vec![t.clone()];
+        e.edit_tokens("delete", None, |s| s.delete(&ids));
+        assert_eq!(fill(&e, id), Some(RED));
+        assert!(
+            e.bound_token(e.doc.get(id).unwrap(), TokenProp::Fill)
+                .is_none()
+        );
+        e.undo();
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, id), Some(BLUE), "the binding is live again");
+    }
+
+    #[test]
+    fn undo_restores_the_token_and_every_bound_value() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        set_brand(&mut e, &t, "#0000ff");
+        e.undo();
+        assert_eq!(fill(&e, id), Some(RED));
+        e.redo();
+        assert_eq!(fill(&e, id), Some(BLUE));
+    }
+
+    #[test]
+    fn undoing_a_node_edit_never_shows_a_stale_token_value() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        let other = e.add_page();
+        set_brand(&mut e, &t, "#0000ff"); // on page 2
+        e.switch_page(0);
+        e.undo(); // undoes the bind on page 1
+        e.redo(); // its snapshot still says red
+        assert_eq!(fill(&e, id), Some(BLUE));
+        assert_eq!(other, 1);
+    }
+
+    #[test]
+    fn token_edits_reach_parked_pages_and_mark_them_for_saving() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        e.mark_page_saved(0);
+        e.add_page();
+        e.mark_page_saved(0);
+        e.mark_page_saved(1);
+        e.meta_dirty = false;
+        let undo_steps = e.pages[0].stash.as_ref().unwrap().history.undo_len();
+        set_brand(&mut e, &t, "#0000ff");
+        let parked = e.page_doc(0).get(id).unwrap();
+        assert_eq!(parked.style.fill(), Some(BLUE));
+        assert!(e.dirty_pages().contains(&0));
+        assert!(e.meta_dirty, "the manifest holds the tokens");
+        let h = &e.pages[0].stash.as_ref().unwrap().history;
+        assert_eq!(h.undo_len(), undo_steps, "parked history stays clean");
+    }
+
+    #[test]
+    fn drags_on_one_token_are_one_undo_step() {
+        let (mut e, id, t) = editor_with_rect();
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        let n = e.history.undo_len();
+        for c in ["#110000", "#220000", "#330000"] {
+            e.edit_tokens("Edit token", Some(&t), |s| {
+                s.update(&t, None, Some(c), None)
+            })
+            .unwrap();
+        }
+        assert_eq!(e.history.undo_len(), n + 1);
+        e.undo();
+        assert_eq!(fill(&e, id), Some(RED));
+    }
+
+    #[test]
+    fn binding_a_gradient_top_layer_adds_a_solid_fill() {
+        let (mut e, id, t) = editor_with_rect();
+        e.edit("gradient", |tx| {
+            tx.node_mut(id).unwrap().style.fills = vec![Paint::linear(BLUE, RED)];
+        });
+        e.bind_token(&[id], TokenProp::Fill, &t);
+        let n = e.doc.get(id).unwrap();
+        assert_eq!(n.style.fills.len(), 2);
+        assert_eq!(n.style.fill(), Some(RED));
+        assert!(n.tokens.contains_key(&TokenProp::Fill));
+    }
+
+    #[test]
+    fn spacing_tokens_lay_out_again() {
+        let mut e = Editor::default();
+        let (frame, a, b) = e.edit("add", |tx| {
+            let f = tx.alloc_id();
+            let mut n = Node::new(
+                f,
+                NodeKind::Frame { clip: true },
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+            );
+            n.layout = Some(crate::model::AutoLayout::default());
+            tx.insert(n, None, None);
+            let a = tx.alloc_id();
+            tx.insert(
+                Node::new(a, NodeKind::Rect, Rect::new(0.0, 0.0, 20.0, 20.0)),
+                Some(f),
+                None,
+            );
+            let b = tx.alloc_id();
+            tx.insert(
+                Node::new(b, NodeKind::Rect, Rect::new(30.0, 0.0, 20.0, 20.0)),
+                Some(f),
+                None,
+            );
+            (f, a, b)
+        });
+        let t = e
+            .edit_tokens("add", None, |s| {
+                s.create(TokenKind::Spacing, "gap", "40px", None)
+            })
+            .unwrap();
+        e.bind_token(&[frame], TokenProp::Gap, &t);
+        let gap = |e: &Editor| e.doc.get(b).unwrap().rect.x - e.doc.get(a).unwrap().rect.right();
+        assert_eq!(gap(&e), 40.0);
+        e.edit_tokens("edit", None, |s| s.update(&t, None, Some("4px"), None))
+            .unwrap();
+        assert_eq!(gap(&e), 4.0);
+    }
+
+    #[test]
+    fn font_size_tokens_refit_text() {
+        let mut e = Editor::default();
+        let id = e.edit("add", |tx| {
+            let id = tx.alloc_id();
+            tx.insert(
+                Node::new(
+                    id,
+                    NodeKind::Text {
+                        text: "Hello".into(),
+                        font_size: 16.0,
+                        auto_width: true,
+                        align: Default::default(),
+                    },
+                    Rect::new(0.0, 0.0, 10.0, 10.0),
+                ),
+                None,
+                None,
+            )
+        });
+        let t = e
+            .edit_tokens("add", None, |s| {
+                s.create(TokenKind::FontSize, "body", "16px", None)
+            })
+            .unwrap();
+        e.bind_token(&[id], TokenProp::FontSize, &t);
+        let w = e.doc.get(id).unwrap().rect.w;
+        e.edit_tokens("edit", None, |s| s.update(&t, None, Some("32px"), None))
+            .unwrap();
+        assert!(e.doc.get(id).unwrap().rect.w > w * 1.5);
+    }
+
+    #[test]
+    fn instances_follow_a_token_on_their_main_component() {
+        let (mut e, id, t) = editor_with_rect();
+        e.selection = vec![id];
+        e.create_component();
+        let main = e.selection[0];
+        let child = e
+            .doc
+            .get(main)
+            .map_or(id, |n| n.children.first().copied().unwrap_or(id));
+        e.bind_token(&[child], TokenProp::Fill, &t);
+        e.selection = vec![main];
+        e.instance_of_selection();
+        let inst = e.selection[0];
+        let inst_child = e.doc.subtree(inst)[e.doc.subtree(inst).len() - 1];
+        set_brand(&mut e, &t, "#0000ff");
+        assert_eq!(fill(&e, inst_child), Some(BLUE));
+        assert!(
+            e.doc
+                .get(inst_child)
+                .unwrap()
+                .tokens
+                .contains_key(&TokenProp::Fill),
+            "the sync with the main component keeps the binding"
+        );
+    }
+
+    #[test]
+    fn pasted_bindings_from_another_project_are_dropped() {
+        let (mut e, id, _) = editor_with_rect();
+        e.edit("paste", |tx| {
+            tx.node_mut(id)
+                .unwrap()
+                .tokens
+                .insert(TokenProp::Fill, "from-elsewhere".into());
+        });
+        assert!(e.doc.get(id).unwrap().tokens.is_empty());
+    }
+
+    #[test]
+    fn copied_tokens_survive_a_project_switch() {
+        let (mut e, _, t) = editor_with_rect();
+        e.copy_tokens(std::slice::from_ref(&t));
+        e.load(Default::default(), None, None);
+        assert!(e.tokens.is_empty(), "tokens belong to the project");
+        assert!(e.can_paste_tokens());
+        let new = e.paste_tokens();
+        assert_eq!(new.len(), 1);
+        assert_ne!(new[0], t);
+    }
+}
