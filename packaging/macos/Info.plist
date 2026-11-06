@@ -31,7 +31,7 @@
 	     only updates signed with the private half of this key, which `generate_keys --account sketch`
 	     keeps in the release Mac's login keychain. Every release must be signed with the same key. -->
 	<key>SUFeedURL</key>
-	<string>https://github.com/michaelshimeles/sketch/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/jkracz/sketch/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>AkzxheHG06pVZ4qO48rPUI6iin0my51aiWmnE0nYGPM=</string>
 	<key>SURequireSignedFeed</key>

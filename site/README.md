@@ -1,6 +1,6 @@
 # Sketch site
 
-The download page for [Sketch](https://github.com/michaelshimeles/sketch): one prerendered
+The download page for [Sketch](https://github.com/jkracz/sketch): one prerendered
 SvelteKit page, built for Vercel. It self-hosts its font and loads no scripts
 from other sites.
 
@@ -12,7 +12,7 @@ Web Analytics on in the Vercel project's Analytics tab, or the script returns 40
 records nothing.
 
 `/download` is a Vercel function that answers with a 302 to
-`https://github.com/michaelshimeles/sketch/releases/latest/download/Sketch.dmg`, the
+`https://github.com/jkracz/sketch/releases/latest/download/Sketch.dmg`, the
 universal app that `scripts/release-macos.sh` builds, so the button works once the newest
 published Sketch release includes `Sketch.dmg`.
 

@@ -56,7 +56,7 @@ done
 min_macos=$(plutil -extract LSMinimumSystemVersion raw "$plist")
 # Build for the oldest macOS the app supports rather than the compiler's default.
 export MACOSX_DEPLOYMENT_TARGET=$min_macos
-repo=https://github.com/michaelshimeles/sketch
+repo=https://github.com/jkracz/sketch
 target_dir=$(cargo metadata --format-version 1 --no-deps | plutil -extract target_directory raw -o - -)
 out=$target_dir/universal-apple-darwin/release
 lock=$out.lock
