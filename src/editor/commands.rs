@@ -14,6 +14,7 @@ pub enum UiEvent {
     ToggleUi,
     ToggleHelp,
     ToggleGrid,
+    SetAppearance(crate::settings::Appearance),
 }
 
 impl Editor {

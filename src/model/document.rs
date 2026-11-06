@@ -1,6 +1,6 @@
 //! The document arena: nodes keyed by id plus ordered child lists.
 
-use super::node::{Node, NodeId};
+use super::node::{Color, Node, NodeId, NodeKind};
 use crate::geom::{Rect, V2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -55,6 +55,20 @@ impl Document {
     }
 
     /// World-space position of a node's local coordinate origin's parent space.
+    /// The top solid fill at `id` or its nearest ancestor with one. Text and pencil strokes
+    /// use their fill as ink, so they don't count as surfaces.
+    pub fn surface_color(&self, id: Option<NodeId>) -> Option<Color> {
+        let mut at = id;
+        while let Some(n) = at.and_then(|id| self.get(id)) {
+            let ink = matches!(n.kind, NodeKind::Text { .. } | NodeKind::Stroke { .. });
+            if let Some(fill) = n.style.fill().filter(|c| c.a > 0 && !ink) {
+                return Some(fill);
+            }
+            at = n.parent;
+        }
+        None
+    }
+
     pub fn parent_origin(&self, parent: Option<NodeId>) -> V2 {
         let mut o = V2::ZERO;
         let mut cur = parent;

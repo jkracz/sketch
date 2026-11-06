@@ -67,6 +67,36 @@ impl Color {
             (self.a as f64 / 255.0 * opacity) as f32,
         ]
     }
+    /// Perceptual lightness: L in OKLab, 0 to 1. Alpha is ignored.
+    pub fn lightness(self) -> f64 {
+        let linear = |c: u8| {
+            let c = c as f64 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = (linear(self.r), linear(self.g), linear(self.b));
+        let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+        let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+        let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+        0.2104542553 * l.cbrt() + 0.7936177850 * m.cbrt() - 0.0040720468 * s.cbrt()
+    }
+    /// Dark text reads on this colour.
+    pub fn is_light(self) -> bool {
+        self.lightness() > 0.7
+    }
+    /// This colour, unless it would vanish against `background`: then black or white.
+    pub fn or_contrast_with(self, background: Color) -> Color {
+        if (self.lightness() - background.lightness()).abs() >= 0.1 {
+            self
+        } else if background.is_light() {
+            Color::BLACK
+        } else {
+            Color::WHITE
+        }
+    }
 }
 
 impl Serialize for Color {
@@ -555,6 +585,24 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lightness_matches_oklab_for_grays() {
+        assert!(Color::BLACK.lightness().abs() < 1e-6);
+        assert!((Color::WHITE.lightness() - 1.0).abs() < 1e-3);
+        assert!((Color::rgb(0x28, 0x28, 0x28).lightness() - 0.277).abs() < 0.005);
+    }
+
+    #[test]
+    fn contrast_switches_only_when_ink_would_vanish() {
+        let dark = Color::rgb(0x28, 0x28, 0x28);
+        let light = Color::rgb(0xee, 0xee, 0xf0);
+        let red = Color::rgb(0xe0, 0x30, 0x30);
+        assert_eq!(Color::INK.or_contrast_with(dark), Color::WHITE);
+        assert_eq!(Color::WHITE.or_contrast_with(light), Color::BLACK);
+        assert_eq!(Color::INK.or_contrast_with(light), Color::INK);
+        assert_eq!(red.or_contrast_with(dark), red);
+    }
 
     #[test]
     fn color_hex_roundtrip() {

@@ -40,6 +40,7 @@ pub struct UiState {
     /// What the lower part of the left sidebar shows.
     pub sidebar: SidebarTab,
     pub palette: palette::PaletteUi,
+    pub appearance: crate::settings::Appearance,
     /// All panels hidden (⌘\\): just the canvas.
     pub hide_ui: bool,
     /// Layer being dragged in the layers panel, and where it would drop.
@@ -67,8 +68,8 @@ pub enum LayerDrop {
     Into(NodeId),
 }
 
-pub fn setup_style(ctx: &egui::Context) {
-    theme::apply(ctx);
+pub fn setup_style(ctx: &egui::Context, appearance: crate::settings::Appearance) {
+    theme::apply(ctx, appearance);
 }
 
 pub(crate) fn c32(c: Color) -> Color32 {
@@ -94,12 +95,20 @@ pub(crate) fn title_text(text: impl Into<String>) -> RichText {
 
 /// Lay out the chrome and return the remaining canvas rectangle (logical px).
 pub fn draw(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) -> egui::Rect {
+    use crate::editor::commands::UiEvent;
+    // Handled before the home screen returns, so the menu works there too.
+    ed.ui_events.retain(|ev| match ev {
+        UiEvent::SetAppearance(a) => {
+            st.appearance = *a;
+            false
+        }
+        _ => true,
+    });
     if let Some(hv) = &mut st.home {
         home::draw(ui, hv, st.native_chrome, st.translucent_sidebar);
         return egui::Rect::NOTHING;
     }
     for ev in std::mem::take(&mut ed.ui_events) {
-        use crate::editor::commands::UiEvent;
         match ev {
             UiEvent::TogglePalette => st.palette.toggle(),
             UiEvent::Rename(id) => {
@@ -112,6 +121,7 @@ pub fn draw(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) -> egui::Rect {
             UiEvent::ToggleUi => st.hide_ui = !st.hide_ui,
             UiEvent::ToggleHelp => st.show_help = !st.show_help,
             UiEvent::ToggleGrid => st.show_grid_off = !st.show_grid_off,
+            UiEvent::SetAppearance(_) => {}
         }
     }
     if st.hide_ui {

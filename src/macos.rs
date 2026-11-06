@@ -4,6 +4,7 @@
 pub mod updater;
 
 use crate::editor::shortcuts::Action;
+use crate::settings::Appearance;
 use muda::accelerator::{Accelerator, Code, Modifiers as M};
 use muda::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use objc2::MainThreadOnly;
@@ -123,6 +124,7 @@ pub struct NativeMenu {
     pub snapping: CheckMenuItem,
     pub grid: CheckMenuItem,
     pub help: CheckMenuItem,
+    pub appearance: Vec<(Appearance, CheckMenuItem)>,
 }
 
 impl NativeMenu {
@@ -196,10 +198,17 @@ pub fn install_menu() -> NativeMenu {
         entries: &[MenuEntry],
         cmds: &mut HashMap<MenuId, MenuCmd>,
         keep: &mut Vec<Box<dyn muda::IsMenuItem>>,
+        appearance: &mut Vec<(Appearance, CheckMenuItem)>,
     ) -> Vec<usize> {
         let mut idx = Vec::new();
         for e in entries {
             match e {
+                MenuEntry::Item(label, Action::SetAppearance(a)) => {
+                    let it = CheckMenuItem::new(*label, true, false, None);
+                    cmds.insert(it.id().clone(), MenuCmd::Run(Action::SetAppearance(*a)));
+                    appearance.push((*a, it.clone()));
+                    keep.push(Box::new(it));
+                }
                 MenuEntry::Item(label, a) => {
                     let accel = shortcuts::chord_of(*a).and_then(|(k, c, sh, alt)| {
                         if !c {
@@ -231,7 +240,7 @@ pub fn install_menu() -> NativeMenu {
                 MenuEntry::Separator => keep.push(Box::new(PredefinedMenuItem::separator())),
                 MenuEntry::Submenu(label, items) => {
                     let mut sub_keep = Vec::new();
-                    build(items, cmds, &mut sub_keep);
+                    build(items, cmds, &mut sub_keep, appearance);
                     let refs: Vec<&dyn muda::IsMenuItem> =
                         sub_keep.iter().map(|b| b.as_ref()).collect();
                     let sub = Submenu::with_items(*label, true, &refs).expect("submenu");
@@ -274,9 +283,10 @@ pub fn install_menu() -> NativeMenu {
     )
     .expect("app menu");
     let mut menus: Vec<Submenu> = Vec::new();
+    let mut appearance = Vec::new();
     for (title, entries) in shortcuts::menus() {
         let mut keep = Vec::new();
-        build(&entries, &mut cmds, &mut keep);
+        build(&entries, &mut cmds, &mut keep, &mut appearance);
         let mut refs: Vec<&dyn muda::IsMenuItem> = keep.iter().map(|b| b.as_ref()).collect();
         let extra_sep = PredefinedMenuItem::separator();
         let fullscreen = PredefinedMenuItem::fullscreen(None);
@@ -319,5 +329,6 @@ pub fn install_menu() -> NativeMenu {
         snapping,
         grid,
         help,
+        appearance,
     }
 }

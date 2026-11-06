@@ -9,7 +9,7 @@
 use super::css::{self, Context, Styles};
 use super::html::{self, Element, Html};
 use super::{Out, ToolResult, tools};
-use crate::editor::Editor;
+use crate::editor::{Editor, hit};
 use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::model::{
@@ -18,6 +18,7 @@ use crate::model::{
 };
 use crate::project::{Project, Store};
 use crate::render::gpu::Headless;
+use crate::render::scene::CanvasStyle;
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -1651,9 +1652,28 @@ fn collapse(chars: Vec<(char, Run)>, pre: bool) -> Vec<(char, Run)> {
     out
 }
 
+/// The colour for text the agent left uncoloured: `dark` on a light surface, otherwise white.
+/// The surface is the text's parent, else whatever is at `at` (root-level text with a
+/// position), else the canvas.
+fn default_text_color(
+    doc: &Document,
+    dark: Color,
+    parent: Option<NodeId>,
+    at: Option<V2>,
+    canvas: Color,
+) -> Color {
+    let under = parent.or_else(|| at.and_then(|p| hit::hit_test(doc, p, 1.0)));
+    if doc.surface_color(under).unwrap_or(canvas).is_light() {
+        dark
+    } else {
+        Color::WHITE
+    }
+}
+
 struct Builder<'t, 'a> {
     tx: &'t mut Tx<'a>,
     tokens: &'t TokenSet,
+    canvas: Color,
     page_id: String,
     ignored: BTreeSet<String>,
     warnings: Vec<String>,
@@ -1862,6 +1882,12 @@ impl Builder<'_, '_> {
         Self::stretch_default(parent, &mut n, &styles);
         let a = css::apply(&mut n, &styles, &parent.ctx());
         self.note(&a);
+        if get(&styles, "color").is_none() {
+            // Root text at (0, 0) moves to free space later, so nothing is under it yet.
+            let at = (n.rect.x != 0.0 || n.rect.y != 0.0).then(|| v2(n.rect.x, n.rect.y));
+            let color = default_text_color(self.tx.doc(), Color::BLACK, parent.id, at, self.canvas);
+            n.style.set_fill(Some(color));
+        }
         // Rich text runs.
         let mut i = 0;
         while i < chars.len() {
@@ -2292,6 +2318,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     let tree = html::parse(src);
     let page_id = ed.pages[page].id.clone();
     let tokens = ed.tokens.clone();
+    let canvas = CanvasStyle::of(ed.canvas_dark).background;
     let (created, ignored, warnings) = ed.with_page(page, |ed| {
         ed.edit("Write HTML", |tx| {
             // Where the new content goes.
@@ -2318,6 +2345,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             let mut b = Builder {
                 tx,
                 tokens: &tokens,
+                canvas,
                 page_id: page_id.clone(),
                 ignored: BTreeSet::new(),
                 warnings: Vec::new(),
@@ -2435,6 +2463,7 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
         None => Vec::new(),
     };
     ed.tokens.expand(&mut styles);
+    let canvas = CanvasStyle::of(ed.canvas_dark).background;
     let sides = a.num("sides").map(|s| s.clamp(3.0, 64.0) as u32);
     let txt = a.str("text").unwrap_or("").to_string();
     let (x, y) = (a.num("x").unwrap_or(0.0), a.num("y").unwrap_or(0.0));
@@ -2526,6 +2555,11 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
                 n.layout_child.absolute = ctx.parent_layout.is_some();
             }
             let applied = css::apply(&mut n, &styles, &ctx);
+            if ty == "text" && get(&styles, "color").is_none() {
+                let at = v2(n.rect.x, n.rect.y);
+                let color = default_text_color(tx.doc(), Color::INK, parent, Some(at), canvas);
+                n.style.set_fill(Some(color));
+            }
             let mut ignored = applied.ignored.clone();
             if let Some((src, mode)) = &applied.image {
                 match image_asset(src) {

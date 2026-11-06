@@ -11,6 +11,7 @@ use crate::model::{
     Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, ImageMode, Join, Node, NodeId,
     NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign, TokenProp,
 };
+use crate::render::scene::CanvasStyle;
 use crate::theme;
 use egui::{RichText, Ui};
 
@@ -477,7 +478,9 @@ fn nothing_selected(ui: &mut Ui, ed: &mut Editor) {
         ui.add(egui::Slider::new(&mut ed.ink_smoothing, 0.0..=1.0))
     });
     row(ui, "Color", |ui| {
-        let mut c = c32(ed.ink_color);
+        // What new strokes get on the canvas, which can differ from the stored colour.
+        let canvas = CanvasStyle::of(ed.canvas_dark).background;
+        let mut c = c32(ed.ink_color.or_contrast_with(canvas));
         if ui.color_edit_button_srgba(&mut c).changed() {
             ed.ink_color = from32(c);
         }

@@ -1,6 +1,7 @@
 //! macOS-flavoured look for the egui chrome: Inter font, system accent, light/dark palettes
-//! that follow the system appearance, and thin SF Symbols-style line icons.
+//! that follow the chosen appearance, and thin SF Symbols-style line icons.
 
+use crate::settings::Appearance;
 use egui::{
     Color32, CornerRadius, FontData, FontFamily, FontId, Pos2, Rect, Shadow, Stroke, Vec2, pos2,
     vec2,
@@ -72,6 +73,7 @@ pub struct Palette {
     pub sidebar: Color32,
     pub inspector: Color32,
     pub control: Color32,
+    pub control_pressed: Color32,
     pub control_border: Color32,
     pub field: Color32,
     pub text: Color32,
@@ -81,24 +83,33 @@ pub struct Palette {
     pub hover: Color32,
     pub pressed: Color32,
     pub popover: Color32,
+    pub popover_border: Color32,
+    /// Behind project thumbnails on the home screen.
+    pub thumbnail: Color32,
 }
 
 pub fn palette(dark: bool) -> Palette {
     if dark {
+        // Values and their sources are in analysis/dark-mode.md.
+        let panel = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+        let control = Color32::from_rgb(0x37, 0x37, 0x37);
         Palette {
-            window: Color32::from_rgb(0x2b, 0x2b, 0x2d),
-            sidebar: Color32::from_rgb(0x26, 0x26, 0x28),
-            inspector: Color32::from_rgb(0x25, 0x25, 0x27),
-            control: Color32::from_rgb(0x3a, 0x3a, 0x3c),
-            control_border: Color32::from_white_alpha(22),
-            field: Color32::from_rgb(0x1f, 0x1f, 0x21),
-            text: Color32::from_rgb(0xec, 0xec, 0xee),
-            secondary: Color32::from_rgb(0x98, 0x98, 0x9d),
-            tertiary: Color32::from_rgb(0x63, 0x63, 0x66),
-            separator: Color32::from_rgb(0x3a, 0x3a, 0x3c),
-            hover: Color32::from_white_alpha(16),
-            pressed: Color32::from_white_alpha(30),
-            popover: Color32::from_rgb(0x32, 0x32, 0x34),
+            window: panel,
+            sidebar: panel,
+            inspector: panel,
+            control,
+            control_pressed: Color32::from_rgb(0x3c, 0x3c, 0x3c),
+            control_border: Color32::TRANSPARENT,
+            field: control,
+            text: white_percent(90.0),
+            secondary: white_percent(65.0),
+            tertiary: white_percent(50.0),
+            separator: control,
+            hover: white_percent(6.0),
+            pressed: white_percent(8.5),
+            popover: panel,
+            popover_border: Color32::from_rgb(0x55, 0x55, 0x55),
+            thumbnail: white_percent(10.0),
         }
     } else {
         Palette {
@@ -106,6 +117,7 @@ pub fn palette(dark: bool) -> Palette {
             sidebar: Color32::from_rgb(0xee, 0xee, 0xf0),
             inspector: Color32::from_rgb(0xf6, 0xf6, 0xf6),
             control: Color32::WHITE,
+            control_pressed: blend(Color32::WHITE, Color32::from_black_alpha(24)),
             control_border: Color32::from_black_alpha(30),
             field: Color32::WHITE,
             text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
@@ -115,8 +127,14 @@ pub fn palette(dark: bool) -> Palette {
             hover: Color32::from_black_alpha(12),
             pressed: Color32::from_black_alpha(24),
             popover: Color32::from_rgb(0xfc, 0xfc, 0xfc),
+            popover_border: Color32::from_black_alpha(30),
+            thumbnail: Color32::from_rgb(0xee, 0xee, 0xf0),
         }
     }
+}
+
+fn white_percent(percent: f32) -> Color32 {
+    Color32::from_white_alpha((percent * 2.55).round() as u8)
 }
 
 pub fn pal(ui: &egui::Ui) -> Palette {
@@ -209,7 +227,7 @@ fn style_for(s: &mut egui::Style, dark: bool) {
     };
     v.extreme_bg_color = p.field;
     v.text_edit_bg_color = Some(p.field);
-    v.window_stroke = Stroke::new(1.0, p.control_border);
+    v.window_stroke = Stroke::new(1.0, p.popover_border);
     v.window_corner_radius = CornerRadius::same(10);
     v.menu_corner_radius = CornerRadius::same(10);
     v.window_shadow = Shadow {
@@ -252,8 +270,8 @@ fn style_for(s: &mut egui::Style, dark: bool) {
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
     w.hovered.corner_radius = r6;
     w.hovered.expansion = 0.0;
-    w.active.bg_fill = blend(p.control, p.pressed);
-    w.active.weak_bg_fill = blend(p.control, p.pressed);
+    w.active.bg_fill = p.control_pressed;
+    w.active.weak_bg_fill = p.control_pressed;
     w.active.bg_stroke = Stroke::new(1.0, p.control_border);
     w.active.fg_stroke = Stroke::new(1.0, p.text);
     w.active.corner_radius = r6;
@@ -269,12 +287,20 @@ pub fn blend(base: Color32, over: Color32) -> Color32 {
     Color32::from_rgb(mix(base.r(), or), mix(base.g(), og), mix(base.b(), ob))
 }
 
-/// Fonts plus light and dark styles. egui picks the one matching the system appearance
-/// (reported by egui-winit); headless rendering falls back to light.
-pub fn apply(ctx: &egui::Context) {
+pub fn preference(a: Appearance) -> egui::ThemePreference {
+    match a {
+        Appearance::System => egui::ThemePreference::System,
+        Appearance::Light => egui::ThemePreference::Light,
+        Appearance::Dark => egui::ThemePreference::Dark,
+    }
+}
+
+/// Fonts plus light and dark styles. With `System`, egui picks the style matching the system
+/// appearance (reported by egui-winit); headless rendering falls back to light.
+pub fn apply(ctx: &egui::Context, appearance: Appearance) {
     install_fonts(ctx);
     ctx.options_mut(|o| {
-        o.theme_preference = egui::ThemePreference::System;
+        o.theme_preference = preference(appearance);
         o.fallback_theme = egui::Theme::Light;
     });
     ctx.style_mut_of(egui::Theme::Light, |s| style_for(s, false));

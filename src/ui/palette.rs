@@ -122,6 +122,17 @@ pub fn entries(ed: &Editor, st: &UiState) -> Vec<Entry> {
             });
         }
     }
+    for a in crate::settings::Appearance::ALL {
+        out.push(Entry {
+            label: format!("Appearance: {}", a.label()),
+            detail: if st.appearance == a {
+                "Current".into()
+            } else {
+                String::new()
+            },
+            cmd: Command::Run(Action::SetAppearance(a)),
+        });
+    }
     out.push(Entry {
         label: if st.sidebar == SidebarTab::Library {
             "Show layers".into()

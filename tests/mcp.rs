@@ -686,3 +686,119 @@ fn agent_design_screenshot() {
         ab_node.rect
     );
 }
+
+/// The fill of the only text layer with this content.
+fn text_fill(h: &exec::SessionHost, content: &str) -> Option<Color> {
+    let mut found =
+        h.ed.doc
+            .nodes
+            .values()
+            .filter(|n| n.kind.text().is_some_and(|t| t == content));
+    let n = found.next().expect("text layer");
+    assert!(found.next().is_none(), "one layer reads {content}");
+    n.style.fill()
+}
+
+fn write_root(h: &mut exec::SessionHost, html: &str) {
+    call(
+        h,
+        "write_html",
+        json!({"targetNodeId": "root", "mode": "insert-children", "html": html}),
+    );
+}
+
+#[test]
+fn agent_text_with_no_color_stays_readable_on_the_dark_canvas() {
+    let mut h = host();
+    h.ed.canvas_dark = true;
+
+    write_root(&mut h, "<p>On the canvas</p>");
+    assert_eq!(text_fill(&h, "On the canvas"), Some(Color::WHITE));
+
+    let shape = "A canvas label";
+    call(
+        &mut h,
+        "create_shape",
+        json!({"type": "text", "text": shape, "x": 4000, "y": 4000}),
+    );
+    assert_eq!(text_fill(&h, shape), Some(Color::WHITE));
+
+    // A frame with no fill shows the canvas through it.
+    write_root(&mut h, "<div style=\"width:300px\"><p>Bare frame</p></div>");
+    assert_eq!(text_fill(&h, "Bare frame"), Some(Color::WHITE));
+
+    write_root(
+        &mut h,
+        "<div style=\"width:300px; background:#111111\"><p>Dark card</p></div>",
+    );
+    assert_eq!(text_fill(&h, "Dark card"), Some(Color::WHITE));
+
+    // Mid-dark surfaces too: black would pass a simple "is it close?" check here.
+    write_root(
+        &mut h,
+        "<div style=\"width:300px; background:#444444\"><p>Gray card</p></div>",
+    );
+    assert_eq!(text_fill(&h, "Gray card"), Some(Color::WHITE));
+}
+
+#[test]
+fn agent_text_keeps_chosen_and_readable_colors() {
+    let mut h = host();
+    h.ed.canvas_dark = true;
+    let red = Color::rgb(0xff, 0, 0);
+
+    // An explicit colour wins, even when it's hard to read.
+    write_root(&mut h, "<p style=\"color:#000000\">Chosen black</p>");
+    assert_eq!(text_fill(&h, "Chosen black"), Some(Color::BLACK));
+    write_root(
+        &mut h,
+        "<div style=\"color:#ff0000\"><p>Inherited</p></div>",
+    );
+    assert_eq!(text_fill(&h, "Inherited"), Some(red));
+
+    // White artboards and white surfaces keep black text.
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Board", "styles": {"width": "400px", "height": "300px", "left": "1000px", "top": "1000px"}}),
+    );
+    call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children", "html": "<p>In artboard</p>"}),
+    );
+    assert_eq!(text_fill(&h, "In artboard"), Some(Color::BLACK));
+
+    // Root-level text placed over that white artboard isn't white on white.
+    call(
+        &mut h,
+        "create_shape",
+        json!({"type": "text", "text": "Over the board", "x": 1100, "y": 1100}),
+    );
+    assert_eq!(text_fill(&h, "Over the board"), Some(Color::INK));
+    write_root(
+        &mut h,
+        "<p style=\"position:absolute; left:1200px; top:1200px\">HTML over board</p>",
+    );
+    assert_eq!(text_fill(&h, "HTML over board"), Some(Color::BLACK));
+}
+
+#[test]
+fn agent_text_is_unchanged_on_the_light_canvas() {
+    let mut h = host();
+    write_root(&mut h, "<p>Light canvas</p>");
+    assert_eq!(text_fill(&h, "Light canvas"), Some(Color::BLACK));
+    call(
+        &mut h,
+        "create_shape",
+        json!({"type": "text", "text": "Light label", "x": 0, "y": 0}),
+    );
+    assert_eq!(text_fill(&h, "Light label"), Some(Color::INK));
+
+    // A dark card needs white text in light mode too.
+    write_root(
+        &mut h,
+        "<div style=\"width:300px; background:#111111\"><p>Card in light</p></div>",
+    );
+    assert_eq!(text_fill(&h, "Card in light"), Some(Color::WHITE));
+}

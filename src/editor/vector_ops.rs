@@ -316,6 +316,7 @@ impl Editor {
                 self.begin("Draw path");
                 let parent = self.frame_at(p, &[]);
                 let o = self.doc.parent_origin(parent);
+                let ink = self.ink_at(crate::model::Color::INK, p);
                 let id = {
                     let mut tx = self.tx();
                     let id = tx.alloc_id();
@@ -331,7 +332,7 @@ impl Editor {
                         Rect::new(p.x - o.x, p.y - o.y, 0.0, 0.0),
                     );
                     n.style.fills.clear();
-                    n.style.stroke = Some(crate::model::Color::INK);
+                    n.style.stroke = Some(ink);
                     n.style.stroke_width = 2.0;
                     tx.insert(n, parent, None)
                 };

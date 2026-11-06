@@ -10,7 +10,7 @@ use crate::connector::{self, BIND_DISTANCE_PX};
 use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::model::rough::Rough;
-use crate::model::{Binding, Head, Node, NodeId, NodeKind, Route};
+use crate::model::{Binding, Color, Head, Node, NodeId, NodeKind, Route};
 
 /// Laser trail points fade over this long (ms), as in Excalidraw.
 pub const LASER_DECAY_MS: f64 = 1000.0;
@@ -137,6 +137,7 @@ impl Editor {
         });
         let route = self.arrow_route;
         let rough = self.sketch;
+        let ink = self.ink_at(Color::INK, world);
         let id = {
             let mut tx = self.tx();
             let id = tx.alloc_id();
@@ -152,6 +153,7 @@ impl Editor {
                 },
                 Rect::new(world.x, world.y, 0.0, 0.0),
             );
+            n.style.stroke = Some(ink);
             n.style.rough = rough.map(|r| Rough {
                 seed: (id.0 as u32).wrapping_mul(2654435761) | 1,
                 ..r
