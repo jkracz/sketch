@@ -1,11 +1,14 @@
 //! Text layout and glyph outlines.
 //!
+//! Each line is shaped, so fonts apply their kerning and ligatures, and characters map onto
+//! glyphs through clusters instead of one to one.
+//!
 //! Text is rendered as vector glyph outlines, so it stays crisp at every zoom level and
 //! exports to SVG without font dependencies. Faces come from `crate::fonts`: bundled Inter
 //! (SIL OFL) plus whatever is registered at runtime, never anything taken from Paper.
 
+use crate::fonts::{self, google, resolve};
 pub use crate::fonts::{FaceId, face_bytes, face_of};
-use crate::fonts::{google, resolve};
 use crate::geom::{V2, v2};
 use crate::model::{CharStyle, Color, TextAlign, TextStyle};
 use crate::vector::VPath;
@@ -13,6 +16,7 @@ use lyon::path::Path;
 use lyon::tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use unicode_script::{Script, UnicodeScript};
 
 fn line_height_in(face: FaceId, font_size: f64) -> f64 {
     let f = face_of(face);
@@ -72,22 +76,115 @@ pub struct TextLayout {
     pub font_size: f64,
 }
 
-/// The glyph for `c` and its advance: from `face`, then `fallback`, then `face`'s '?'.
-fn advance_in(face: FaceId, fallback: FaceId, c: char, font_size: f64) -> (FaceId, u16, f64) {
-    let (face, gid) = [face, fallback]
-        .into_iter()
-        .find_map(|id| Some((id, face_of(id).glyph_index(c)?.0)))
-        .or_else(|| Some((face, face_of(face).glyph_index('?')?.0)))
-        .unwrap_or((face, 0));
-    let f = face_of(face);
-    let adv = f.glyph_hor_advance(ttf_parser::GlyphId(gid)).unwrap_or(0) as f64;
-    (face, gid, adv / f.units_per_em() as f64 * font_size)
+/// Characters a font needn't draw. Shaping uses them and then hides them.
+fn is_invisible(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}')
 }
 
-#[cfg(test)]
-fn advance(c: char, font_size: f64) -> (u16, f64) {
-    let (_, gid, adv) = advance_in(0, 0, c, font_size);
-    (gid, adv)
+/// The face and character to shape for `c`: from `face`, then `fallback`, then `face`'s '?'.
+fn pick_glyph(face: FaceId, fallback: FaceId, c: char) -> (FaceId, char) {
+    if is_invisible(c) || face_of(face).glyph_index(c).is_some() {
+        (face, c)
+    } else if face_of(fallback).glyph_index(c).is_some() {
+        (fallback, c)
+    } else {
+        (face, '?')
+    }
+}
+
+/// A glyph placed along its line, before alignment.
+#[derive(Debug, Clone, Copy)]
+struct LineGlyph {
+    gid: u16,
+    face: FaceId,
+    char_index: usize,
+    x: f64,
+    /// Up from the baseline.
+    y: f64,
+    advance: f64,
+}
+
+/// Shaped text: its glyphs, and each character's advance. Characters in one glyph share it.
+struct Shaped {
+    glyphs: Vec<LineGlyph>,
+    advances: Vec<f64>,
+}
+
+/// One line's or paragraph's text, ready to shape.
+struct ShapeInput<'a> {
+    /// The face and character to use for each source character.
+    picks: &'a [(FaceId, char)],
+    styles: &'a [CharStyle],
+    letter_spacing: f64,
+}
+
+impl ShapeInput<'_> {
+    /// The end of the run starting at `start`: one face, size and script, since shaping works on
+    /// one of each. Spaces and punctuation belong to the script around them.
+    fn run_end(&self, start: usize, end: usize) -> usize {
+        let mut script = None;
+        for i in start..end {
+            let same = self.picks[i].0 == self.picks[start].0
+                && self.styles[i].size == self.styles[start].size;
+            let this = self.picks[i].1.script();
+            let strong = !matches!(this, Script::Common | Script::Inherited | Script::Unknown);
+            if !same || (strong && script.is_some_and(|s| s != this)) {
+                return i;
+            }
+            if strong {
+                script = Some(this);
+            }
+        }
+        end
+    }
+
+    fn shape(&self, range: std::ops::Range<usize>) -> Shaped {
+        let mut out = Shaped {
+            glyphs: Vec::new(),
+            advances: vec![0.0; range.len()],
+        };
+        let ligatures = self.letter_spacing == 0.0;
+        let mut pen = 0.0;
+        let mut start = range.start;
+        while start < range.end {
+            let end = self.run_end(start, range.end);
+            let face = self.picks[start].0;
+            let text: Vec<char> = self.picks[start..end].iter().map(|p| p.1).collect();
+            let scale = self.styles[start].size / face_of(face).units_per_em() as f64;
+            let glyphs = fonts::shape(face, &text, ligatures);
+            let clusters = glyphs.chunk_by(|a, b| a.cluster == b.cluster);
+            let mut rest = glyphs.as_slice();
+            for cluster in clusters {
+                rest = &rest[cluster.len()..];
+                let first = cluster[0].cluster;
+                let next = rest.first().map_or(text.len(), |g| g.cluster);
+                let spacing = self.letter_spacing * (next - first) as f64;
+                let last = cluster.len() - 1;
+                let mut width = spacing;
+                for (i, g) in cluster.iter().enumerate() {
+                    let advance = g.advance as f64 * scale;
+                    out.glyphs.push(LineGlyph {
+                        gid: g.gid,
+                        face,
+                        char_index: start + first,
+                        x: pen + width - spacing + g.x_offset as f64 * scale,
+                        y: g.y_offset as f64 * scale,
+                        advance: if i == last {
+                            advance + spacing
+                        } else {
+                            advance
+                        },
+                    });
+                    width += advance;
+                }
+                let each = width / (next - first) as f64;
+                out.advances[start + first - range.start..start + next - range.start].fill(each);
+                pen += width;
+            }
+            start = end;
+        }
+        out
+    }
 }
 
 /// Lay out plain text with optional wrapping at `max_width`.
@@ -115,7 +212,6 @@ pub fn layout_rich(
     let styles: Vec<CharStyle> = (0..chars.len())
         .map(|i| ts.char_style(i, font_size, color))
         .collect();
-    let ls = ts.letter_spacing;
     // The face each character asks for, and the Inter face for glyphs that face doesn't have.
     // Runs share a style, so resolve only when it changes.
     let mut last = None;
@@ -137,28 +233,32 @@ pub fn layout_rich(
             wanted
         })
         .collect();
-    let adv: Vec<(FaceId, u16, f64)> = (0..chars.len())
-        .map(|i| {
-            let (f, g, a) = advance_in(faces[i].0, faces[i].1, chars[i], styles[i].size);
-            (f, g, a + ls)
-        })
+    let picks: Vec<(FaceId, char)> = (0..chars.len())
+        .map(|i| pick_glyph(faces[i].0, faces[i].1, chars[i]))
         .collect();
+    let input = ShapeInput {
+        picks: &picks,
+        styles: &styles,
+        letter_spacing: ts.letter_spacing,
+    };
     let base_face = resolve(ts.family.as_deref(), ts.base_weight(), ts.italic);
     // Break into lines: hard breaks on '\n', soft breaks at spaces when wrapping.
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut ranges: Vec<(usize, usize, Shaped)> = Vec::new();
     let mut start = 0;
     while start <= chars.len() {
         let hard_end = chars[start..]
             .iter()
             .position(|c| *c == '\n')
             .map_or(chars.len(), |p| start + p);
+        let paragraph = input.shape(start..hard_end);
+        let mut soft: Vec<(usize, usize)> = Vec::new();
         let mut line_start = start;
         if let Some(maxw) = max_width {
             let mut x = 0.0;
             let mut last_space: Option<usize> = None;
             let mut i = line_start;
             while i < hard_end {
-                let a = adv[i].2;
+                let a = paragraph.advances[i - start];
                 if chars[i] == ' ' {
                     last_space = Some(i);
                 }
@@ -168,7 +268,7 @@ pub fn layout_rich(
                         _ => i,
                     };
                     let skip_space = chars.get(brk) == Some(&' ');
-                    ranges.push((line_start, brk));
+                    soft.push((line_start, brk));
                     line_start = if skip_space { brk + 1 } else { brk };
                     i = line_start;
                     x = 0.0;
@@ -179,7 +279,13 @@ pub fn layout_rich(
                 i += 1;
             }
         }
-        ranges.push((line_start, hard_end));
+        if soft.is_empty() {
+            ranges.push((start, hard_end, paragraph));
+        } else {
+            // Letters only join within a line, so each line shapes again on its own.
+            soft.push((line_start, hard_end));
+            ranges.extend(soft.into_iter().map(|(s, e)| (s, e, input.shape(s..e))));
+        }
         start = hard_end + 1;
     }
 
@@ -187,7 +293,7 @@ pub fn layout_rich(
     let mut glyphs = Vec::new();
     let mut max_line_w: f64 = 0.0;
     let mut top = 0.0;
-    for (s, e) in ranges.iter().copied() {
+    for (s, e, shaped) in ranges {
         // Line metrics from the largest character on the line (or the one before an empty line).
         let largest = (s..e).fold(None, |m: Option<usize>, i| match m {
             Some(j) if styles[j].size >= styles[i].size => Some(j),
@@ -202,23 +308,24 @@ pub fn layout_rich(
         let baseline = top + ascent_in(line_face, max_size) + (lh - natural) * 0.5;
         let mut x = 0.0;
         let mut carets = vec![0.0];
-        for i in s..e {
-            let st = styles[i];
-            let (face, gid, a) = adv[i];
+        for a in &shaped.advances {
+            x += a;
+            carets.push(x);
+        }
+        for g in shaped.glyphs {
+            let st = styles[g.char_index];
             glyphs.push(PlacedGlyph {
-                gid,
-                face,
+                gid: g.gid,
+                face: g.face,
                 size: st.size,
                 color: st.color,
-                x,
-                baseline,
-                advance: a,
-                char_index: i,
+                x: g.x,
+                baseline: baseline - g.y,
+                advance: g.advance,
+                char_index: g.char_index,
                 underline: st.underline,
                 strike: st.strike,
             });
-            x += a;
-            carets.push(x);
         }
         max_line_w = max_line_w.max(x);
         lines.push(Line {
@@ -585,9 +692,147 @@ mod tests {
         assert_eq!(one.lines[0].baseline, ascent_in(face, 20.0));
     }
 
+    fn ligature_style() -> TextStyle {
+        crate::fonts::register(
+            "Fixture Ligature",
+            400,
+            false,
+            include_bytes!("../tests/fixtures/fonts/playfair-fi.ttf").to_vec(),
+        )
+        .unwrap();
+        TextStyle {
+            family: Some("Fixture Ligature".into()),
+            ..TextStyle::default()
+        }
+    }
+
+    fn laid_out(text: &str, ts: &TextStyle) -> TextLayout {
+        layout_rich(text, 40.0, Color::INK, ts, None, TextAlign::Left)
+    }
+
+    #[test]
+    fn ligatures_join_letters_and_keep_a_caret_for_each() {
+        let l = laid_out("fi", &ligature_style());
+        assert_eq!(l.glyphs.len(), 1, "one glyph for two letters");
+        assert_eq!(l.glyphs[0].char_index, 0);
+        let carets = &l.lines[0].carets;
+        assert_eq!(carets.len(), 3);
+        assert!((carets[1] - carets[2] / 2.0).abs() < 1e-9, "{carets:?}");
+        assert_eq!(l.hit(v2(carets[1], 10.0)), 1);
+    }
+
+    #[test]
+    fn letter_spacing_turns_ligatures_off() {
+        let ts = TextStyle {
+            letter_spacing: 2.0,
+            ..ligature_style()
+        };
+        let spaced = laid_out("fi", &ts);
+        assert_eq!(spaced.glyphs.len(), 2);
+        let tight = laid_out("fi", &ligature_style());
+        assert!(spaced.width > tight.width);
+    }
+
+    #[test]
+    fn a_size_change_splits_a_ligature() {
+        let mut ts = ligature_style();
+        ts.apply_range(1, 2, |s| s.size = Some(60.0));
+        assert_eq!(laid_out("fi", &ts).glyphs.len(), 2);
+    }
+
+    #[test]
+    fn a_color_change_keeps_a_ligature() {
+        let mut ts = ligature_style();
+        ts.apply_range(1, 2, |s| s.color = Some(Color::BLACK));
+        assert_eq!(laid_out("fi", &ts).glyphs.len(), 1);
+    }
+
+    #[test]
+    fn a_soft_break_splits_a_ligature() {
+        let ts = ligature_style();
+        let whole = laid_out("fi", &ts).width;
+        let l = layout_rich(
+            "fi",
+            40.0,
+            Color::INK,
+            &ts,
+            Some(whole * 0.6),
+            TextAlign::Left,
+        );
+        assert_eq!(l.lines.len(), 2);
+        assert_eq!(l.glyphs.len(), 2);
+    }
+
+    #[test]
+    fn kerning_narrows_text_and_moves_later_glyphs() {
+        let plain = TextStyle::default();
+        let (a, v) = (laid_out("A", &plain).width, laid_out("V", &plain).width);
+        let l = laid_out("AV", &plain);
+        assert!(l.width < a + v, "{} < {}", l.width, a + v);
+        assert_eq!(l.lines[0].carets, [0.0, l.glyphs[1].x, l.width]);
+    }
+
+    #[test]
+    fn letter_spacing_adds_to_every_character() {
+        let ts = TextStyle {
+            letter_spacing: 3.0,
+            ..TextStyle::default()
+        };
+        let plain = laid_out("ab", &TextStyle::default());
+        let spaced = laid_out("ab", &ts);
+        assert!((spaced.width - plain.width - 6.0).abs() < 1e-9);
+        assert_eq!(spaced.lines[0].carets.len(), 3);
+    }
+
+    #[test]
+    fn runs_split_where_the_size_or_script_changes() {
+        let mut ts = TextStyle::default();
+        ts.apply_range(1, 2, |s| s.size = Some(80.0));
+        let l = laid_out("abc", &ts);
+        assert_eq!(l.glyphs.len(), 3);
+        let sizes: Vec<f64> = l.glyphs.iter().map(|g| g.size).collect();
+        assert_eq!(sizes, [40.0, 80.0, 40.0]);
+
+        let chars: Vec<(FaceId, char)> = "a. б".chars().map(|c| (0, c)).collect();
+        let styles = laid_out_styles(chars.len());
+        let input = ShapeInput {
+            picks: &chars,
+            styles: &styles,
+            letter_spacing: 0.0,
+        };
+        assert_eq!(
+            input.run_end(0, chars.len()),
+            3,
+            "punctuation stays with Latin"
+        );
+    }
+
+    fn laid_out_styles(n: usize) -> Vec<CharStyle> {
+        let ts = TextStyle::default();
+        (0..n).map(|i| ts.char_style(i, 16.0, Color::INK)).collect()
+    }
+
+    #[test]
+    fn characters_no_font_has_show_a_question_mark_and_keep_a_caret() {
+        let l = laid_out("a\u{AC00}b", &TextStyle::default());
+        assert_eq!(l.glyphs.len(), 3);
+        assert_eq!(l.lines[0].carets.len(), 4);
+        let alone = laid_out("\u{AC00}", &TextStyle::default());
+        let mark = laid_out("?", &TextStyle::default());
+        assert_eq!(alone.glyphs[0].gid, mark.glyphs[0].gid);
+    }
+
+    #[test]
+    fn invisible_joiners_take_no_space() {
+        let plain = laid_out("ab", &TextStyle::default());
+        let joined = laid_out("a\u{200D}b", &TextStyle::default());
+        assert!((joined.width - plain.width).abs() < 1e-9);
+        assert_eq!(joined.lines[0].carets.len(), 4);
+    }
+
     #[test]
     fn glyphs_tessellate() {
-        let (gid, _) = advance('A', 10.0);
+        let gid = face_of(0).glyph_index('A').unwrap().0;
         let m = glyph_mesh(0, gid);
         assert!(!m.indices.is_empty());
         assert!(glyph_svg_path(gid, V2::ZERO, 10.0).starts_with('M'));
