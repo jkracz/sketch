@@ -331,7 +331,8 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
   folder, and text shows Inter until the font arrives. Sketch sends Google the font name and your
   IP address whenever text needs a font that isn't cached, whether it comes from the font list,
   an opened document or MCP. Scrolling the font list does the same for each row without a cached
-  preview. There is no shaping, so no ligatures, kerning, complex scripts or RTL, and color fonts
+  preview. Text is shaped with HarfRust, which gives it kerning, ligatures and contextual
+  letterforms, but there's no bidi, so right-to-left scripts read in the wrong order. Color fonts
   are left out. IME preedit is not displayed (committed text works).
 * **No rotation.** Nodes are axis-aligned boxes; rotated imports are baked into paths.
 * **Undo granularity.** Document renames from the Design panel are not undoable, and the

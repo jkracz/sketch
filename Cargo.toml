@@ -26,6 +26,8 @@ wgpu = "30"
 winit = "0.30"
 lyon = "1"
 ttf-parser = "0.25"
+harfrust = "0.12"
+unicode-script = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

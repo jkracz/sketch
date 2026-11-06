@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 pub mod google;
+mod shape;
+
+pub use shape::{Glyph, shape};
 
 /// Index of a loaded face. The bundled faces come first, in `BUNDLED` order.
 pub type FaceId = u16;
@@ -45,6 +48,7 @@ static BUNDLED: [(&[u8], u16, bool); 6] = [
 struct Loaded {
     bytes: &'static [u8],
     face: ttf_parser::Face<'static>,
+    shaping: shape::ShapeData,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +73,14 @@ impl Registry {
         bytes: &'static [u8],
     ) -> Result<FaceId, String> {
         let face = ttf_parser::Face::parse(bytes, 0).map_err(|e| format!("{family}: {e}"))?;
+        let shaping = shape::ShapeData::new(bytes).map_err(|e| format!("{family}: {e}"))?;
         let id = self.faces.len() as FaceId;
-        self.faces.push(Box::leak(Box::new(Loaded { bytes, face })));
+        let loaded = Loaded {
+            bytes,
+            face,
+            shaping,
+        };
+        self.faces.push(Box::leak(Box::new(loaded)));
         let style = Style { weight, italic, id };
         self.families
             .entry(family_key(family))
