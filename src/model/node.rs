@@ -83,12 +83,15 @@ impl Color {
         let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
         0.2104542553 * l.cbrt() + 0.7936177850 * m.cbrt() - 0.0040720468 * s.cbrt()
     }
+    /// Dark text reads on this colour.
+    pub fn is_light(self) -> bool {
+        self.lightness() > 0.7
+    }
     /// This colour, unless it would vanish against `background`: then black or white.
     pub fn or_contrast_with(self, background: Color) -> Color {
-        let bg = background.lightness();
-        if (self.lightness() - bg).abs() >= 0.1 {
+        if (self.lightness() - background.lightness()).abs() >= 0.1 {
             self
-        } else if bg > 0.7 {
+        } else if background.is_light() {
             Color::BLACK
         } else {
             Color::WHITE

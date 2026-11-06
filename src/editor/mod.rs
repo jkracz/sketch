@@ -594,14 +594,12 @@ impl Editor {
 
     /// Ink for a new object at `p`: `base`, unless it would vanish against what's beneath.
     pub(crate) fn ink_at(&self, base: Color, p: V2) -> Color {
-        let mut under = hit::hit_test(&self.doc, p, self.camera.zoom);
-        while let Some(n) = under.and_then(|id| self.doc.get(id)) {
-            if let Some(fill) = n.style.fill().filter(|c| c.a > 0) {
-                return base.or_contrast_with(fill);
-            }
-            under = n.parent;
-        }
-        base.or_contrast_with(CanvasStyle::of(self.canvas_dark).background)
+        let under = hit::hit_test(&self.doc, p, self.camera.zoom);
+        base.or_contrast_with(
+            self.doc
+                .surface_color(under)
+                .unwrap_or(CanvasStyle::of(self.canvas_dark).background),
+        )
     }
 
     /// Screen-space frame label rectangles for top-level frames (also used by the renderer).

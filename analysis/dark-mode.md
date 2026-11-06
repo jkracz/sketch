@@ -69,3 +69,18 @@ Two dark values are my choices, because I found no matching Paper value. Sketch'
 
 The pencil follows the same rule as text, because Sketch has an ink colour setting where Paper
 has none. Its swatch shows the colour new strokes will get on the canvas.
+
+## Agent text
+
+Paper's `create_artboard` tool applies only the styles the agent passes and adds no background
+of its own. I didn't read the default fill of a new frame, so I can't say what an artboard with
+no styles looks like. Sketch's artboards are white by default.
+
+Text from `write_html` and `create_shape` with no `color` gets a colour from what it lands on:
+dark text if that surface is lighter than 0.7, otherwise white. This uses only the second half
+of Paper's rule. The 0.1 closeness check is for a colour someone chose, and it would keep pure
+black on `#282828`, which is 0.28 away and close to unreadable.
+
+The colour is saved on the text, so it doesn't change if the appearance changes later. Text
+placed at the root at a position checks what's under that point, and text or pencil strokes
+there don't count as a surface. Agent lines and arrows still default to dark ink.

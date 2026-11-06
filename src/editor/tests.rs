@@ -652,6 +652,15 @@ fn ink_keeps_its_colour_on_the_light_canvas_and_on_white_frames() {
 }
 
 #[test]
+fn ink_looks_through_text_and_strokes_to_the_surface() {
+    let mut e = ed();
+    e.tool = Tool::Pencil;
+    drag(&mut e, (100.0, 100.0), (200.0, 100.0), 0.0);
+    // A dark stroke on the light canvas isn't a dark surface.
+    assert_eq!(e.ink_at(Color::INK, v2(150.0, 100.0)), Color::INK);
+}
+
+#[test]
 fn appearance_action_reaches_the_chrome() {
     use crate::settings::Appearance;
     let mut e = ed();
