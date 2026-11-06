@@ -7,7 +7,7 @@
 //! token changes, and drops a binding when a field stops matching (see `editor/tokens.rs`).
 
 use super::node::{Color, Node, NodeKind};
-use super::paint::Paint;
+use super::paint::{LetterSpacing, Paint};
 use crate::mcp::css;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -103,13 +103,15 @@ impl TokenKind {
 }
 
 /// What a token holds. Numbers are px, except line height (a multiple of the font size),
-/// opacity (0 to 1) and font weight.
+/// opacity (0 to 1) and font weight. Letter spacing can also be em.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TokenValue {
     Color(Color),
     Number(f64),
     Text(String),
+    /// Letter spacing relative to the font size of the text it's bound to.
+    Em(f64),
     /// Another token of the same kind, by id.
     Alias(String),
 }
@@ -333,11 +335,10 @@ impl TokenSet {
                 .or_else(|| s.parse::<f64>().ok())
                 .filter(|v| (0.0..=1.0).contains(v))
                 .ok_or_else(bad)?,
-            // `em` depends on the text it applies to, and a token has no text.
-            TokenKind::LetterSpacing if s.ends_with("em") && !s.ends_with("rem") => {
-                return Err(bad());
-            }
-            TokenKind::LetterSpacing => size()?,
+            TokenKind::LetterSpacing => match css::letter_spacing(s).ok_or_else(bad)? {
+                LetterSpacing::Px(px) => px,
+                LetterSpacing::Em { em } => return Ok(TokenValue::Em(em)),
+            },
             TokenKind::FontSize => Some(size()?).filter(|v| *v > 0.0).ok_or_else(bad)?,
             TokenKind::Breakpoint | TokenKind::Container | TokenKind::Spacing => size()?,
             TokenKind::Radius => Some(size()?).filter(|v| *v >= 0.0).ok_or_else(bad)?,
@@ -583,6 +584,7 @@ impl TokenSet {
             TokenValue::Color(c) => css::color_css(*c),
             TokenValue::Text(s) if s.contains(' ') => format!("\"{s}\""),
             TokenValue::Text(s) => s.clone(),
+            TokenValue::Em(v) => format!("{}em", css::round_em(*v)),
             TokenValue::Number(v) => match t.kind {
                 TokenKind::LineHeight | TokenKind::Opacity => format!("{}%", num(v * 100.0)),
                 TokenKind::FontWeight => num(*v),
@@ -625,6 +627,7 @@ impl TokenSet {
         match value {
             TokenValue::Color(c) => css::color_css(c),
             TokenValue::Text(s) => s,
+            TokenValue::Em(v) => format!("{v}em"),
             TokenValue::Alias(_) => String::new(),
             TokenValue::Number(v) => match kind {
                 TokenKind::LineHeight | TokenKind::Opacity | TokenKind::FontWeight => v.to_string(),
@@ -855,7 +858,12 @@ impl TokenProp {
                 n.text_style.base_weight() == *w as u16
             }
             (TokenProp::LineHeight, TokenValue::Number(l)) => n.text_style.line_height == Some(*l),
-            (TokenProp::LetterSpacing, TokenValue::Number(s)) => n.text_style.letter_spacing == *s,
+            (TokenProp::LetterSpacing, TokenValue::Number(s)) => {
+                n.text_style.letter_spacing == LetterSpacing::Px(*s)
+            }
+            (TokenProp::LetterSpacing, TokenValue::Em(em)) => {
+                n.text_style.letter_spacing == LetterSpacing::Em { em: *em }
+            }
             (TokenProp::Gap, TokenValue::Number(g)) => n.layout.is_some_and(|l| l.gap == *g),
             (TokenProp::Padding, TokenValue::Number(p)) => {
                 n.layout.is_some_and(|l| l.padding == [*p; 4])
@@ -887,7 +895,12 @@ impl TokenProp {
             }
             (TokenProp::FontWeight, TokenValue::Number(w)) => n.text_style.set_weight(*w as u16),
             (TokenProp::LineHeight, TokenValue::Number(l)) => n.text_style.line_height = Some(*l),
-            (TokenProp::LetterSpacing, TokenValue::Number(s)) => n.text_style.letter_spacing = *s,
+            (TokenProp::LetterSpacing, TokenValue::Number(s)) => {
+                n.text_style.letter_spacing = LetterSpacing::Px(*s)
+            }
+            (TokenProp::LetterSpacing, TokenValue::Em(em)) => {
+                n.text_style.letter_spacing = LetterSpacing::Em { em: *em }
+            }
             (TokenProp::Gap, TokenValue::Number(g)) => {
                 if let Some(l) = &mut n.layout {
                     l.gap = *g;
@@ -998,6 +1011,10 @@ mod tests {
             Ok(n(1.6))
         );
         assert_eq!(
+            s.parse_value(TokenKind::LetterSpacing, "-0.025em"),
+            Ok(TokenValue::Em(-0.025))
+        );
+        assert_eq!(
             s.parse_value(TokenKind::FontFamily, "'Inter Tight'"),
             Ok(TokenValue::Text("Inter Tight".into()))
         );
@@ -1006,7 +1023,8 @@ mod tests {
             (TokenKind::Opacity, "1.5"),
             (TokenKind::Radius, "-4px"),
             (TokenKind::FontSize, "0"),
-            (TokenKind::LetterSpacing, "0.1em"),
+            (TokenKind::LetterSpacing, "1e308em"),
+            (TokenKind::LetterSpacing, "em"),
             (TokenKind::LineHeight, "24px"),
             (TokenKind::FontWeight, "9000"),
             (TokenKind::Spacing, "var(--missing)"),

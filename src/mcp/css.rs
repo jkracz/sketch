@@ -10,8 +10,8 @@ use crate::geom::v2;
 use crate::model::TokenProp;
 use crate::model::rough::{FillStyle, Rough};
 use crate::model::{
-    Align, AutoLayout, BlendMode, Color, Direction, ImageMode, Node, NodeKind, Paint, Sizing, Stop,
-    TextAlign,
+    Align, AutoLayout, BlendMode, Color, Direction, ImageMode, LetterSpacing, Node, NodeKind,
+    Paint, Sizing, Stop, TextAlign,
 };
 use serde_json::{Map, Value};
 
@@ -160,6 +160,18 @@ pub fn length(s: &str, font_size: f64) -> Option<f64> {
         return num(t).map(|v| v * 4.0 / 3.0);
     }
     num(s)
+}
+
+/// A CSS letter spacing. `em` stays relative so it follows later font size changes.
+pub fn letter_spacing(s: &str) -> Option<LetterSpacing> {
+    let s = s.trim();
+    if !s.ends_with("rem")
+        && let Some(t) = s.strip_suffix("em")
+    {
+        let em = t.trim().parse::<f64>().ok()?;
+        return (em.abs() <= LetterSpacing::MAX_EM).then_some(LetterSpacing::Em { em });
+    }
+    length(s, 16.0).map(LetterSpacing::Px)
 }
 
 pub fn percent(s: &str) -> Option<f64> {
@@ -967,7 +979,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 lh.is_some() || lower == "normal"
             }
             "letterSpacing" if is_text => {
-                match length(v, fs).or((lower == "normal").then_some(0.0)) {
+                let normal = (lower == "normal").then_some(LetterSpacing::default());
+                match letter_spacing(v).or(normal) {
                     Some(ls) => {
                         n.text_style.letter_spacing = ls;
                         true
@@ -1237,6 +1250,11 @@ fn px(v: f64) -> String {
     }
 }
 
+/// Four places: tracking scales use values like `-0.0125em`.
+pub fn round_em(v: f64) -> f64 {
+    (v * 10000.0).round() / 10000.0
+}
+
 fn align_css(a: Align) -> &'static str {
     match a {
         Align::Start => "flex-start",
@@ -1346,13 +1364,15 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             if let Some(lh) = n.text_style.line_height {
                 put("lineHeight", px(lh * font_size));
             }
-            if n.text_style.letter_spacing != 0.0 {
+            // A bound zero still shows, so readers can see the token that owns it.
+            let spacing = n.text_style.letter_spacing;
+            if spacing.px(*font_size) != 0.0 || n.tokens.contains_key(&TokenProp::LetterSpacing) {
                 put(
                     "letterSpacing",
-                    format!(
-                        "{}em",
-                        (n.text_style.letter_spacing / font_size * 1000.0).round() / 1000.0
-                    ),
+                    match spacing {
+                        LetterSpacing::Px(v) => px(v),
+                        LetterSpacing::Em { em } => format!("{}em", round_em(em)),
+                    },
                 );
             }
             put(
@@ -1440,6 +1460,19 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letter_spacing_keeps_its_unit() {
+        assert_eq!(
+            letter_spacing("-0.02em"),
+            Some(LetterSpacing::Em { em: -0.02 })
+        );
+        assert_eq!(letter_spacing("0.1rem"), Some(LetterSpacing::Px(1.6)));
+        assert_eq!(letter_spacing("2px"), Some(LetterSpacing::Px(2.0)));
+        assert_eq!(letter_spacing("0"), Some(LetterSpacing::Px(0.0)));
+        assert_eq!(letter_spacing("wide"), None);
+        assert_eq!(letter_spacing("1e308em"), None);
+    }
 
     #[test]
     fn font_family_takes_the_first_named_family() {

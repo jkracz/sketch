@@ -247,7 +247,8 @@ into another project are independent copies.
 In the Design panel, the diamond next to a property opens the token picker. It appears once
 the project has a token of the right type, and lights up when a token owns the property.
 Changing a token updates every layer bound to it, on all pages. Tokens work for fill, stroke,
-radius, opacity, gap, padding, font size, weight, line height and letter spacing.
+radius, opacity, gap, padding, font size, weight, line height and letter spacing. Letter
+spacing can be px or em, and em follows the font size of each layer it's on.
 
 Typing a plain value into a bound property, or choosing **Detach**, unlinks it and keeps the
 value. Deleting a token leaves the layers looking the same. Token edits undo on the page they
