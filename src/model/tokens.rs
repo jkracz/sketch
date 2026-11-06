@@ -210,6 +210,14 @@ pub struct TokenEdit {
     after: Option<(usize, Token)>,
 }
 
+impl TokenEdit {
+    /// Whether the token itself differs. A token that only moved because its neighbours
+    /// changed isn't an edit, and recording it would let undo overwrite newer changes.
+    fn changes_token(&self) -> bool {
+        self.before.as_ref().map(|(_, t)| t) != self.after.as_ref().map(|(_, t)| t)
+    }
+}
+
 /// The project's tokens. Vector order is creation order, and duplicates sit after their source.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -326,12 +334,19 @@ impl TokenSet {
                 .filter(|v| (0.0..=1.0).contains(v))
                 .ok_or_else(bad)?,
             // `em` depends on the text it applies to, and a token has no text.
-            TokenKind::LetterSpacing if s.ends_with("em") => return Err(bad()),
+            TokenKind::LetterSpacing if s.ends_with("em") && !s.ends_with("rem") => {
+                return Err(bad());
+            }
             TokenKind::LetterSpacing => size()?,
             TokenKind::FontSize => Some(size()?).filter(|v| *v > 0.0).ok_or_else(bad)?,
             TokenKind::Breakpoint | TokenKind::Container | TokenKind::Spacing => size()?,
             TokenKind::Radius => Some(size()?).filter(|v| *v >= 0.0).ok_or_else(bad)?,
         };
+        // Unit conversion can overflow, and JSON has no infinity: saving one would write
+        // null, which stops the project from opening.
+        if !n.is_finite() {
+            return Err(bad());
+        }
         Ok(TokenValue::Number(n))
     }
 
@@ -664,7 +679,7 @@ impl TokenSet {
                 before: place(before, id),
                 after: place(self, id),
             })
-            .filter(|e| e.before != e.after)
+            .filter(TokenEdit::changes_token)
             .collect()
     }
 
@@ -693,7 +708,7 @@ pub fn merge_edits(older: &mut Vec<TokenEdit>, newer: Vec<TokenEdit>) {
             None => older.push(e),
         }
     }
-    older.retain(|e| e.before != e.after);
+    older.retain(TokenEdit::changes_token);
 }
 
 fn check_description(d: Option<&str>) -> Result<(), String> {
@@ -769,7 +784,7 @@ impl TokenProp {
     /// The CSS property that carries this on `n`.
     pub fn css_key(self, n: &Node) -> &'static str {
         match self {
-            TokenProp::Fill if n.kind.text().is_some() => "color",
+            TokenProp::Fill if matches!(n.kind, NodeKind::Text { .. }) => "color",
             TokenProp::Fill => "backgroundColor",
             TokenProp::Stroke => "borderColor",
             TokenProp::Radius => "borderRadius",
@@ -786,8 +801,11 @@ impl TokenProp {
     /// The property a CSS key binds on `n`, if it binds one.
     pub fn from_css_key(key: &str, n: &Node) -> Option<TokenProp> {
         let text = n.kind.text().is_some();
+        // A sticky's fill is its paper; `color` is the writing on it.
+        let sticky = matches!(n.kind, NodeKind::Sticky { .. });
         Some(match key {
-            "color" | "fill" if text => TokenProp::Fill,
+            "color" | "fill" if text && !sticky => TokenProp::Fill,
+            "backgroundColor" | "background" if sticky => TokenProp::Fill,
             "backgroundColor" | "background" | "fill" if !text => TokenProp::Fill,
             "borderColor" | "stroke" => TokenProp::Stroke,
             "borderRadius" => TokenProp::Radius,
@@ -906,6 +924,10 @@ mod tests {
         assert_eq!(s.parse_value(TokenKind::LineHeight, "150%"), Ok(n(1.5)));
         assert_eq!(s.parse_value(TokenKind::FontWeight, "bold"), Ok(n(700.0)));
         assert_eq!(
+            s.parse_value(TokenKind::LetterSpacing, "0.1rem"),
+            Ok(n(1.6))
+        );
+        assert_eq!(
             s.parse_value(TokenKind::FontFamily, "'Inter Tight'"),
             Ok(TokenValue::Text("Inter Tight".into()))
         );
@@ -918,6 +940,9 @@ mod tests {
             (TokenKind::LineHeight, "24px"),
             (TokenKind::FontWeight, "9000"),
             (TokenKind::Spacing, "var(--missing)"),
+            (TokenKind::Spacing, "1e308rem"),
+            (TokenKind::FontSize, "1e308pt"),
+            (TokenKind::Radius, "1e308rem"),
         ] {
             assert!(s.parse_value(k, v).is_err(), "{k:?} {v}");
         }
@@ -1134,6 +1159,29 @@ mod tests {
             TokenValue::Color(Color::rgb(255, 0, 0))
         );
         assert!(s.get(&added).is_some());
+    }
+
+    #[test]
+    fn moved_neighbours_are_not_edits() {
+        let mut s = TokenSet::default();
+        let a = s.create(TokenKind::Spacing, "a", "4px", None).unwrap();
+        let b = s.create(TokenKind::Spacing, "b", "8px", None).unwrap();
+        let before = s.clone();
+        s.delete(std::slice::from_ref(&a));
+        let edits = s.diff(&before);
+        assert_eq!(edits.len(), 1, "only the deleted token: {edits:?}");
+        assert_eq!(edits[0].id, a);
+
+        // Merged edits follow the same rule: adding a token in front of `b` and removing it
+        // again leaves nothing to undo.
+        let start = s.clone();
+        let c = s.create(TokenKind::Spacing, "c", "2px", None).unwrap();
+        let mut merged = s.diff(&start);
+        let added = s.clone();
+        s.delete(std::slice::from_ref(&c));
+        merge_edits(&mut merged, s.diff(&added));
+        assert!(merged.is_empty(), "{merged:?}");
+        assert!(s.get(&b).is_some());
     }
 
     #[test]

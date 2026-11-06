@@ -366,6 +366,82 @@ fn projects_without_tokens_keep_their_file_shape() {
 }
 
 #[test]
+fn an_oversized_token_cannot_make_a_project_unreadable() {
+    let mut h = host();
+    let r = call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [{"type": "spacing", "name": "--huge", "value": "1e308rem"}]}),
+    );
+    let dir = h.session.project.as_ref().unwrap().dir.clone();
+    h.session.save(&mut h.ed).unwrap();
+    let mut again = exec::SessionHost::new(h.session.store.clone());
+    again.session.open(&mut again.ed, &dir).unwrap();
+    assert_eq!(r["tokens"][0]["result"], "error", "{r}");
+}
+
+#[test]
+fn undoing_a_delete_keeps_a_rename_made_on_another_page() {
+    let mut h = host();
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [
+            {"type": "spacing", "name": "--a", "value": "4px"},
+            {"type": "spacing", "name": "--b", "value": "8px"},
+        ]}),
+    );
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--a", "delete": true}]}),
+    );
+    h.ed.add_page();
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--b", "newName": "--renamed"}]}),
+    );
+    h.ed.switch_page(0);
+    h.ed.undo();
+    assert!(
+        h.ed.tokens.by_css_name("--a").is_some(),
+        "the delete is undone"
+    );
+    assert!(
+        h.ed.tokens.by_css_name("--renamed").is_some(),
+        "the other page's rename stays"
+    );
+}
+
+#[test]
+fn sticky_fills_bind_through_the_background() {
+    let mut h = host();
+    seed(&mut h);
+    let r = call(
+        &mut h,
+        "create_shape",
+        json!({"type": "sticky", "text": "Note", "x": 0, "y": 0, "styles": {
+            "backgroundColor": "var(--color-brand)",
+        }}),
+    );
+    let id = node(&r["id"]);
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.fill(), Some(Color::rgb(0x2f, 0x6b, 0xff)));
+    assert!(n.tokens.contains_key(&TokenProp::Fill), "{:?}", n.tokens);
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [r["id"]]}));
+    let s = styles.as_object().unwrap().values().next().unwrap();
+    assert_eq!(s["backgroundColor"], "var(--color-brand)", "{s}");
+
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--color-brand", "value": "#000000"}]}),
+    );
+    assert_eq!(h.ed.doc.get(id).unwrap().style.fill(), Some(Color::BLACK));
+}
+
+#[test]
 fn m6_tokens_panel_screenshot() {
     let Some(g) = gpu() else { return };
     let mut h = host();
