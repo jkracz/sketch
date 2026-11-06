@@ -13,6 +13,11 @@ edit the project open in the running app; every change is one undo step and show
 
 - Start with get_basic_info (pages, artboards, sizes) and get_selection (what the user is \
 looking at). Use list_resources / open_file / create_file to pick a project.
+- Projects can sit in folders, one level deep. list_resources returns every folder and each \
+project's location. To put a project in a folder the user names, pass the folder's id as \
+parentId to create_file or move_resources. If it isn't listed, call create_folder first, which \
+returns the existing folder when the name is taken. parentId \"root\" is the top level. Two \
+folders can hold projects with the same name, so prefer ids or Folder/Project keys.
 - For details read get_guide({ topic: \"sketch-rs-mcp-instructions\" }) once per session.
 - pageId defaults to the page the user is viewing; pass it to work on another page without \
 switching the user's view. Node ids are opaque strings; never show them to the user.
@@ -32,7 +37,7 @@ clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
 
 fn file_id() -> Value {
-    json!({"type": "string", "description": "The project to operate on (id, name or folder path from list_resources). When omitted the project open in the app is used."})
+    json!({"type": "string", "description": "The project to operate on (id, name, Folder/Project location or path from list_resources). When omitted the project open in the app is used."})
 }
 
 fn page_id() -> Value {
@@ -65,6 +70,8 @@ fn styles_schema(desc: &str) -> Value {
 pub const FONT_CATEGORIES: [&str; 5] =
     ["sans-serif", "serif", "display", "handwriting", "monospace"];
 pub const MAX_FONT_RESULTS: usize = 100;
+/// The `parentId` for projects in no folder.
+pub const TOP_LEVEL: &str = "root";
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
     let mut props = props;
@@ -74,6 +81,9 @@ fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool
             name,
             "list_resources"
                 | "create_file"
+                | "create_folder"
+                | "move_resources"
+                | "rename_resource"
                 | "get_font_family_info"
                 | "search_fonts"
                 | "get_guide"
@@ -109,10 +119,16 @@ pub fn definitions() -> Vec<Value> {
         // ------------------------------------------------------------ projects and pages
         tool(
             "list_resources",
-            "Lists the user's Sketch projects (local folders), most recently modified first. \
-             Each item has id, name, path, page count, updatedAt, and `open` for the project open \
-             in the app.",
-            json!({"limit": {"type": "integer", "description": "Maximum projects to return. Defaults to 50."}}),
+            "Lists the user's folders, then their Sketch projects, most recently modified first. \
+             Each item has type \"folder\" or \"file\". Folders have id, name, path and fileCount; \
+             all of them are always listed. Files have id, name, location (\"Folder/Project\", or \
+             just the name at the top level), path, page count, updatedAt, `open` for the project \
+             open in the app, and parentId and folder when they're in a folder. Pass parentId to \
+             list only the projects in one folder.",
+            json!({
+                "limit": {"type": "integer", "description": "Maximum projects to return. Defaults to 50."},
+                "parentId": {"type": "string", "description": "Folder id or name. Only list projects directly inside it. \"root\" lists projects in no folder."},
+            }),
             &[],
             true,
         ),
@@ -121,7 +137,7 @@ pub fn definitions() -> Vec<Value> {
             "Opens a project in the app (saving the current one) and returns a get_basic_info \
              response. Optional pageId switches the user to that page.",
             json!({
-                "fileId": {"type": "string", "minLength": 1, "description": "Project id, name or folder path (see list_resources)."},
+                "fileId": {"type": "string", "minLength": 1, "description": "Project id, name, Folder/Project location or path (see list_resources)."},
                 "pageId": {"type": "string", "description": "Optional page to show."},
             }),
             &["fileId"],
@@ -129,9 +145,49 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "create_file",
-            "Creates a new empty project and returns its id. Call open_file with the id to work in it.",
-            json!({"name": {"type": "string", "description": "Optional project name."}}),
+            "Creates a new empty project and returns its id. Pass parentId to create it inside a \
+             folder; a folder that doesn't exist is an error listing the ones that do. Call \
+             open_file with the id to work in it.",
+            json!({
+                "name": {"type": "string", "description": "Optional project name."},
+                "parentId": {"type": "string", "description": "Optional folder id or name. Defaults to the top level."},
+            }),
             &[],
+            false,
+        ),
+        tool(
+            "create_folder",
+            "Creates a folder for organizing projects and returns its id, or returns the existing \
+             folder with that name (ignoring case), with `created` false. Folders hold projects \
+             and can't be nested.",
+            json!({"name": {"type": "string", "description": "Folder name. Defaults to \"New Folder\"."}}),
+            &[],
+            false,
+        ),
+        tool(
+            "move_resources",
+            "Moves projects into a folder, or to the top level with parentId \"root\". The project \
+             open in the app can be moved and stays open. Every id is checked first: if any can't \
+             be found, nothing moves. A project whose name is taken in the folder gets the next \
+             free name. Returns `moved` and `unchanged` (already there) with each project's \
+             current id, name and path.",
+            json!({
+                "resourceIds": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Project ids, names or Folder/Project locations."},
+                "parentId": {"type": "string", "minLength": 1, "description": "Folder id or name, or \"root\" for the top level."},
+            }),
+            &["resourceIds", "parentId"],
+            false,
+        ),
+        tool(
+            "rename_resource",
+            "Renames a project or folder and returns the stored name, which gets the next free \
+             name if the one asked for is taken. It keeps its id and contents. The project open \
+             in the app can be renamed and stays open.",
+            json!({
+                "resourceId": {"type": "string", "minLength": 1, "description": "Project or folder id, or name."},
+                "name": {"type": "string", "minLength": 1, "description": "The new name."},
+            }),
+            &["resourceId", "name"],
             false,
         ),
         tool(
@@ -571,7 +627,8 @@ pub fn definitions() -> Vec<Value> {
 pub const GUIDE_INSTRUCTIONS: &str = "\
 # Designing in Sketch over MCP
 
-1. Orient: get_basic_info → pages, artboards, sizes; get_selection → what the user points at.
+1. Orient: get_basic_info → pages, artboards, sizes, folder; get_selection → what the user
+   points at.
 2. Plan a brief before a new design: palette (3–5 colors), type scale (e.g. 12/14/16/20/28/40),
    spacing scale (4/8/12/16/24/32), corner radius.
 3. Create an artboard sized for the device (create_artboard). Artboards are flex columns.
@@ -587,6 +644,16 @@ flex-direction row/column, gap, padding, justify-content (start, center, end, sp
 align-items (start, center, end; stretch is the default and makes children fill the cross axis
 when the container has a definite size). flex-grow:1 fills the main axis; width:100% fills too.
 height/width fit-content hug the content. position:absolute + left/top places freely.
+
+Folders: projects sit at the top level or in one folder, and folders don't nest. list_resources
+shows all folders plus each project's `location`, so answer \"where is X?\" from that.
+- \"Make this in Acme\": find Acme in list_resources, then create_file with parentId.
+- \"Put X in Acme\": move_resources with X's id and Acme's id as parentId.
+- \"Take X out of its folder\": move_resources with parentId \"root\".
+- Folder not listed: create_folder if the user asked for a new one. If it looks like a typo of
+  a listed folder, use that folder or ask.
+Both move_resources and rename_resource work on the open project. Report the returned name,
+which can differ from the old one after a name clash. Deleting folders is left to the user.
 
 Whiteboard: create_shape makes rectangles, ellipses, diamonds, stickies, text and arrows that
 bind to shapes (they re-route when shapes move). Turn on the hand-drawn look with

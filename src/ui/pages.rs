@@ -110,10 +110,9 @@ fn page_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, i: usize, top: f32) 
             name_rect.shrink2(egui::vec2(0.0, 2.0)),
             egui::TextEdit::singleline(name),
         );
-        r.request_focus();
-        if r.lost_focus() {
+        if let Some(keep) = super::rename_ended(ui, &r, name) {
             let (idx, name) = st.pages.renaming.take().unwrap();
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if keep {
                 ed.rename_page(idx, &name);
             }
         }

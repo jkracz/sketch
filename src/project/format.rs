@@ -22,6 +22,8 @@ pub const OLD_PAGE_FORMAT: &str = "paper-rs-page";
 pub const OLD_LEGACY_FORMAT: &str = "paper-rs";
 
 pub const PROJECT_VERSION: u32 = 1;
+pub const FOLDER_FORMAT: &str = "sketch-rs-folder";
+pub const FOLDER_VERSION: u32 = 1;
 /// v1: legacy single file. v2: page file inside a project. v3: fill layers (`fills`).
 pub const PAGE_VERSION: u32 = 3;
 
@@ -115,6 +117,42 @@ impl Manifest {
             &[OLD_PROJECT_FORMAT],
             &[],
         )?;
+        serde_json::from_value(v).map_err(FormatError::Json)
+    }
+}
+
+// ---------------------------------------------------------------------------------- folder
+
+/// The marker that makes a directory a folder of projects, so stray directories in the store
+/// never show up as folders. It owns the display name, which may not be a legal file name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FolderManifest {
+    pub format: String,
+    pub version: u32,
+    pub id: String,
+    pub name: String,
+    /// Unix milliseconds.
+    pub created: u64,
+}
+
+impl FolderManifest {
+    pub fn new(id: &str, name: &str) -> FolderManifest {
+        FolderManifest {
+            format: FOLDER_FORMAT.into(),
+            version: FOLDER_VERSION,
+            id: id.into(),
+            name: name.into(),
+            created: now_ms(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("folder manifest serializes")
+    }
+
+    pub fn from_json(s: &str) -> Result<FolderManifest, FormatError> {
+        let v: Value = serde_json::from_str(s).map_err(FormatError::Json)?;
+        let v = migrate(v, FOLDER_FORMAT, FOLDER_VERSION, &[], &[])?;
         serde_json::from_value(v).map_err(FormatError::Json)
     }
 }

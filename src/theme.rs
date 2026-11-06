@@ -333,6 +333,7 @@ pub enum Icon {
     Sidebar,
     Export,
     Grid,
+    Folder,
     Trash,
     More,
     Page,
@@ -525,6 +526,17 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
                 pt(8.0, 10.0),
                 pt(6.0, 8.0),
                 pt(8.0, 6.0),
+            ]);
+        }
+        Icon::Folder => {
+            line(&[
+                pt(1.5, 12.5),
+                pt(1.5, 3.5),
+                pt(6.0, 3.5),
+                pt(7.5, 5.5),
+                pt(14.5, 5.5),
+                pt(14.5, 12.5),
+                pt(1.5, 12.5),
             ]);
         }
         Icon::Plus => {

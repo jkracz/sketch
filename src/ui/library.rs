@@ -139,11 +139,11 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                                 let (_, name) = lib.renaming.as_mut().unwrap();
                                 let r =
                                     ui.add(egui::TextEdit::singleline(name).desired_width(TILE));
-                                r.request_focus();
-                                if r.lost_focus() {
+                                if let Some(keep) = super::rename_ended(ui, &r, name) {
                                     let (id, name) = lib.renaming.take().unwrap();
-                                    if let Some(x) =
-                                        lib.library.items.iter_mut().find(|x| x.id == id)
+                                    if keep
+                                        && let Some(x) =
+                                            lib.library.items.iter_mut().find(|x| x.id == id)
                                     {
                                         x.name = name;
                                         lib.dirty = true;

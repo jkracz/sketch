@@ -69,6 +69,29 @@ pub enum LayerDrop {
     Into(NodeId),
 }
 
+/// Run an inline rename field, given the `TextEdit` just added for `text`. The first frame
+/// focuses it and selects the text, so typing replaces the old name. Returns None while the
+/// user is typing, then Some(true) for Enter or a click elsewhere and Some(false) for Escape.
+/// Asking for focus every frame would pull it back from Enter and clicks, so the field could
+/// never close.
+pub fn rename_ended(ui: &Ui, r: &egui::Response, text: &str) -> Option<bool> {
+    if r.lost_focus() {
+        return Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)));
+    }
+    if !r.has_focus() {
+        r.request_focus();
+        let mut state = egui::TextEdit::load_state(ui.ctx(), r.id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+        egui::TextEdit::store_state(ui.ctx(), r.id, state);
+    }
+    None
+}
+
 pub fn setup_style(ctx: &egui::Context, appearance: crate::settings::Appearance) {
     theme::apply(ctx, appearance);
 }
@@ -644,11 +667,10 @@ fn layer_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, id: NodeId, depth: 
             name_rect.shrink2(egui::vec2(0.0, 2.0)),
             egui::TextEdit::singleline(name),
         );
-        r.request_focus();
-        if r.lost_focus() {
+        if let Some(keep) = rename_ended(ui, &r, name) {
             let new = name.trim().to_string();
             st.renaming = None;
-            if !new.is_empty() && new != n.name {
+            if keep && !new.is_empty() && new != n.name {
                 ed.edit("Rename", |tx| tx.node_mut(id).unwrap().name = new);
             }
         }

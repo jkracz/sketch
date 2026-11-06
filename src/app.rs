@@ -248,11 +248,24 @@ impl App {
         }
     }
 
+    /// Where new projects go: the folder on screen, or the open project's folder.
+    fn target_folder(&self) -> Option<crate::project::Folder> {
+        match (&self.st.home, &self.session.project) {
+            (Some(hv), _) => hv.selected_folder().cloned(),
+            (None, Some(p)) => self.session.store.folder_of(&p.dir),
+            (None, None) => None,
+        }
+    }
+
     fn new_project(&mut self) {
+        let folder = self.target_folder();
         if self.session.project.is_some() {
             self.save_project(true);
         }
-        match self.session.create(&mut self.ed, "Untitled") {
+        match self
+            .session
+            .create_in(&mut self.ed, "Untitled", folder.as_ref())
+        {
             Ok(()) => {
                 self.st.home = None;
                 self.st.project_name = self.session.project_name();
@@ -295,15 +308,22 @@ impl App {
     }
 
     fn import_file(&mut self, p: &std::path::Path) {
+        let folder = self.target_folder();
         match crate::io::import::import_as_pages(p) {
-            Ok((name, pages)) => match self.session.store.create_with_pages(&name, pages) {
-                Ok(proj) => {
-                    let dir = proj.dir.clone();
-                    self.open_project(&dir);
-                    self.ed.status = format!("Imported {}", p.display());
+            Ok((name, pages)) => {
+                match self
+                    .session
+                    .store
+                    .create_with_pages_in(&name, pages, folder.as_ref())
+                {
+                    Ok(proj) => {
+                        let dir = proj.dir.clone();
+                        self.open_project(&dir);
+                        self.ed.status = format!("Imported {}", p.display());
+                    }
+                    Err(e) => self.error(format!("Could not create a project: {e}")),
                 }
-                Err(e) => self.error(format!("Could not create a project: {e}")),
-            },
+            }
             Err(e) => self.error(format!("Could not import {}: {e}", p.display())),
         }
     }
@@ -336,6 +356,26 @@ impl App {
                 HomeAction::Duplicate(dir) => {
                     store.duplicate(&dir).map(|_| ()).map_err(|e| e.to_string())
                 }
+                HomeAction::Move(dir, folder) => store
+                    .move_project(&dir, folder.as_ref())
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                HomeAction::NewFolder(project) => (|| {
+                    let f = store.create_folder("New Folder")?;
+                    if let Some(dir) = project {
+                        store.move_project(&dir, Some(&f))?;
+                    }
+                    if let Some(hv) = &mut self.st.home {
+                        hv.name_new_folder(f);
+                    }
+                    Ok::<(), crate::project::FormatError>(())
+                })()
+                .map_err(|e| e.to_string()),
+                HomeAction::RenameFolder(dir, name) => store
+                    .rename_folder(&dir, &name)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                HomeAction::TrashFolder(dir) => store.trash_folder(&dir).map_err(|e| e.to_string()),
                 HomeAction::Trash(dir) => store.trash(&dir).map(|_| ()).map_err(|e| e.to_string()),
                 HomeAction::Restore(dir) => {
                     store.restore(&dir).map(|_| ()).map_err(|e| e.to_string())
@@ -1383,6 +1423,10 @@ impl App {
             let _ = c.reply.send(r);
         }
         self.st.project_name = self.session.project_name();
+        // An agent may have changed folders or projects behind the home screen.
+        if self.st.home.is_some() {
+            self.show_home();
+        }
         self.ed.revision += 1;
         if let Some(g) = &self.gfx {
             g.window.request_redraw();
@@ -1421,6 +1465,9 @@ impl crate::mcp::exec::Host for App {
         self.st.save_state.clear();
         self.ed.status.clear();
         Ok(())
+    }
+    fn project_moved(&mut self, dir: &std::path::Path) {
+        self.session.relocate(dir);
     }
     fn save(&mut self) -> Result<(), String> {
         if self.session.project.is_some() {
