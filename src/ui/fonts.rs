@@ -44,16 +44,6 @@ fn search_id() -> egui::Id {
 
 type Textures = Arc<Mutex<HashMap<&'static str, egui::TextureHandle>>>;
 
-/// The families matching the search text and category, in catalog order.
-fn matches(search: &str, category: &str) -> Vec<&'static google::Family> {
-    let search = search.trim().to_ascii_lowercase();
-    google::catalog()
-        .iter()
-        .filter(|f| category.is_empty() || f.category == category)
-        .filter(|f| f.family.to_ascii_lowercase().contains(&search))
-        .collect()
-}
-
 fn preview_texture(ui: &Ui, family: &'static str) -> Option<egui::TextureHandle> {
     let textures: Textures = ui.data_mut(|d| {
         d.get_temp_mut_or_default::<Textures>(search_id().with("textures"))
@@ -145,7 +135,7 @@ fn family_list(ui: &mut Ui, ed: &mut Editor, current: &str) {
         d.insert_temp(search_id(), search.clone());
         d.insert_temp(category_id, category);
     });
-    let list = matches(&search, category);
+    let list = google::search(&search, category);
     let mut picked = submitted
         .then(|| list.first().map(|f| f.family.as_str()))
         .flatten();
@@ -262,18 +252,6 @@ mod tests {
         });
         h.ed.select(vec![id]);
         id
-    }
-
-    #[test]
-    fn search_narrows_by_name_and_category_in_popularity_order() {
-        assert_eq!(matches("", "").len(), google::catalog().len());
-        assert_eq!(matches("playfair d", "")[0].family, "Playfair Display");
-        assert!(
-            matches("roboto", "serif")
-                .iter()
-                .all(|f| f.category == "serif")
-        );
-        assert!(matches("no such font", "").is_empty());
     }
 
     #[test]

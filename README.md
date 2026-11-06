@@ -157,7 +157,7 @@ written for Paper work here too.
 | Group | Tools |
 |---|---|
 | Projects & pages | `list_resources`, `open_file`, `create_file`, `create_page`, `rename_pages` |
-| Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `get_guide` |
+| Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `search_fonts`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
 | Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens` |

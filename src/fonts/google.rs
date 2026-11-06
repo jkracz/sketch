@@ -76,6 +76,17 @@ pub fn find(name: &str) -> Option<&'static Family> {
         .map(|i| &catalog()[*i])
 }
 
+/// Families whose name contains `query`, most popular first. An empty query or category matches
+/// every family.
+pub fn search(query: &str, category: &str) -> Vec<&'static Family> {
+    let query = query.trim().to_ascii_lowercase();
+    catalog()
+        .iter()
+        .filter(|f| category.is_empty() || f.category == category)
+        .filter(|f| f.family.to_ascii_lowercase().contains(&query))
+        .collect()
+}
+
 fn encoded(family: &str) -> String {
     family.replace(' ', "+")
 }
@@ -463,6 +474,15 @@ mod tests {
             find("Noto Color Emoji").is_none(),
             "color fonts are left out"
         );
+    }
+
+    #[test]
+    fn search_narrows_by_name_and_category_in_popularity_order() {
+        assert_eq!(search("", "").len(), catalog().len());
+        assert_eq!(search("playfair d", "")[0].family, "Playfair Display");
+        let serif = search("roboto", "serif");
+        assert!(!serif.is_empty() && serif.iter().all(|f| f.category == "serif"));
+        assert!(search("no such font", "").is_empty());
     }
 
     #[test]

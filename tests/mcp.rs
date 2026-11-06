@@ -93,6 +93,61 @@ fn html_keeps_font_family_and_weight() {
 }
 
 #[test]
+fn search_fonts_finds_families_by_name_and_category() {
+    let mut h = host();
+    let names = |r: &Value| -> Vec<String> {
+        let list = r["families"].as_array().unwrap();
+        list.iter()
+            .map(|f| f["family"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let top = call(&mut h, "search_fonts", json!({}));
+    assert_eq!(names(&top).len(), 20, "the default limit");
+    assert!(top["total"].as_u64().unwrap() > 1000);
+
+    let by_name = call(&mut h, "search_fonts", json!({"query": "playfair d"}));
+    assert_eq!(names(&by_name)[0], "Playfair Display");
+    let f = &by_name["families"][0];
+    assert_eq!(f["category"], json!("serif"));
+    assert!(f["weights"].as_array().unwrap().contains(&json!(700)));
+    assert_eq!(f["loaded"], json!(false));
+
+    let mono = call(
+        &mut h,
+        "search_fonts",
+        json!({"category": "monospace", "limit": 3}),
+    );
+    assert_eq!(names(&mono).len(), 3);
+    assert!(
+        mono["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["category"] == json!("monospace"))
+    );
+    assert!(mono["total"].as_u64().unwrap() > 3);
+
+    let capped = call(&mut h, "search_fonts", json!({"limit": 100000}));
+    assert_eq!(names(&capped).len(), 100);
+
+    let inter = call(
+        &mut h,
+        "search_fonts",
+        json!({"query": "Inter", "limit": 100}),
+    );
+    let inter = inter["families"].as_array().unwrap();
+    assert!(
+        inter
+            .iter()
+            .any(|f| f["family"] == json!("Inter") && f["loaded"] == json!(true))
+    );
+
+    let bad = exec::call(&mut h, "search_fonts", &json!({"category": "fancy"}));
+    assert!(bad.is_err_and(|e| e.contains("monospace")));
+}
+
+#[test]
 fn artboard_and_html_become_auto_layout_frames_and_text() {
     let mut h = host();
     let ab = call(
