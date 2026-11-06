@@ -839,10 +839,9 @@ impl TokenProp {
             (TokenProp::Radius, TokenValue::Number(r)) => n.style.corner_radii() == [*r; 4],
             (TokenProp::Opacity, TokenValue::Number(o)) => n.style.opacity == *o,
             (TokenProp::FontSize, TokenValue::Number(s)) => n.kind.font_size() == Some(*s),
-            (TokenProp::FontWeight, TokenValue::Number(w)) => n
-                .text_style
-                .weight
-                .map_or(n.text_style.bold == (*w >= 600.0), |x| x as f64 == *w),
+            (TokenProp::FontWeight, TokenValue::Number(w)) => {
+                n.text_style.base_weight() == *w as u16
+            }
             (TokenProp::LineHeight, TokenValue::Number(l)) => n.text_style.line_height == Some(*l),
             (TokenProp::LetterSpacing, TokenValue::Number(s)) => n.text_style.letter_spacing == *s,
             (TokenProp::Gap, TokenValue::Number(g)) => n.layout.is_some_and(|l| l.gap == *g),
@@ -913,10 +912,17 @@ mod tests {
         assert_eq!(n.text_style.base_weight(), 500);
         assert!(TokenProp::FontWeight.holds(&n, &medium));
         assert!(!TokenProp::FontWeight.holds(&n, &bold));
-        // Text that only has the bold flag still counts as a 700 weight.
+        // Text that only has the bold flag counts as exactly 700, and regular text as 400.
         TokenProp::FontWeight.write(&mut n, &bold);
         assert_eq!(n.text_style.weight, None);
         assert!(TokenProp::FontWeight.holds(&n, &bold));
+        assert!(!TokenProp::FontWeight.holds(&n, &TokenValue::Number(600.0)));
+        TokenProp::FontWeight.write(&mut n, &TokenValue::Number(400.0));
+        assert!(!TokenProp::FontWeight.holds(&n, &TokenValue::Number(300.0)));
+        // A fractional token still matches what `write` stored.
+        let fractional = TokenValue::Number(550.5);
+        TokenProp::FontWeight.write(&mut n, &fractional);
+        assert!(TokenProp::FontWeight.holds(&n, &fractional));
     }
 
     fn set() -> (TokenSet, String, String) {

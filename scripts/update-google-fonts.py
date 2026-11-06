@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerates assets/fonts/google-fonts.json, the font picker's list of Google Fonts.
+"""Regenerates assets/fonts/google-fonts.json, the list of Google Fonts families.
 
-Run it with GOOGLE_FONTS_API_KEY set. The app never sees the key: it reads the file this writes,
-and font files themselves come from fonts.googleapis.com, which needs no key.
+Run it with GOOGLE_FONTS_API_KEY set. Only this script uses the key, and the file it writes holds
+names and styles, not fonts.
 """
 import json
 import os

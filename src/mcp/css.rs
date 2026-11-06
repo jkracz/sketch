@@ -562,6 +562,8 @@ pub fn font_weight(v: &str) -> u16 {
         "normal" | "lighter" => 400,
         s => s
             .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite())
             .map_or(400, |w| w.clamp(1.0, 1000.0) as u16),
     }
 }
@@ -1460,6 +1462,9 @@ mod tests {
             ("0", 1),
             ("2000", 1000),
             ("nope", 400),
+            ("nan", 400),
+            ("inf", 400),
+            ("-inf", 400),
         ] {
             assert_eq!(font_weight(v), w, "{v}");
         }
