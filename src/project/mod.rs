@@ -332,15 +332,16 @@ impl Store {
         let manifest = read_manifest(dir)?;
         let name = self.unique_name(parent, &manifest.name);
         let target = self.unique_dir(parent, &name);
-        std::fs::rename(dir, &target)?;
+        // Name first, so an error always means the project stayed where callers think it is.
         if name != manifest.name {
-            let mut moved = Project {
-                dir: target.clone(),
+            let mut p = Project {
+                dir: dir.to_path_buf(),
                 manifest,
             };
-            moved.manifest.name = name;
-            moved.write_manifest()?;
+            p.manifest.name = name;
+            p.write_manifest()?;
         }
+        std::fs::rename(dir, &target)?;
         Ok(target)
     }
 
@@ -392,7 +393,14 @@ impl Store {
         let mut manifest = read_folder_manifest(dir)?;
         manifest.name = self.unique_folder_name(new_name, Some(dir));
         let target = self.rename_dir(dir, &self.root, &manifest.name)?;
-        atomic::write(&target.join(FOLDER_MANIFEST), manifest.to_json().as_bytes())?;
+        if let Err(e) = atomic::write(&target.join(FOLDER_MANIFEST), manifest.to_json().as_bytes())
+        {
+            // Callers treat an error as "nothing moved", so make it true.
+            if let Err(back) = std::fs::rename(&target, dir) {
+                log::error!("could not move {} back: {back}", target.display());
+            }
+            return Err(e.into());
+        }
         Ok(Folder {
             dir: target,
             id: manifest.id,
@@ -484,16 +492,17 @@ impl Store {
         let parent = self.parent_dir(folder.as_ref());
         let name = free_name(parent, &entry.manifest.name, None);
         let target = self.unique_dir(parent, &entry.original);
-        std::fs::rename(trash_dir, &target)?;
-        let _ = std::fs::remove_file(target.join(TRASH_INFO));
+        // Name first, so an error leaves the project in the trash.
         if name != entry.manifest.name {
-            let mut restored = Project {
-                dir: target.clone(),
+            let mut p = Project {
+                dir: trash_dir.to_path_buf(),
                 manifest: entry.manifest,
             };
-            restored.manifest.name = name;
-            restored.write_manifest()?;
+            p.manifest.name = name;
+            p.write_manifest()?;
         }
+        std::fs::rename(trash_dir, &target)?;
+        let _ = std::fs::remove_file(target.join(TRASH_INFO));
         Ok(target)
     }
 

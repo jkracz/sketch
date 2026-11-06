@@ -349,10 +349,19 @@ fn pick<'a>(
 /// Projects match by manifest id, absolute path, name or "Folder/Project". Two folders can each
 /// hold a project with the same name, so a bare name can be ambiguous, and that's an error.
 fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
+    match lookup_project(store, key)? {
+        Some(dir) => Ok(dir),
+        None => Err(format!("project `{key}` not found (see list_resources)")),
+    }
+}
+
+/// `find_project`, telling "no such project" (None) apart from "several match" (an error), so
+/// callers only try a folder when no project was meant.
+fn lookup_project(store: &Store, key: &str) -> Result<Option<PathBuf>, String> {
     let key = key.trim().trim_start_matches("/file/");
     let p = Path::new(key);
     if p.is_absolute() && p.join(crate::project::MANIFEST).is_file() {
-        return Ok(p.to_path_buf());
+        return Ok(Some(p.to_path_buf()));
     }
     let list = store.list();
     let tiers: [&dyn Fn(&Entry) -> bool; 5] = [
@@ -364,10 +373,10 @@ fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
     ];
     for matches in tiers {
         if let Some(e) = pick(&list, key, matches)? {
-            return Ok(e.dir.clone());
+            return Ok(Some(e.dir.clone()));
         }
     }
-    Err(format!("project `{key}` not found (see list_resources)"))
+    Ok(None)
 }
 
 /// Folders match by id, name (ignoring case) or absolute path. A miss lists the folders that
@@ -568,12 +577,18 @@ fn move_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
     let target = parent_arg(host.store(), a.req_str("parentId")?)?;
     let mut dirs: Vec<PathBuf> = Vec::new();
     for key in a.strs("resourceIds")? {
-        let dir = find_project(host.store(), &key).map_err(|e| {
-            match find_folder(host.store(), &key) {
-                Ok(f) => format!("`{}` is a folder. Folders can't be nested.", f.name),
-                Err(_) => e,
+        let dir = match lookup_project(host.store(), &key)? {
+            Some(dir) => dir,
+            None => {
+                if let Ok(f) = find_folder(host.store(), &key) {
+                    return Err(format!(
+                        "`{}` is a folder. Folders can't be nested.",
+                        f.name
+                    ));
+                }
+                return Err(format!("project `{key}` not found (see list_resources)"));
             }
-        })?;
+        };
         if !dirs.iter().any(|d| same_dir(d, &dir)) {
             dirs.push(dir);
         }
@@ -618,13 +633,13 @@ fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
     let key = a.req_str("resourceId")?;
     let name = a.req_str("name")?;
     let open = host.project().map(|p| p.dir.clone());
-    let file = find_project(host.store(), key);
+    let file = lookup_project(host.store(), key)?;
     let folder = find_folder(host.store(), key);
     match (file, folder) {
-        (Ok(_), Ok(_)) => Err(format!(
+        (Some(_), Ok(_)) => Err(format!(
             "`{key}` is both a project and a folder. Pass its id from list_resources."
         )),
-        (Ok(dir), Err(_)) => {
+        (Some(dir), Err(_)) => {
             let is_open = open.as_ref().is_some_and(|d| same_dir(d, &dir));
             let new_dir = host.store().rename(&dir, name).map_err(|e| e.to_string())?;
             if is_open {
@@ -633,7 +648,7 @@ fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
             let m = Project::open(&new_dir).map_err(|e| e.to_string())?.manifest;
             text(json!({"type": "file", "name": m.name, "path": new_dir}))
         }
-        (_, Ok(f)) => {
+        (None, Ok(f)) => {
             let open_inside = open.filter(|d| d.parent().is_some_and(|p| same_dir(p, &f.dir)));
             let renamed = host
                 .store()
@@ -644,7 +659,7 @@ fn rename_resource(host: &mut dyn Host, a: &Args) -> ToolResult {
             }
             text(json!({"type": "folder", "name": renamed.name, "path": renamed.dir}))
         }
-        (Err(e), Err(_)) => Err(e),
+        (None, Err(_)) => Err(format!("`{key}` not found (see list_resources)")),
     }
 }
 

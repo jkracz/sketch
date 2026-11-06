@@ -662,6 +662,50 @@ fn the_open_project_keeps_saving_after_it_moves_or_is_renamed() {
 }
 
 #[test]
+fn an_ambiguous_project_name_never_falls_through_to_a_folder() {
+    let mut h = host();
+    call(&mut h, "create_folder", json!({"name": "Plan"}));
+    call(&mut h, "create_folder", json!({"name": "Acme"}));
+    call(&mut h, "create_folder", json!({"name": "Globex"}));
+    call(
+        &mut h,
+        "create_file",
+        json!({"name": "Plan", "parentId": "Acme"}),
+    );
+    call(
+        &mut h,
+        "create_file",
+        json!({"name": "Plan", "parentId": "Globex"}),
+    );
+
+    let e = err(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "Plan", "name": "New"}),
+    );
+    assert!(e.contains("Acme/Plan") && e.contains("Globex/Plan"), "{e}");
+    let list = call(&mut h, "list_resources", json!({}));
+    assert_eq!(
+        item(&list, "Plan")["type"],
+        "folder",
+        "the folder keeps its name"
+    );
+
+    let e = err(
+        &mut h,
+        "move_resources",
+        json!({"resourceIds": ["Plan"], "parentId": "root"}),
+    );
+    assert!(e.contains("Acme/Plan") && e.contains("Globex/Plan"), "{e}");
+    let e = err(
+        &mut h,
+        "rename_resource",
+        json!({"resourceId": "Nope", "name": "New"}),
+    );
+    assert!(e.contains("not found"), "{e}");
+}
+
+#[test]
 fn a_rename_reports_the_name_it_stored() {
     let mut h = host();
     call(&mut h, "create_file", json!({"name": "Taken"}));
