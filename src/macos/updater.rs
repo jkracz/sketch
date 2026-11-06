@@ -13,7 +13,7 @@ use objc2_app_kit::NSWorkspace;
 use objc2_foundation::{NSBundle, NSString, NSURL};
 use std::cell::OnceCell;
 
-const LATEST_RELEASE: &str = "https://github.com/michaelshimeles/sketch/releases/latest";
+const LATEST_RELEASE: &str = "https://github.com/jkracz/sketch/releases/latest";
 
 thread_local! {
     /// The `SPUStandardUpdaterController`, kept for the life of the app; `None` without Sparkle.

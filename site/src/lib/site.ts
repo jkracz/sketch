@@ -1,7 +1,7 @@
 /** `static/robots.txt` and `static/sitemap.xml` repeat this origin. */
 export const SITE_URL = 'https://sketch.rasmic.xyz';
 export const VERSION = '0.1.0';
-export const REPO_URL = 'https://github.com/michaelshimeles/sketch';
+export const REPO_URL = 'https://github.com/jkracz/sketch';
 /** The universal app that `scripts/release-macos.sh` builds; every release must include it. */
 export const DOWNLOAD_URL = `${REPO_URL}/releases/latest/download/Sketch.dmg`;
 

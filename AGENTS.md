@@ -6,7 +6,8 @@ uses the skills in `.agents/skills/`. Claude Code reads them through the
 symlinks in `.claude/skills/`.
 
 - Read-only reviews, explanations, and investigations need no worktree, commit,
-  PR, or Greptile run. If an investigation leads to edits, isolate those edits.
+  PR, or CodeRabbit review. If an investigation leads to edits, isolate those
+  edits.
 - Code changes use isolation, relevant architecture guidance, checks, and
   evidence of the behavior changed. Capture a failure before fixing it.
 - Small documentation edits use an isolated branch and relevant content or link
@@ -20,9 +21,13 @@ This repo is Sketch, a native Rust infinite canvas built on wgpu, winit and
 egui, plus its download page in `site/`, a single prerendered SvelteKit page
 built for Vercel. The README covers building, running and testing the app, and
 `site/README.md` covers the page and its image pipeline. The app used to be
-called paper-rs. The GitHub repo is now `michaelshimeles/sketch`, but the
+called paper-rs. The GitHub repo is now `jkracz/sketch`, but the
 checkout folders keep the old name.
 
+- The project began as a fork of `michaelshimeles/sketch` and is developed
+  independently. PRs target `jkracz/sketch`. GitHub still lists the repo as a
+  fork and `gh` otherwise defaults to the parent, so open PRs with
+  `gh pr create --repo jkracz/sketch --base main`.
 - Put worktrees in `../paper-rs-worktrees/<task-name>` on branches named
   `agent/<task-name>`. Outside the checkout, Cargo, Vite and svelte-check never
   pick them up.
@@ -31,7 +36,7 @@ checkout folders keep the old name.
   `node_modules` would sync to every machine unless the Mutagen session
   ignores it.
 - Don't deploy to Vercel, create Vercel projects, publish GitHub releases or
-  push tags. Micky decides when to ship.
+  push tags. The owner of `jkracz/sketch` decides when to ship.
 - Sketch is a clean-room reimplementation modeled on Paper (paper.design).
   Never add Paper's code, shaders, icons, fonts or assets; `analysis/` records
   behavior only. On the download page, keep Paper's name out of the headline,
@@ -62,11 +67,16 @@ checkout folders keep the old name.
    runnable examples and links as applicable.
 4. **Ship.** Open the PR with evidence appropriate to the change. Use
    `/before-and-after` when screenshots help; use output pairs for CLI changes.
-   Run `/greploop` for code or executable workflow changes, or when requested.
-   Aim for **5/5 with zero unresolved actionable Greptile findings** on the
-   current commit. Stop at the configured iteration cap, a review timeout, or
-   an unavailable integration and report the actual score and remaining work.
-   Do not claim success or raise the cap automatically. Present the PR URL.
+   Finish the CodeRabbit review for code or executable workflow changes, or
+   when requested. CodeRabbit reviews a PR when it opens and again on each
+   push, so it needs no trigger comment. Wait for the `CodeRabbit` check on the
+   current commit, then read its inline threads and review summary. That check
+   passes even with findings open, so aim for **zero unresolved actionable
+   CodeRabbit threads** on the current commit. Fix valid findings, and reply
+   with your reason on false positives. Stop if a review takes over 15 minutes
+   or the integration is unavailable, and report the remaining work without
+   claiming success. Greptile doesn't respond on this repo, so `/greploop` and
+   `/greploop-apps` don't apply. Present the PR URL.
 
 Ship-beat notes:
 
@@ -119,8 +129,8 @@ wrote or changed, not to prose you didn't touch.
 6. Open the PR. The body must explain what changed, how it was tested (every
    claim backed by evidence), before/after proof, and any risks or follow-up
    work. Run the title and body through `/unslop` before posting.
-7. Run `/greploop` when applicable, with the success and stopping conditions
-   above. `/greploop-apps` selects the alternate trigger in that same workflow.
+7. Finish the CodeRabbit review when applicable, with the success and stopping
+   conditions above.
 8. End by presenting the PR URL.
 
 Do not merge the PR unless explicitly instructed. Keep the worktree until
