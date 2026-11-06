@@ -312,8 +312,8 @@ impl LetterSpacing {
         }
     }
 
-    /// The same spacing at `font_size`, in em or px. Stays in px if the em value would pass
-    /// [`Self::MAX_EM`], which a tiny or zero font size can cause.
+    /// The same spacing at `font_size`, in em or px. Keeps its unit if the new value would
+    /// pass [`Self::MAX_EM`] or overflow, which an extreme font size can cause.
     pub fn converted(self, to_em: bool, font_size: f64) -> Self {
         match self {
             LetterSpacing::Px(px) if to_em => {
@@ -324,7 +324,14 @@ impl LetterSpacing {
                     self
                 }
             }
-            LetterSpacing::Em { em } if !to_em => LetterSpacing::Px(em * font_size),
+            LetterSpacing::Em { em } if !to_em => {
+                let px = em * font_size;
+                if px.is_finite() {
+                    LetterSpacing::Px(px)
+                } else {
+                    self
+                }
+            }
             same => same,
         }
     }
@@ -708,6 +715,8 @@ mod tests {
             none,
             "zero over zero isn't a number"
         );
+        let em = LetterSpacing::Em { em: 2.0 };
+        assert_eq!(em.converted(false, 1e308), em, "overflows to infinity");
     }
 
     #[test]

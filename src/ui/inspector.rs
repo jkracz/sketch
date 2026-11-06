@@ -58,6 +58,12 @@ fn row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
+/// `DragValue` re-reads its rounded text when it loses focus, so clicking in and out changes
+/// any value with more decimals than it shows. Only a change the field could show is an edit.
+fn edited_past_display(before: f64, after: f64, decimals: usize) -> bool {
+    (after - before).abs() > 0.5 / 10f64.powi(decimals as i32)
+}
+
 /// The letter spacing field, in the unit of the value it shows.
 fn letter_spacing_field(
     ui: &mut Ui,
@@ -79,7 +85,7 @@ fn letter_spacing_field(
             .prefix("LS "),
     );
     seal_on_release(ed, &r);
-    (r.changed() && v != before).then_some(match value {
+    (r.changed() && edited_past_display(before, v, decimals)).then_some(match value {
         LetterSpacing::Px(_) => LetterSpacing::Px(v),
         LetterSpacing::Em { .. } => LetterSpacing::Em { em: v },
     })
@@ -1321,4 +1327,17 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         seal_on_release(ed, &r);
         picker(ui, ed, ids, TokenProp::Opacity);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edited_past_display;
+
+    #[test]
+    fn rounding_on_blur_is_not_an_edit() {
+        assert!(!edited_past_display(0.00004, 0.0, 4));
+        assert!(!edited_past_display(0.33333, 0.3333, 4));
+        assert!(edited_past_display(-0.025, -0.024, 4));
+        assert!(edited_past_display(1.5, 1.6, 2));
+    }
 }
