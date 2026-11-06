@@ -1,9 +1,9 @@
 //! Google Fonts: the catalog of families, and their files downloaded when text first uses them.
 //!
 //! The catalog is `assets/fonts/google-fonts.json`, written by `scripts/update-google-fonts.py`.
-//! Font files come from the CSS API at fonts.googleapis.com, which needs no key. Without a
-//! browser user agent it answers with plain TTF files, the format `ttf_parser` reads, with one
-//! static file per weight. Files stay in a cache folder, so a font downloads once per machine.
+//! The CSS API at fonts.googleapis.com needs no key and points at the files on fonts.gstatic.com.
+//! Without a browser user agent it points at plain TTF files, the format `ttf_parser` reads, with
+//! one static file per weight. Files stay in a cache folder, so a font downloads once per machine.
 //!
 //! Nothing here runs until `start` is called, so tests and tools never touch the network.
 

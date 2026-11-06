@@ -327,11 +327,12 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 * **Pen pressure.** winit 0.30 does not expose tablet pressure for pen events that arrive as
   mouse input, which is common with macOS and Wacom tablets. Pressure comes from touch/pen
   `force` when the platform reports it. Otherwise it is simulated from stroke velocity.
-* **Text** defaults to bundled Inter. The inspector's font list downloads Google Fonts on first
-  use, into the system cache folder, so choosing a font sends its name and your IP address to
-  Google. Text shows Inter until the font arrives. There is no shaping, so no ligatures, kerning,
-  complex scripts or RTL, and color fonts are left out. IME preedit is not displayed (committed
-  text works).
+* **Text** defaults to bundled Inter. Google Fonts download on first use into the system cache
+  folder, and text shows Inter until the font arrives. Sketch sends Google the font name and your
+  IP address whenever text needs a font that isn't cached, whether it comes from the font list,
+  an opened document or MCP. Scrolling the font list does the same for each row without a cached
+  preview. There is no shaping, so no ligatures, kerning, complex scripts or RTL, and color fonts
+  are left out. IME preedit is not displayed (committed text works).
 * **No rotation.** Nodes are axis-aligned boxes; rotated imports are baked into paths.
 * **Undo granularity.** Document renames from the Design panel are not undoable, and the
   selection is not part of history.
