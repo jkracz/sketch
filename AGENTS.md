@@ -68,15 +68,17 @@ checkout folders keep the old name.
 4. **Ship.** Open the PR with evidence appropriate to the change. Use
    `/before-and-after` when screenshots help; use output pairs for CLI changes.
    Finish the CodeRabbit review for code or executable workflow changes, or
-   when requested. CodeRabbit reviews a PR when it opens and again on each
-   push, so it needs no trigger comment. Wait for the `CodeRabbit` check on the
-   current commit, then read its inline threads and review summary. That check
-   passes even with findings open, so aim for **zero unresolved actionable
-   CodeRabbit threads** on the current commit. Fix valid findings, and reply
-   with your reason on false positives. Stop if a review takes over 15 minutes
-   or the integration is unavailable, and report the remaining work without
-   claiming success. Greptile doesn't respond on this repo, so `/greploop` and
-   `/greploop-apps` don't apply. Present the PR URL.
+   when requested. CodeRabbit reviews a PR when it opens and on later pushes,
+   then pauses after five reviewed commits. During a pause, comment
+   `@coderabbitai review` for one review or `@coderabbitai resume` to restart
+   them. Wait for a completed review of the current commit, then read its inline
+   threads and summary. The `CodeRabbit` check passes even with findings open,
+   so aim for **zero unresolved actionable CodeRabbit threads** on the current
+   commit. Fix valid findings, and reply with your reason on the rest. Stop if a
+   review takes over 15 minutes or the integration is unavailable, and report
+   the remaining work without claiming success. Greptile doesn't respond on
+   this repo, so `/greploop` and `/greploop-apps` don't apply. Present the PR
+   URL.
 
 Ship-beat notes:
 
