@@ -247,8 +247,9 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "get_font_family_info",
-            "Whether font families are loaded and their weights/styles. Inter is bundled (400 to \
-             700). Text keeps any other family and renders in Inter until that font is loaded.",
+            "Whether font families are available and their weights/styles. Inter is bundled and \
+             any Google Fonts family downloads the first time text uses it, showing Inter until \
+             it arrives. Other families stay in the document and render in Inter.",
             json!({"familyNames": {"type": "array", "items": {"type": "string"}}}),
             &["familyNames"],
             true,
@@ -326,7 +327,8 @@ pub fn definitions() -> Vec<Value> {
              grid or tables.\n\
              - Text: font-family, font-size, font-weight (1 to 1000), font-style, color, \
              line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/\
-             <span style> make rich text. A family that isn't loaded renders in Inter.\n\
+             <span style> make rich text. Google Fonts families download on first use and show \
+             Inter until they arrive.\n\
              - Boxes: background(-color/-image: colors, linear/radial gradients, url()), border, \
              border-radius, opacity, overflow:hidden, mix-blend-mode, width/height (px, %, \
              fit-content).\n\

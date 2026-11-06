@@ -81,8 +81,15 @@ fn html_keeps_font_family_and_weight() {
         json!({"familyNames": ["Inter", "Lora"]}),
     );
     assert_eq!(fonts["families"][0]["available"], json!(true));
-    assert_eq!(fonts["families"][0]["styles"].as_array().unwrap().len(), 6);
-    assert_eq!(fonts["families"][1]["available"], json!(false));
+    assert_eq!(fonts["families"][0]["loaded"], json!(true));
+    assert_eq!(fonts["families"][1]["available"], json!(true));
+    assert_eq!(fonts["families"][1]["loaded"], json!(false));
+    let unknown = call(
+        &mut h,
+        "get_font_family_info",
+        json!({"familyNames": ["No Such Font"]}),
+    );
+    assert_eq!(unknown["families"][0]["available"], json!(false));
 }
 
 #[test]

@@ -127,6 +127,8 @@ pub struct SceneCache {
     last: Option<(u64, i32, Rect, Vec<Item>)>,
     /// Tessellations performed during the last `items` call (for tests and profiling).
     pub last_misses: usize,
+    /// `fonts::generation` the cached geometry was built with.
+    fonts: u64,
 }
 
 /// Zoom buckets are powers of two: geometry built for 2^b is accurate up to 2^(b+1).
@@ -140,6 +142,15 @@ impl SceneCache {
         self.last = None;
     }
 
+    /// A new font can change how any text looks, without changing its node.
+    fn sync_fonts(&mut self) {
+        let generation = crate::fonts::generation();
+        if generation != self.fonts {
+            self.fonts = generation;
+            self.clear();
+        }
+    }
+
     /// Items for `roots` (or the whole page) in paint order. `cull` skips subtrees outside a
     /// world rect.
     pub fn items(
@@ -149,6 +160,7 @@ impl SceneCache {
         zoom: f64,
         cull: Option<Rect>,
     ) -> Vec<Item> {
+        self.sync_fonts();
         let bucket = zoom_bucket(zoom);
         let tz = 2f64.powi(bucket);
         let mut tess = Tess::new(tz);
@@ -622,6 +634,7 @@ pub fn canvas(ed: &Editor, cache: &mut SceneCache, offset: V2, show_grid: bool) 
     }
     let vis = ed.camera.visible_world(ed.viewport);
     let bucket = zoom_bucket(ed.camera.zoom);
+    cache.sync_fonts();
     let items = match &cache.last {
         Some((stamp, b, cull, items))
             if *stamp == ed.doc_stamp && *b == bucket && cull.contains_rect(&vis) =>

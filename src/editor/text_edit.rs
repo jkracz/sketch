@@ -177,6 +177,34 @@ impl Editor {
         true
     }
 
+    /// Refit text that depends on a font, if one has arrived since the last call.
+    pub fn sync_fonts(&mut self) {
+        let generation = crate::fonts::generation();
+        if generation != self.fonts_seen {
+            self.fonts_seen = generation;
+            self.refit_font_text();
+        }
+    }
+
+    /// Fit text to the fonts loaded now. A font arriving isn't an edit, so this leaves history
+    /// alone, including any transaction in progress.
+    pub(super) fn refit_font_text(&mut self) {
+        let ids: Vec<NodeId> = self
+            .doc
+            .nodes
+            .values()
+            .filter(|n| n.text_style.has_font_choice())
+            .map(|n| n.id)
+            .collect();
+        let open = self.rec.take();
+        for id in ids {
+            self.fit_text(id);
+        }
+        self.fixup();
+        self.rec = open;
+        self.doc_stamp = super::next_stamp();
+    }
+
     /// Apply a style change to the selected text range, or to whole text layers when not
     /// editing (or editing without a selection).
     pub fn style_text(&mut self, field: &str, f: impl Fn(&mut TextSpan)) {
@@ -271,26 +299,39 @@ impl Editor {
         }
     }
 
-    /// The style at the caret / selection start (for toggles and the inspector).
-    pub fn current_char_style(&self) -> Option<crate::model::CharStyle> {
+    /// The text node and character the inspector describes: the caret / selection start.
+    fn styled_char(&self) -> Option<(&crate::model::Node, usize)> {
         let id = self
             .text_edit
             .as_ref()
             .map(|t| t.id)
             .or_else(|| self.selection.first().copied())?;
         let n = self.doc.get(id)?;
-        let font_size = &n.kind.font_size()?;
+        n.kind.font_size()?;
         let at = match (self.text_selection(), &self.text_edit) {
             (Some((a, _)), _) => a,
             (None, Some(te)) => te.caret.saturating_sub(1),
             _ => 0,
         };
+        Some((n, at))
+    }
+
+    /// The style at the caret / selection start (for toggles and the inspector).
+    pub fn current_char_style(&self) -> Option<crate::model::CharStyle> {
+        let (n, at) = self.styled_char()?;
+        let font_size = n.kind.font_size()?;
         let color = n
             .style
             .fills
             .last()
             .map_or(Color::INK, |p| p.preview_color());
-        Some(n.text_style.char_style(at, *font_size, color))
+        Some(n.text_style.char_style(at, font_size, color))
+    }
+
+    /// The family at the caret / selection start (None = Inter).
+    pub fn current_family(&self) -> Option<&str> {
+        let (n, at) = self.styled_char()?;
+        n.text_style.family_at(at)
     }
 
     pub fn toggle_bold(&mut self) {

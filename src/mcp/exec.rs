@@ -1000,29 +1000,35 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
 }
 
 fn font_info(a: &Args) -> ToolResult {
+    let style = |weight: u16, italic: bool| json!({"weight": weight, "style": if italic { "italic" } else { "normal" }});
     let fams: Vec<Value> = a
         .strs("familyNames")?
         .iter()
         .map(|f| {
-            let styles: Vec<Value> = crate::fonts::styles(f)
-                .into_iter()
-                .map(|(weight, italic)| {
-                    json!({"weight": weight, "style": if italic { "italic" } else { "normal" }})
-                })
-                .collect();
+            let loaded = crate::fonts::styles(f);
+            let styles: Vec<Value> = match crate::fonts::google::find(f) {
+                Some(g) => (g.weights.iter().map(|w| style(*w, false)))
+                    .chain(g.italics.iter().map(|w| style(*w, true)))
+                    .collect(),
+                None => loaded.iter().map(|(w, i)| style(*w, *i)).collect(),
+            };
+            let note = match (styles.is_empty(), loaded.is_empty()) {
+                (true, _) => "not available; text keeps this family and renders in Inter",
+                (false, true) => "downloads from Google Fonts the first time text uses it",
+                (false, false) => "",
+            };
             json!({
                 "family": f,
                 "available": !styles.is_empty(),
-                "note": if styles.is_empty() {
-                    "not loaded; text keeps this family and renders in Inter"
-                } else {
-                    ""
-                },
+                "loaded": !loaded.is_empty(),
+                "note": note,
                 "styles": styles,
             })
         })
         .collect();
-    text(json!({"families": fams, "weights": "fontWeight renders with the nearest loaded weight"}))
+    text(
+        json!({"families": fams, "weights": "fontWeight renders with the nearest available weight"}),
+    )
 }
 
 fn guide(a: &Args) -> ToolResult {

@@ -4,8 +4,8 @@
 //! exports to SVG without font dependencies. Faces come from `crate::fonts`: bundled Inter
 //! (SIL OFL) plus whatever is registered at runtime, never anything taken from Paper.
 
-use crate::fonts::resolve;
 pub use crate::fonts::{FaceId, face_bytes, face_of};
+use crate::fonts::{google, resolve};
 use crate::geom::{V2, v2};
 use crate::model::{CharStyle, Color, TextAlign, TextStyle};
 use crate::vector::VPath;
@@ -126,6 +126,8 @@ pub fn layout_rich(
         .map(|(i, s)| {
             let key = (ts.family_at(i), s.weight, s.italic);
             if last != Some(key) {
+                // First, so a font already in the download cache is used from this layout on.
+                google::request(key.0.unwrap_or("Inter"), s.weight, s.italic);
                 wanted = (
                     resolve(key.0, s.weight, s.italic),
                     resolve(None, s.weight, s.italic),

@@ -414,6 +414,34 @@ fn family_and_weight_apply_to_the_selection_or_the_whole_layer() {
 }
 
 #[test]
+fn a_font_arriving_refits_text_without_touching_undo() {
+    let mut e = editor(1000.0, 800.0);
+    let t = e.add_node(
+        sketch_rs::demo::text_node("ABBA", 20.0, v2(100.0, 100.0), Color::INK),
+        None,
+    );
+    e.select(vec![t]);
+    e.style_text("font", |s| s.family = Some("Fixture Refit".into()));
+    let inter_width = e.doc.get(t).unwrap().rect.w;
+    let undo_len = e.history.undo_len();
+    let dirty = e.is_dirty();
+
+    // Inter Bold's letters are wider, so the width must change when this face arrives.
+    let font = std::fs::read("assets/fonts/Inter-Bold.ttf").unwrap();
+    sketch_rs::fonts::register("Fixture Refit", 400, false, font).unwrap();
+    e.sync_fonts();
+    let fitted = e.doc.get(t).unwrap().rect.w;
+    assert!(fitted > inter_width, "{fitted} > {inter_width}");
+    assert_eq!(e.history.undo_len(), undo_len);
+    assert_eq!(e.is_dirty(), dirty);
+
+    // Undo and redo restore sizes from before the font arrived, so redo fits them again.
+    e.undo();
+    e.redo();
+    assert_eq!(e.doc.get(t).unwrap().rect.w, fitted);
+}
+
+#[test]
 fn rich_text_ranges_and_smart_guides() {
     let mut e = editor(1000.0, 800.0);
     let t = e.add_node(

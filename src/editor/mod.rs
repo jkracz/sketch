@@ -246,6 +246,8 @@ pub struct Editor {
     /// Process-unique stamp of the document content: changes whenever the document may
     /// have changed (edits, undo, page switch, load). Renderers reuse work while it holds.
     pub doc_stamp: u64,
+    /// `fonts::generation` when text was last fitted to the loaded fonts.
+    fonts_seen: u64,
     /// Fit the camera to the content once the real viewport size is known.
     pub pending_fit: bool,
     /// Pages of the open project; the active one's content is `doc`/`history`/`camera`.
@@ -329,6 +331,7 @@ impl Editor {
             last_click: None,
             revision: 0,
             doc_stamp: next_stamp(),
+            fonts_seen: crate::fonts::generation(),
             pending_fit: false,
             pages: vec![PageSlot::new(&name)],
             active_page: 0,
@@ -434,6 +437,8 @@ impl Editor {
         self.selection.retain(|id| self.doc.nodes.contains_key(id));
         // Node snapshots in the history hold token values from when they were taken.
         self.sync_tokens();
+        // They also hold sizes measured before a font arrived.
+        self.refit_font_text();
     }
 
     /// A pointer gesture (drag, draw, resize...) is in progress.

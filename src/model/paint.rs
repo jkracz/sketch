@@ -319,6 +319,13 @@ impl TextStyle {
         self.weight = (weight != 400 && weight != 700).then_some(weight);
     }
 
+    /// Whether the text names a family or weight beyond bold, so it may depend on a loaded font.
+    pub fn has_font_choice(&self) -> bool {
+        self.family.is_some()
+            || self.weight.is_some()
+            || (self.spans.iter()).any(|s| s.family.is_some() || s.weight.is_some())
+    }
+
     /// The family of one character (None = Inter). Apart from `CharStyle` so that stays `Copy`.
     pub fn family_at(&self, i: usize) -> Option<&str> {
         self.spans
