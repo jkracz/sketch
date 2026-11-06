@@ -219,8 +219,14 @@ impl Editor {
             // Whole-layer changes go to the base style where possible.
             let mut probe = TextSpan::default();
             f(&mut probe);
+            if let Some(family) = &probe.family {
+                n.text_style.family = Some(family.clone());
+            }
             if let Some(b) = probe.bold {
-                n.text_style.bold = b;
+                n.text_style.set_weight(if b { 700 } else { 400 });
+            }
+            if let Some(w) = probe.weight {
+                n.text_style.set_weight(w);
             }
             if let Some(i) = probe.italic {
                 n.text_style.italic = i;
@@ -236,8 +242,12 @@ impl Editor {
             }
             // Drop span values that the whole-layer change supersedes.
             for sp in &mut n.text_style.spans {
-                if probe.bold.is_some() {
+                if probe.family.is_some() {
+                    sp.family = None;
+                }
+                if probe.bold.is_some() || probe.weight.is_some() {
                     sp.bold = None;
+                    sp.weight = None;
                 }
                 if probe.italic.is_some() {
                     sp.italic = None;

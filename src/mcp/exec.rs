@@ -23,6 +23,7 @@ use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
 /// What a tool call needs from its surroundings.
@@ -500,11 +501,24 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
         "nodeCount": doc.nodes.len(),
         "artboards": artboards,
         "otherTopLevelLayers": others,
-        "fontFamilies": ["Inter"],
+        "fontFamilies": font_families(doc),
         "tokens": token_list(&ed.tokens),
         "selectionCount": if page == ed.active_page { ed.selection.len() } else { 0 },
         "nodeIdFormat": "\"<page>:<n>\", e.g. \"".to_string() + &node_key(ed, page, NodeId(1)) + "\"",
     }))
+}
+
+/// The families text in `doc` uses, in name order.
+fn font_families(doc: &Document) -> BTreeSet<&str> {
+    doc.nodes
+        .values()
+        .filter(|n| n.kind.text().is_some())
+        .flat_map(|n| {
+            let spans = n.text_style.spans.iter().map(|s| s.family.as_deref());
+            std::iter::once(n.text_style.family.as_deref()).chain(spans.filter(Option::is_some))
+        })
+        .map(|f| f.unwrap_or("Inter"))
+        .collect()
 }
 
 fn selection(ed: &mut Editor) -> ToolResult {
@@ -990,20 +1004,25 @@ fn font_info(a: &Args) -> ToolResult {
         .strs("familyNames")?
         .iter()
         .map(|f| {
-            let inter = f.trim().eq_ignore_ascii_case("inter");
+            let styles: Vec<Value> = crate::fonts::styles(f)
+                .into_iter()
+                .map(|(weight, italic)| {
+                    json!({"weight": weight, "style": if italic { "italic" } else { "normal" }})
+                })
+                .collect();
             json!({
                 "family": f,
-                "available": inter,
-                "styles": if inter { json!([
-                    {"weight": 400, "style": "normal"}, {"weight": 700, "style": "normal"},
-                    {"weight": 400, "style": "italic"}, {"weight": 700, "style": "italic"}]) } else { json!([]) },
-                "note": if inter { "" } else { "not available; text renders in Inter" },
+                "available": !styles.is_empty(),
+                "note": if styles.is_empty() {
+                    "not loaded; text keeps this family and renders in Inter"
+                } else {
+                    ""
+                },
+                "styles": styles,
             })
         })
         .collect();
-    text(
-        json!({"families": fams, "weights": "fontWeight ≥ 600 renders bold, below renders regular"}),
-    )
+    text(json!({"families": fams, "weights": "fontWeight renders with the nearest loaded weight"}))
 }
 
 fn guide(a: &Args) -> ToolResult {
@@ -1547,8 +1566,10 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
 }
 
 /// Inline content as a styled character stream.
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 struct Run {
+    family: Option<Rc<str>>,
+    weight: Option<u16>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -1590,20 +1611,21 @@ fn collect_runs(
 ) {
     for c in nodes {
         match c {
-            Html::Text(t) => out.extend(t.chars().map(|ch| (ch, run))),
-            Html::Element(e) if e.tag == "br" => out.push(('\u{2028}', run)),
+            Html::Text(t) => out.extend(t.chars().map(|ch| (ch, run.clone()))),
+            Html::Element(e) if e.tag == "br" => out.push(('\u{2028}', run.clone())),
             Html::Element(e) => {
                 let mut st = ua_styles(&e.tag);
                 st.extend(css::parse_inline(e.attr("style").unwrap_or("")));
                 tokens.expand(&mut st);
-                let mut r = run;
+                let mut r = run.clone();
                 for (k, v) in &st {
                     let lower = v.to_ascii_lowercase();
                     match k.as_str() {
+                        "fontFamily" => r.family = css::font_family(v).map(Rc::from),
                         "fontWeight" => {
-                            r.bold = Some(
-                                lower == "bold" || lower.parse::<f64>().is_ok_and(|w| w >= 600.0),
-                            )
+                            let w = css::font_weight(v);
+                            r.weight = Some(w);
+                            r.bold = Some(w >= 600);
                         }
                         "fontStyle" => r.italic = Some(lower == "italic"),
                         "textDecoration" | "textDecorationLine" => {
@@ -1891,13 +1913,19 @@ impl Builder<'_, '_> {
         // Rich text runs.
         let mut i = 0;
         while i < chars.len() {
-            let r = chars[i].1;
+            let r = chars[i].1.clone();
             let mut j = i + 1;
             while j < chars.len() && chars[j].1 == r {
                 j += 1;
             }
             if r != Run::default() {
                 n.text_style.apply_range(i, j, |s| {
+                    if let Some(family) = &r.family {
+                        s.family = Some(family.to_string());
+                    }
+                    if r.weight.is_some() {
+                        s.weight = r.weight;
+                    }
                     if r.bold.is_some() {
                         s.bold = r.bold;
                     }

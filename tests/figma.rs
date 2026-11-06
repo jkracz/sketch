@@ -379,6 +379,41 @@ fn booleans_and_flatten() {
 }
 
 #[test]
+fn family_and_weight_apply_to_the_selection_or_the_whole_layer() {
+    let mut e = editor(1000.0, 800.0);
+    let t = e.add_node(
+        sketch_rs::demo::text_node("Hello world", 20.0, v2(100.0, 100.0), Color::INK),
+        None,
+    );
+    e.start_text_edit(t, None);
+    key(&mut e, Key::End, Modifiers::NONE);
+    for _ in 0..5 {
+        key(&mut e, Key::Left, Modifiers::SHIFT);
+    }
+    e.style_text("font", |s| s.family = Some("Lora".into()));
+    e.style_text("bold", |s| s.weight = Some(500));
+    let n = e.doc.get(t).unwrap();
+    assert_eq!(n.text_style.family_at(7), Some("Lora"));
+    assert_eq!(n.text_style.family_at(0), None);
+    assert_eq!(n.text_style.char_style(7, 20.0, Color::INK).weight, 500);
+    e.end_text_edit();
+
+    // A whole-layer change moves to the base style and replaces what the spans said.
+    e.select(vec![t]);
+    e.style_text("font", |s| s.family = Some("Inter Tight".into()));
+    e.style_text("bold", |s| s.weight = Some(300));
+    let n = e.doc.get(t).unwrap();
+    assert_eq!(n.text_style.family.as_deref(), Some("Inter Tight"));
+    assert_eq!(n.text_style.family_at(7), Some("Inter Tight"));
+    assert_eq!(n.text_style.char_style(7, 20.0, Color::INK).weight, 300);
+
+    // The bold toggle overrides a set weight.
+    e.toggle_bold();
+    let n = e.doc.get(t).unwrap();
+    assert_eq!(n.text_style.base_weight(), 700);
+}
+
+#[test]
 fn rich_text_ranges_and_smart_guides() {
     let mut e = editor(1000.0, 800.0);
     let t = e.add_node(

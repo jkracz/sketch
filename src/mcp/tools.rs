@@ -19,7 +19,7 @@ switching the user's view. Node ids are opaque strings; never show them to the u
 - Build UI with create_artboard, then write_html into it, one visual group per call (a header, \
 a row, a card) so the user sees progress. Inline styles only; flexbox (display:flex, gap, \
 padding, align-items, justify-content) is the layout model; no margin, grid or tables.
-- Text uses Inter (regular, bold, italic). Use px for font sizes.
+- Text defaults to Inter. Use px for font sizes. Check fonts with get_font_family_info.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
 delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
 update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
@@ -247,8 +247,8 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "get_font_family_info",
-            "Whether font families are available and their weights/styles. Sketch renders text \
-             with Inter (400, 700, normal and italic); other families fall back to Inter.",
+            "Whether font families are loaded and their weights/styles. Inter is bundled (400 to \
+             700). Text keeps any other family and renders in Inter until that font is loaded.",
             json!({"familyNames": {"type": "array", "items": {"type": "string"}}}),
             &["familyNames"],
             true,
@@ -324,9 +324,9 @@ pub fn definitions() -> Vec<Value> {
              align-items, justify-content, flex-grow, flex-wrap) is the layout model; block \
              elements stack vertically. position:absolute with left/top is supported. No margin, \
              grid or tables.\n\
-             - Text: font-size, font-weight (≥600 = bold), font-style, color, line-height, \
-             letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/<span style> make rich \
-             text. Font family is always Inter.\n\
+             - Text: font-family, font-size, font-weight (1 to 1000), font-style, color, \
+             line-height, letter-spacing, text-align, text-decoration; <b>/<i>/<u>/<s>/\
+             <span style> make rich text. A family that isn't loaded renders in Inter.\n\
              - Boxes: background(-color/-image: colors, linear/radial gradients, url()), border, \
              border-radius, opacity, overflow:hidden, mix-blend-mode, width/height (px, %, \
              fit-content).\n\
@@ -586,7 +586,7 @@ display (flex, block, none), flex-direction, flex-wrap, gap, row-gap, column-gap
 justify-content, align-items, align-self, flex-grow, overflow, background, background-color,
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
-font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
+font-family, font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
 Ignored (reported back): margin, grid, box-shadow, transform, filters, transitions.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
