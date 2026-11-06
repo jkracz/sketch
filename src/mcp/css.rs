@@ -162,17 +162,14 @@ pub fn length(s: &str, font_size: f64) -> Option<f64> {
     num(s)
 }
 
-/// A CSS letter spacing. `em` stays relative so it follows later font size changes. The limit
-/// keeps the px it resolves to finite, since a saved infinity stops a project from opening.
+/// A CSS letter spacing. `em` stays relative so it follows later font size changes.
 pub fn letter_spacing(s: &str) -> Option<LetterSpacing> {
     let s = s.trim();
     if !s.ends_with("rem")
         && let Some(t) = s.strip_suffix("em")
     {
         let em = t.trim().parse::<f64>().ok()?;
-        return (-100.0..=100.0)
-            .contains(&em)
-            .then_some(LetterSpacing::Em { em });
+        return (em.abs() <= LetterSpacing::MAX_EM).then_some(LetterSpacing::Em { em });
     }
     length(s, 16.0).map(LetterSpacing::Px)
 }

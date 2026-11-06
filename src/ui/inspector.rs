@@ -64,9 +64,10 @@ fn letter_spacing_field(
     ed: &mut Editor,
     value: LetterSpacing,
 ) -> Option<LetterSpacing> {
+    let max_em = LetterSpacing::MAX_EM;
     let (mut v, speed, range, decimals) = match value {
         LetterSpacing::Px(v) => (v, 0.1, -50.0..=200.0, 2),
-        LetterSpacing::Em { em } => (em, 0.001, -100.0..=100.0, 4),
+        LetterSpacing::Em { em } => (em, 0.001, -max_em..=max_em, 4),
     };
     let before = v;
     let r = ui.add_sized(

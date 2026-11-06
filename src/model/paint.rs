@@ -301,6 +301,10 @@ impl Default for LetterSpacing {
 }
 
 impl LetterSpacing {
+    /// The largest em value in either direction. It keeps the px it resolves to finite, since a
+    /// saved infinity stops a project from opening.
+    pub const MAX_EM: f64 = 100.0;
+
     pub fn px(self, font_size: f64) -> f64 {
         match self {
             LetterSpacing::Px(v) => v,
@@ -308,12 +312,19 @@ impl LetterSpacing {
         }
     }
 
-    /// The same spacing at `font_size`, in em or px.
+    /// The same spacing at `font_size`, in em or px. Stays in px if the em value would pass
+    /// [`Self::MAX_EM`], which a tiny or zero font size can cause.
     pub fn converted(self, to_em: bool, font_size: f64) -> Self {
-        let px = self.px(font_size);
         match self {
-            LetterSpacing::Px(_) if to_em => LetterSpacing::Em { em: px / font_size },
-            LetterSpacing::Em { .. } if !to_em => LetterSpacing::Px(px),
+            LetterSpacing::Px(px) if to_em => {
+                let em = px / font_size;
+                if em.abs() <= Self::MAX_EM {
+                    LetterSpacing::Em { em }
+                } else {
+                    self
+                }
+            }
+            LetterSpacing::Em { em } if !to_em => LetterSpacing::Px(em * font_size),
             same => same,
         }
     }
@@ -683,6 +694,20 @@ mod tests {
         assert_eq!(em, LetterSpacing::Em { em: -0.025 });
         assert_eq!(em.converted(true, 16.0), em);
         assert_eq!(em.converted(false, 32.0), px);
+    }
+
+    #[test]
+    fn letter_spacing_stays_in_px_when_em_would_be_out_of_range() {
+        let px = LetterSpacing::Px(5.0);
+        assert_eq!(px.converted(true, 1e-320), px, "overflows to infinity");
+        assert_eq!(px.converted(true, 0.01), px, "past the limit");
+        assert_eq!(px.converted(true, 0.0), px, "divides by zero");
+        let none = LetterSpacing::Px(0.0);
+        assert_eq!(
+            none.converted(true, 0.0),
+            none,
+            "zero over zero isn't a number"
+        );
     }
 
     #[test]
