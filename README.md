@@ -170,6 +170,7 @@ written for Paper work here too.
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
 | Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens` |
+| Design systems | `list_design_systems`, `get_design_system` (filter by type or name), `use_design_system`, `remove_design_system`, `publish_design_system` |
 | Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `select_nodes`, `undo`, `redo` |
 
 `write_html` takes HTML with inline styles: flexbox (`display:flex`, direction, gap, padding,
@@ -253,6 +254,20 @@ spacing can be px or em, and em follows the font size of each layer it's on.
 Typing a plain value into a bound property, or choosing **Detach**, unlinks it and keeps the
 value. Deleting a token leaves the layers looking the same. Token edits undo on the page they
 were made on.
+
+#### Design systems
+
+A project can publish its tokens as a design system that other projects use. In the Tokens
+tab's **⋯** menu, **Publish as design system** sets a name, a CSS prefix, a description and
+usage notes. The dialog lists what will change before you publish. **Use design system**
+adds another project's system. Its tokens show under their own heading, read-only, named
+with the prefix (`--brand-primary`), and bind like any token. To customize one, alias it
+from a local token, or **Detach** the system to make its tokens local.
+
+Publishing again makes a new version, and files that use the system move to it when they
+open, as one undo step. A layer bound to a token the new version dropped keeps its value.
+Published systems live in `<projects folder>/systems/`. Agents use the same features through
+the design system MCP tools, which load one system, or part of one, at a time.
 
 ### Keyboard shortcuts
 
