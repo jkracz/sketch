@@ -310,6 +310,8 @@ impl Store {
         let mut p = Project::open(&target)?;
         p.manifest.id = new_id();
         p.manifest.name = name;
+        // A copy uses the original's design systems but doesn't publish the original's.
+        p.manifest.published = None;
         p.manifest.created = now_ms();
         p.manifest.modified = p.manifest.created;
         p.write_manifest()?;

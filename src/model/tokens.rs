@@ -126,6 +126,34 @@ pub struct Token {
     pub value: TokenValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The design system this token comes from, by id. Such a token is a read-only copy of
+    /// the published one; see [`SystemLink`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+}
+
+/// A published design system this project uses. Its tokens sit in the [`TokenSet`] with
+/// `Token::system` set to `id`, under ids from [`linked_id`], and their CSS names start with
+/// `prefix`. A source project keeps one too, describing what it last published.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemLink {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    /// The published version this copy holds, counting from 1.
+    pub release: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// How to use the system, in Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// The id a published token gets in a project that uses its system. Ids are only unique per
+/// project, and a duplicated project shares them, so the system id keeps them apart. The id
+/// doesn't change between versions, so bindings carry over.
+pub fn linked_id(system: &str, token: &str) -> String {
+    format!("{system}/{token}")
 }
 
 /// `name` as a CSS custom property name, without the leading dashes.
@@ -200,34 +228,175 @@ pub struct TokenClip {
     pub tokens: Vec<Token>,
     /// Resolved values of alias targets outside the copied set, keyed by token id.
     resolved: HashMap<String, TokenValue>,
-    /// Name and kind of those targets, to find the same token in another project.
+    /// Kind and CSS name (without dashes) of those targets, to find the same token in
+    /// another project.
     targets: HashMap<String, (TokenKind, String)>,
 }
 
-/// One token's change, for undo. `Some((index, token))` is its place in the list on that side.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TokenEdit {
-    id: String,
-    before: Option<(usize, Token)>,
-    after: Option<(usize, Token)>,
+/// Something with an id, kept in a list that undo restores item by item.
+pub trait Keyed: Clone + PartialEq {
+    fn key(&self) -> &str;
 }
 
-impl TokenEdit {
-    /// Whether the token itself differs. A token that only moved because its neighbours
-    /// changed isn't an edit, and recording it would let undo overwrite newer changes.
-    fn changes_token(&self) -> bool {
+impl Keyed for Token {
+    fn key(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Keyed for SystemLink {
+    fn key(&self) -> &str {
+        &self.id
+    }
+}
+
+/// One item's change, for undo. `Some((index, item))` is its place in the list on that side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edit<T> {
+    id: String,
+    before: Option<(usize, T)>,
+    after: Option<(usize, T)>,
+}
+
+impl<T: Keyed> Edit<T> {
+    /// Whether the item itself differs. One that only moved because its neighbours changed
+    /// isn't an edit, and recording it would let undo overwrite newer changes.
+    fn changes(&self) -> bool {
         self.before.as_ref().map(|(_, t)| t) != self.after.as_ref().map(|(_, t)| t)
     }
 }
 
-/// The project's tokens. Vector order is creation order, and duplicates sit after their source.
+/// A change to one token or to one design system link.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenEdit {
+    Token(Edit<Token>),
+    System(Edit<SystemLink>),
+}
+
+impl TokenEdit {
+    fn changes(&self) -> bool {
+        match self {
+            TokenEdit::Token(e) => e.changes(),
+            TokenEdit::System(e) => e.changes(),
+        }
+    }
+
+    /// Fold a newer edit of the same item into this one. False when it's another item.
+    fn absorb(&mut self, newer: &TokenEdit) -> bool {
+        match (self, newer) {
+            (TokenEdit::Token(a), TokenEdit::Token(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            (TokenEdit::System(a), TokenEdit::System(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn diff_list<T: Keyed>(before: &[T], after: &[T]) -> Vec<Edit<T>> {
+    let place = |s: &[T], id: &str| {
+        let i = s.iter().position(|t| t.key() == id)?;
+        Some((i, s[i].clone()))
+    };
+    let mut ids: Vec<&str> = before.iter().map(Keyed::key).collect();
+    for t in after {
+        if !ids.contains(&t.key()) {
+            ids.push(t.key());
+        }
+    }
+    ids.into_iter()
+        .map(|id| Edit {
+            id: id.to_string(),
+            before: place(before, id),
+            after: place(after, id),
+        })
+        .filter(Edit::changes)
+        .collect()
+}
+
+fn apply_list<'a, T: Keyed + 'a>(
+    list: &mut Vec<T>,
+    edits: impl Iterator<Item = &'a Edit<T>> + Clone,
+    forward: bool,
+) {
+    for e in edits.clone() {
+        list.retain(|t| t.key() != e.id);
+    }
+    let mut back: Vec<&(usize, T)> = edits
+        .filter_map(|e| if forward { &e.after } else { &e.before }.as_ref())
+        .collect();
+    back.sort_by_key(|(i, _)| *i);
+    for (i, t) in back {
+        list.insert((*i).min(list.len()), t.clone());
+    }
+}
+
+/// The project's tokens, and the design systems it uses. Vector order is creation order, and
+/// duplicates sit after their source. Only the tokens are serialized here: the project
+/// manifest keeps the system links in a field of their own.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(from = "Vec<Token>", into = "Vec<Token>")]
 pub struct TokenSet {
     tokens: Vec<Token>,
+    systems: Vec<SystemLink>,
+}
+
+impl From<Vec<Token>> for TokenSet {
+    fn from(tokens: Vec<Token>) -> TokenSet {
+        TokenSet {
+            tokens,
+            systems: Vec::new(),
+        }
+    }
+}
+
+impl From<TokenSet> for Vec<Token> {
+    fn from(s: TokenSet) -> Vec<Token> {
+        s.tokens
+    }
 }
 
 impl TokenSet {
+    /// A token set as a project stores it: tokens and system links apart.
+    pub fn with_systems(mut self, systems: Vec<SystemLink>) -> TokenSet {
+        self.systems = systems;
+        self
+    }
+
+    /// The design systems this project uses, in the order they were added.
+    pub fn systems(&self) -> &[SystemLink] {
+        &self.systems
+    }
+
+    pub fn system(&self, id: &str) -> Option<&SystemLink> {
+        self.systems.iter().find(|s| s.id == id)
+    }
+
+    /// Why a token can't be edited here: it belongs to a design system.
+    pub fn locked(&self, id: &str) -> Option<String> {
+        let t = self.get(id)?;
+        let sys = self.system(t.system.as_deref()?)?;
+        Some(format!(
+            "\"{}\" belongs to the {} design system, so it can't be changed in this file. \
+             Alias it from a local token, or detach the system.",
+            self.css_name(t),
+            sys.name
+        ))
+    }
+
+    /// The CSS variable name of `t`, without the leading dashes. A design system's tokens
+    /// start with its prefix.
+    pub fn slug(&self, t: &Token) -> String {
+        match t.system.as_deref().and_then(|s| self.system(s)) {
+            Some(sys) => format!("{}-{}", sys.prefix, css_slug(&t.name)),
+            None => css_slug(&t.name),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
     }
@@ -256,13 +425,11 @@ impl TokenSet {
     /// names the first one in listing order wins.
     pub fn by_css_name(&self, name: &str) -> Option<&Token> {
         let want = name.trim().strip_prefix("--").unwrap_or(name.trim());
-        self.sorted()
-            .into_iter()
-            .find(|t| css_slug(&t.name) == want)
+        self.sorted().into_iter().find(|t| self.slug(t) == want)
     }
 
     pub fn css_name(&self, t: &Token) -> String {
-        format!("--{}", css_slug(&t.name))
+        format!("--{}", self.slug(t))
     }
 
     /// Follow aliases to a literal. None when a link is missing or the chain loops, which
@@ -352,9 +519,21 @@ impl TokenSet {
     }
 
     fn check(&self, id: &str, name: &str, value: &TokenValue, raw: &str) -> Result<(), String> {
-        if css_slug(name).is_empty() {
+        let slug = css_slug(name);
+        if slug.is_empty() {
             return Err(format!(
                 "Token name \"{name}\" needs a letter or number to work as a CSS variable."
+            ));
+        }
+        if let Some(t) = self
+            .tokens
+            .iter()
+            .find(|t| t.system.is_some() && t.id != id && self.slug(t) == slug)
+            && let Some(sys) = self.system(t.system.as_deref().unwrap_or_default())
+        {
+            return Err(format!(
+                "\"--{slug}\" is a token of the {} design system. Pick another name.",
+                sys.name
             ));
         }
         if let TokenValue::Alias(target) = value
@@ -379,7 +558,7 @@ impl TokenSet {
         if let Some(t) = self
             .tokens
             .iter()
-            .find(|t| t.kind == kind && t.name == name && t.value == value)
+            .find(|t| t.system.is_none() && t.kind == kind && t.name == name && t.value == value)
         {
             return Ok(t.id.clone());
         }
@@ -392,6 +571,7 @@ impl TokenSet {
             kind,
             value,
             description: description.filter(|d| !d.is_empty()).map(String::from),
+            system: None,
         });
         Ok(id)
     }
@@ -399,10 +579,9 @@ impl TokenSet {
     /// Add a token with the kind's default value and an unused name (the Tokens panel's `+`).
     pub fn add_default(&mut self, kind: TokenKind) -> String {
         let base = kind.key().to_string();
-        let taken = |n: &str| self.of_kind(kind).any(|t| t.name == n);
         let mut name = base.clone();
         let mut i = 2;
-        while taken(&name) {
+        while self.name_taken(kind, &name) {
             name = format!("{base}-{i}");
             i += 1;
         }
@@ -413,6 +592,7 @@ impl TokenSet {
             kind,
             value: kind.default_value(),
             description: None,
+            system: None,
         });
         id
     }
@@ -427,6 +607,9 @@ impl TokenSet {
         description: Option<&str>,
     ) -> Result<(), String> {
         let t = self.get(id).ok_or("Token not found")?;
+        if let Some(why) = self.locked(id) {
+            return Err(why);
+        }
         let kind = t.kind;
         let name = match name {
             Some(n) => n.trim().trim_start_matches("--").to_string(),
@@ -449,14 +632,26 @@ impl TokenSet {
 
     /// Set a literal value directly (color pickers and number drags can't produce bad input).
     pub fn set_value(&mut self, id: &str, value: TokenValue) {
+        if self.locked(id).is_some() {
+            return;
+        }
         if let Some(t) = self.tokens.iter_mut().find(|t| t.id == id) {
             t.value = value;
         }
     }
 
     /// Remove tokens. A surviving alias to a removed token takes on the value it showed, so
-    /// nothing in the project changes appearance.
+    /// nothing in the project changes appearance. A design system's tokens stay.
     pub fn delete(&mut self, ids: &[String]) {
+        let ids: Vec<String> = ids
+            .iter()
+            .filter(|id| self.locked(id).is_none())
+            .cloned()
+            .collect();
+        self.remove(&ids);
+    }
+
+    fn remove(&mut self, ids: &[String]) {
         let gone: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let flat: Vec<(usize, TokenValue)> = self
             .tokens
@@ -480,7 +675,7 @@ impl TokenSet {
             let Some(i) = self.tokens.iter().position(|t| t.id == *id) else {
                 continue;
             };
-            let mut t = self.tokens[i].clone();
+            let mut t = self.local_copy(&self.tokens[i]);
             t.id = crate::project::new_id();
             t.name = self.unused_name(t.kind, &t.name);
             out.push(t.id.clone());
@@ -493,12 +688,33 @@ impl TokenSet {
         out
     }
 
+    /// `t` as a local token. A design system's token keeps its CSS name.
+    fn local_copy(&self, t: &Token) -> Token {
+        Token {
+            name: if t.system.is_some() {
+                self.slug(t)
+            } else {
+                t.name.clone()
+            },
+            system: None,
+            ..t.clone()
+        }
+    }
+
     fn unused_name(&self, kind: TokenKind, name: &str) -> String {
         let mut n = copy_name(name);
-        while self.of_kind(kind).any(|t| t.name == n) {
+        while self.name_taken(kind, &n) {
             n = copy_name(&n);
         }
         n
+    }
+
+    /// Whether a local token of `kind`, or any design system token, has `name`'s CSS name.
+    fn name_taken(&self, kind: TokenKind, name: &str) -> bool {
+        let slug = css_slug(name);
+        self.tokens
+            .iter()
+            .any(|t| (t.kind == kind || t.system.is_some()) && self.slug(t) == slug)
     }
 
     /// Capture tokens for pasting, here or in another project.
@@ -508,7 +724,7 @@ impl TokenSet {
             if !ids.contains(&t.id) {
                 continue;
             }
-            clip.tokens.push(t.clone());
+            clip.tokens.push(self.local_copy(t));
             if let TokenValue::Alias(a) = &t.value
                 && !ids.contains(a)
             {
@@ -517,7 +733,7 @@ impl TokenSet {
                 }
                 if let Some(target) = self.get(a) {
                     clip.targets
-                        .insert(a.clone(), (target.kind, target.name.clone()));
+                        .insert(a.clone(), (target.kind, self.slug(target)));
                 }
             }
         }
@@ -547,8 +763,7 @@ impl TokenSet {
                 },
                 v => v.clone(),
             };
-            let taken = self.of_kind(t.kind).any(|x| x.name == t.name);
-            let name = if taken {
+            let name = if self.name_taken(t.kind, &t.name) {
                 self.unused_name(t.kind, &t.name)
             } else {
                 t.name.clone()
@@ -569,7 +784,7 @@ impl TokenSet {
             return Some(TokenValue::Alias(id.to_string()));
         }
         let (kind, name) = clip.targets.get(id)?;
-        let t = self.of_kind(*kind).find(|t| t.name == *name)?;
+        let t = self.of_kind(*kind).find(|t| self.slug(t) == *name)?;
         Some(TokenValue::Alias(t.id.clone()))
     }
 
@@ -666,52 +881,184 @@ impl TokenSet {
 
     /// What changed between `before` and `self`.
     pub fn diff(&self, before: &TokenSet) -> Vec<TokenEdit> {
-        let place = |s: &TokenSet, id: &str| {
-            let i = s.tokens.iter().position(|t| t.id == id)?;
-            Some((i, s.tokens[i].clone()))
-        };
-        let mut ids: Vec<&str> = before.tokens.iter().map(|t| t.id.as_str()).collect();
-        for t in &self.tokens {
-            if !ids.contains(&t.id.as_str()) {
-                ids.push(&t.id);
-            }
-        }
-        ids.into_iter()
-            .map(|id| TokenEdit {
-                id: id.to_string(),
-                before: place(before, id),
-                after: place(self, id),
-            })
-            .filter(TokenEdit::changes_token)
+        let systems = diff_list(&before.systems, &self.systems);
+        let tokens = diff_list(&before.tokens, &self.tokens);
+        systems
+            .into_iter()
+            .map(TokenEdit::System)
+            .chain(tokens.into_iter().map(TokenEdit::Token))
             .collect()
     }
 
-    /// Apply edits forward or back. Only the listed tokens change, so undoing on one page
+    /// Apply edits forward or back. Only the listed items change, so undoing on one page
     /// keeps token edits made since on another.
     pub fn apply_edits(&mut self, edits: &[TokenEdit], forward: bool) {
-        for e in edits {
-            self.tokens.retain(|t| t.id != e.id);
-        }
-        let mut back: Vec<&(usize, Token)> = edits
+        let systems = edits.iter().filter_map(|e| match e {
+            TokenEdit::System(e) => Some(e),
+            TokenEdit::Token(_) => None,
+        });
+        apply_list(&mut self.systems, systems, forward);
+        let tokens = edits.iter().filter_map(|e| match e {
+            TokenEdit::Token(e) => Some(e),
+            TokenEdit::System(_) => None,
+        });
+        apply_list(&mut self.tokens, tokens, forward);
+    }
+
+    // ------------------------------------------------------------------ design systems
+
+    /// Tokens as a design system publishes them: the local ones, with aliases to another
+    /// system's tokens replaced by the values they show, so systems never depend on each
+    /// other.
+    pub fn publishable(&self) -> Vec<Token> {
+        self.tokens
             .iter()
-            .filter_map(|e| if forward { &e.after } else { &e.before }.as_ref())
-            .collect();
-        back.sort_by_key(|(i, _)| *i);
-        for (i, t) in back {
-            self.tokens.insert((*i).min(self.tokens.len()), t.clone());
+            .filter(|t| t.system.is_none())
+            .map(|t| {
+                let mut t = t.clone();
+                if let TokenValue::Alias(a) = &t.value
+                    && self.get(a).is_none_or(|x| x.system.is_some())
+                {
+                    t.value = self.resolve(a).unwrap_or_else(|| t.kind.default_value());
+                }
+                t
+            })
+            .collect()
+    }
+
+    /// `published` as this project's read-only copies.
+    fn linked(system: &str, published: &[Token]) -> Vec<Token> {
+        published
+            .iter()
+            .map(|t| Token {
+                id: linked_id(system, &t.id),
+                value: match &t.value {
+                    TokenValue::Alias(a) => TokenValue::Alias(linked_id(system, a)),
+                    v => v.clone(),
+                },
+                system: Some(system.to_string()),
+                ..t.clone()
+            })
+            .collect()
+    }
+
+    /// Start using a design system. Fails, changing nothing, when the project already uses
+    /// it or another system with the same prefix, or when one of its CSS names is taken.
+    pub fn attach(&mut self, link: SystemLink, published: &[Token]) -> Result<(), String> {
+        if self.system(&link.id).is_some() {
+            return Err(format!(
+                "This file already uses the {} design system.",
+                link.name
+            ));
         }
+        if let Some(other) = self.systems.iter().find(|s| s.prefix == link.prefix) {
+            return Err(format!(
+                "This file already uses {}, which has the same prefix \"{}\".",
+                other.name, link.prefix
+            ));
+        }
+        let taken: HashSet<String> = self.tokens.iter().map(|t| self.slug(t)).collect();
+        let mut clashes: Vec<String> = published
+            .iter()
+            .map(|t| format!("{}-{}", link.prefix, css_slug(&t.name)))
+            .filter(|s| taken.contains(s))
+            .map(|s| format!("--{s}"))
+            .collect();
+        clashes.dedup();
+        if !clashes.is_empty() {
+            let more = clashes.len().saturating_sub(5);
+            clashes.truncate(5);
+            let mut list = clashes.join(", ");
+            if more > 0 {
+                list.push_str(&format!(" and {more} more"));
+            }
+            return Err(format!(
+                "{} has tokens whose names this file already uses: {list}. Rename those first.",
+                link.name
+            ));
+        }
+        self.tokens.extend(Self::linked(&link.id, published));
+        self.systems.push(link);
+        Ok(())
+    }
+
+    /// Switch a design system to another published version. Tokens keep their place, new
+    /// ones go at the end, and a local alias to a dropped token takes on the value it
+    /// showed. Returns the dropped tokens as (id, CSS name). Layers bound to them keep their
+    /// values; their bindings point at nothing and go when the layer is next edited, or come
+    /// back if the update is undone.
+    pub fn update_system(
+        &mut self,
+        link: SystemLink,
+        published: &[Token],
+    ) -> Vec<(String, String)> {
+        let Some(at) = self.systems.iter().position(|s| s.id == link.id) else {
+            return Vec::new();
+        };
+        let new = Self::linked(&link.id, published);
+        let ours = |t: &Token| t.system.as_deref() == Some(link.id.as_str());
+        let gone: Vec<(String, String)> = self
+            .tokens
+            .iter()
+            .filter(|t| ours(t) && !new.iter().any(|n| n.id == t.id))
+            .map(|t| (t.id.clone(), self.css_name(t)))
+            .collect();
+        let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
+        self.remove(&ids);
+        for t in &mut self.tokens {
+            if let Some(n) = new.iter().find(|n| n.id == t.id) {
+                *t = n.clone();
+            }
+        }
+        let fresh: Vec<Token> = new
+            .into_iter()
+            .filter(|n| self.get(&n.id).is_none())
+            .collect();
+        self.tokens.extend(fresh);
+        self.systems[at] = link;
+        gone
+    }
+
+    /// Stop using a design system. Local aliases to its tokens take on the values they
+    /// showed. Returns the removed token ids.
+    pub fn remove_system(&mut self, id: &str) -> Vec<String> {
+        let ids: Vec<String> = self
+            .tokens
+            .iter()
+            .filter(|t| t.system.as_deref() == Some(id))
+            .map(|t| t.id.clone())
+            .collect();
+        self.remove(&ids);
+        self.systems.retain(|s| s.id != id);
+        ids
+    }
+
+    /// Turn a design system's tokens into local ones that keep their CSS names, so bindings
+    /// and `var()` references keep working.
+    pub fn detach_system(&mut self, id: &str) {
+        let local: Vec<Token> = self
+            .tokens
+            .iter()
+            .filter(|t| t.system.as_deref() == Some(id))
+            .map(|t| self.local_copy(t))
+            .collect();
+        for t in &mut self.tokens {
+            if let Some(l) = local.iter().find(|l| l.id == t.id) {
+                *t = l.clone();
+            }
+        }
+        self.systems.retain(|s| s.id != id);
     }
 }
 
-/// Fold `newer` into `older`, keeping the oldest before-state of each token.
+/// Fold `newer` into `older`, keeping the oldest before-state of each item.
 pub fn merge_edits(older: &mut Vec<TokenEdit>, newer: Vec<TokenEdit>) {
     for e in newer {
-        match older.iter_mut().find(|x| x.id == e.id) {
-            Some(x) => x.after = e.after,
-            None => older.push(e),
+        if !older.iter_mut().any(|x| x.absorb(&e)) {
+            older.push(e);
         }
     }
-    older.retain(TokenEdit::changes_token);
+    older.retain(TokenEdit::changes);
 }
 
 fn check_description(d: Option<&str>) -> Result<(), String> {
@@ -1195,6 +1542,74 @@ mod tests {
         assert!(s.by_css_name("--red-copy").is_some());
     }
 
+    /// A set using a system with `prefix` and one color token, `name` (#ffffff).
+    fn using(prefix: &str, name: &str) -> TokenSet {
+        let mut src = TokenSet::default();
+        src.create(TokenKind::Color, name, "#ffffff", None).unwrap();
+        let link = SystemLink {
+            id: prefix.into(),
+            name: prefix.into(),
+            prefix: prefix.into(),
+            release: 1,
+            description: None,
+            notes: None,
+        };
+        let mut s = TokenSet::default();
+        s.attach(link, &src.publishable()).unwrap();
+        s
+    }
+
+    #[test]
+    fn new_tokens_skip_design_system_names() {
+        let mut s = using("color", "2");
+        s.add_default(TokenKind::Color);
+        let second = s.add_default(TokenKind::Color);
+        assert_eq!(s.css_name(s.get(&second).unwrap()), "--color-3");
+    }
+
+    #[test]
+    fn copied_aliases_to_a_design_system_token_match_by_css_name() {
+        let mut s = using("acme", "primary");
+        let cta = s
+            .create(TokenKind::Color, "cta", "var(--acme-primary)", None)
+            .unwrap();
+        let clip = s.copy(&[cta]);
+
+        let mut unrelated = TokenSet::default();
+        unrelated
+            .create(TokenKind::Color, "primary", "#000000", None)
+            .unwrap();
+        unrelated.paste(&clip);
+        assert_eq!(
+            unrelated.by_css_name("--cta").unwrap().value,
+            TokenValue::Color(Color::rgb(255, 255, 255))
+        );
+
+        let mut same = using("acme", "primary");
+        same.paste(&clip);
+        let target = same.by_css_name("--acme-primary").unwrap().id.clone();
+        assert_eq!(
+            same.by_css_name("--cta").unwrap().value,
+            TokenValue::Alias(target)
+        );
+    }
+
+    #[test]
+    fn paste_renames_on_collision_with_a_design_system_token() {
+        let mut s = using("acme", "primary");
+        let mut other = TokenSet::default();
+        let id = other
+            .create(TokenKind::Color, "acme-primary", "#000000", None)
+            .unwrap();
+        let spacing = other
+            .create(TokenKind::Spacing, "acme-primary", "8px", None)
+            .unwrap();
+        let pasted = s.paste(&other.copy(&[id, spacing]));
+        for p in &pasted {
+            assert_eq!(s.css_name(s.get(p).unwrap()), "--acme-primary-copy");
+        }
+    }
+
     #[test]
     fn expand_replaces_variables_and_marks_whole_values() {
         let (s, _, brand) = set();
@@ -1258,7 +1673,7 @@ mod tests {
         s.delete(std::slice::from_ref(&a));
         let edits = s.diff(&before);
         assert_eq!(edits.len(), 1, "only the deleted token: {edits:?}");
-        assert_eq!(edits[0].id, a);
+        assert!(matches!(&edits[0], TokenEdit::Token(e) if e.id == a));
 
         // Merged edits follow the same rule: adding a token in front of `b` and removing it
         // again leaves nothing to undo.
