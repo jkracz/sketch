@@ -369,9 +369,10 @@ pub fn dialog(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState) {
         ui.add_space(6.0);
         let prefix = d.prefix.trim();
         let styles = ed.tokens.publishable_styles();
-        let c = systems::changes(own.as_ref(), prefix, &ed.tokens.publishable(), &styles);
+        let tokens = ed.tokens.publishable();
+        let c = systems::changes(own.as_ref(), prefix, &tokens, &styles);
         let summary = if own.is_none() {
-            let tokens = c.added.len() - styles.len();
+            let tokens = tokens.len();
             match styles.len() {
                 0 => format!("Publishes {}.", plural(tokens, "token")),
                 n => format!(

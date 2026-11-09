@@ -392,7 +392,7 @@ impl TokenSet {
             if tailwind {
                 out.push_str(&format!("@utility {class} {{\n"));
             } else {
-                out.push_str(&format!(".{class} {{\n"));
+                out.push_str(&format!(".{} {{\n", selector_escape(&class)));
             }
             for f in StyleField::ALL {
                 let key = css_kebab(f.css_key());
@@ -713,9 +713,31 @@ fn css_kebab(key: &str) -> String {
     out
 }
 
+/// A class as a CSS selector. A leading digit must be escaped (`24px` is `\32 4px`).
+fn selector_escape(class: &str) -> String {
+    match class.chars().next() {
+        Some(c) if c.is_ascii_digit() => format!("\\3{c} {}", &class[1..]),
+        _ => class.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classes_starting_with_a_digit_are_escaped_in_css() {
+        let mut s = TokenSet::default();
+        let id = s
+            .create_style("24px Semibold", &StyleInput::default(), None)
+            .unwrap();
+        let st = s.style(&id).unwrap();
+        assert_eq!(s.style_class(st), "24px-semibold");
+        assert!(
+            s.style_sheet(&[st], false)
+                .starts_with(".\\32 4px-semibold {")
+        );
+    }
 
     fn input(pairs: &[(StyleField, &str)]) -> StyleInput {
         let mut i = StyleInput::default();
