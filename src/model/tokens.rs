@@ -703,10 +703,18 @@ impl TokenSet {
 
     fn unused_name(&self, kind: TokenKind, name: &str) -> String {
         let mut n = copy_name(name);
-        while self.of_kind(kind).any(|t| t.name == n) {
+        while self.name_taken(kind, &n) {
             n = copy_name(&n);
         }
         n
+    }
+
+    /// Whether a local token of `kind`, or any design system token, has `name`'s CSS name.
+    fn name_taken(&self, kind: TokenKind, name: &str) -> bool {
+        let slug = css_slug(name);
+        self.tokens
+            .iter()
+            .any(|t| (t.kind == kind || t.system.is_some()) && self.slug(t) == slug)
     }
 
     /// Capture tokens for pasting, here or in another project.
@@ -755,8 +763,7 @@ impl TokenSet {
                 },
                 v => v.clone(),
             };
-            let taken = self.of_kind(t.kind).any(|x| x.name == t.name);
-            let name = if taken {
+            let name = if self.name_taken(t.kind, &t.name) {
                 self.unused_name(t.kind, &t.name)
             } else {
                 t.name.clone()
@@ -1533,6 +1540,34 @@ mod tests {
         let clip = s.copy(std::slice::from_ref(&red));
         s.paste(&clip);
         assert!(s.by_css_name("--red-copy").is_some());
+    }
+
+    #[test]
+    fn paste_renames_on_collision_with_a_design_system_token() {
+        let mut src = TokenSet::default();
+        src.create(TokenKind::Color, "primary", "#ffffff", None)
+            .unwrap();
+        let link = SystemLink {
+            id: "acme".into(),
+            name: "Acme".into(),
+            prefix: "acme".into(),
+            release: 1,
+            description: None,
+            notes: None,
+        };
+        let mut s = TokenSet::default();
+        s.attach(link, &src.publishable()).unwrap();
+        let mut other = TokenSet::default();
+        let id = other
+            .create(TokenKind::Color, "acme-primary", "#000000", None)
+            .unwrap();
+        let spacing = other
+            .create(TokenKind::Spacing, "acme-primary", "8px", None)
+            .unwrap();
+        let pasted = s.paste(&other.copy(&[id, spacing]));
+        for p in &pasted {
+            assert_eq!(s.css_name(s.get(p).unwrap()), "--acme-primary-copy");
+        }
     }
 
     #[test]
