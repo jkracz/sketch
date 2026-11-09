@@ -505,6 +505,9 @@ pub fn url(s: &str) -> Option<String> {
 /// Style key prefix that binds a property to a token: `<marker><cssKey>` holds the token id.
 /// [`crate::model::TokenSet::expand`] adds these after replacing `var(--token)`.
 pub const TOKEN_MARKER: &str = "--token:";
+/// Marks a text style applied with `textStyle` (`TokenSet::expand_styles`). The value is the
+/// style id. Text children inherit it, like the font properties it stands for.
+pub const STYLE_MARKER: &str = "--token:textStyle";
 
 /// Where the node sits, for properties whose meaning depends on the parent.
 #[derive(Debug, Clone, Copy, Default)]
@@ -684,6 +687,20 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let fs = n.kind.font_size().unwrap_or(16.0);
     for (k, v) in styles {
         let v = v.trim();
+        if k == STYLE_MARKER {
+            if matches!(n.kind, NodeKind::Text { .. }) {
+                for f in crate::model::StyleField::ALL {
+                    if let Some(p) = f.prop() {
+                        n.tokens.remove(&p);
+                    }
+                }
+                n.text_style_ref = Some(crate::model::TextStyleRef {
+                    id: v.to_string(),
+                    overrides: Default::default(),
+                });
+            }
+            continue;
+        }
         if let Some(key) = k.strip_prefix(TOKEN_MARKER) {
             if let Some(prop) = TokenProp::from_css_key(key, n) {
                 n.tokens.insert(prop, v.to_string());

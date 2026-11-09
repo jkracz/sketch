@@ -843,8 +843,12 @@ impl TokenSet {
     /// one variable also gets a [`css::TOKEN_MARKER`] entry, which binds the node's property
     /// when `css::apply` reaches it. Unknown variables fall back to their default, if any.
     pub fn expand(&self, styles: &mut Vec<(String, String)>) {
+        self.expand_styles(styles);
         let mut bound = Vec::new();
         for (k, v) in styles.iter_mut() {
+            if k.starts_with(css::TOKEN_MARKER) {
+                continue;
+            }
             if let Some(t) = var_name(v).and_then(|n| self.by_css_name(n))
                 && let Some(lit) = self.resolve(&t.id)
             {

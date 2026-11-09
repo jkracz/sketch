@@ -169,7 +169,7 @@ written for Paper work here too.
 | Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `search_fonts`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
-| Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens` |
+| Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens`, `create_text_styles`, `set_text_styles` |
 | Design systems | `list_design_systems`, `get_design_system` (filter by type or name), `use_design_system`, `remove_design_system`, `publish_design_system` |
 | Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `select_nodes`, `undo`, `redo` |
 
@@ -180,7 +180,8 @@ runs (`<b>`, `<i>`, `<span style>`); boxes get backgrounds (colors, gradients, i
 borders, radii, opacity and blend modes; `<img>` takes local paths or `data:` URIs and `<svg>`
 is imported as vectors. `update_styles` takes the same CSS as JSON, plus the hand-drawn keys
 `sketch`, `roughness`, `fillStyle`, `strokeStyle`. A style that is exactly `var(--token)` binds
-the property to that design token. Node ids look like `3fa9c1:14` (page and
+the property to that design token. `class="heading-l"` in `write_html`, or `textStyle` in
+`update_styles`, applies a text style. Node ids look like `3fa9c1:14` (page and
 node); `pageId` lets an agent work on another page without switching the user's view.
 
 ## Tests
@@ -255,17 +256,32 @@ Typing a plain value into a bound property, or choosing **Detach**, unlinks it a
 value. Deleting a token leaves the layers looking the same. Token edits undo on the page they
 were made on.
 
+#### Text styles
+
+A text style names a set of text settings, like `Heading/L`: family, size, weight, italic,
+line height and letter spacing. Each one is a value or a token of the same type. Add one from
+**+** in the Tokens tab (it copies the selected text layer), click it to edit its fields, and
+use **Apply to selection** or the right-click menu to apply or delete it. Its name becomes a
+CSS class (`heading-l`), and **Copy all as CSS** writes one class per style.
+
+The Text section of the Design panel shows the style a text layer uses. Changing a field on
+the layer overrides that field and keeps the style; the panel lists overrides and **Reset**
+applies the style again. Editing a style updates every layer that uses it, on all pages, as
+one undo step. Deleting a style leaves the layers looking the same.
+
 #### Design systems
 
-A project can publish its tokens as a design system that other projects use. In the Tokens
+A project can publish its tokens and text styles as a design system that other projects use. In the Tokens
 tab's **⋯** menu, **Publish as design system** sets a name, a CSS prefix, a description and
 usage notes. The dialog lists what will change before you publish. **Use design system**
 adds another project's system. Its tokens show under their own heading, read-only, named
 with the prefix (`--brand-primary`), and bind like any token. To customize one, alias it
-from a local token, or **Detach** the system to make its tokens local.
+from a local token, or **Detach** the system to make its tokens local. Its text styles work
+the same way, with prefixed classes (`brand-heading-l`).
 
 Publishing again makes a new version, and files that use the system move to it when they
-open, as one undo step. A layer bound to a token the new version dropped keeps its value.
+open, as one undo step. A layer bound to a token or style the new version dropped keeps its
+value.
 Published systems live in `<projects folder>/systems/`. Agents use the same features through
 the design system MCP tools, which load one system, or part of one, at a time.
 

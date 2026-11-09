@@ -5,7 +5,7 @@
 //! additions: `create_shape` (whiteboard shapes and arrows), `select_nodes`, `undo`, `redo`.
 
 use crate::model::TokenKind;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 pub const INSTRUCTIONS: &str = "\
 Sketch is a local design and whiteboard app with an infinite canvas. These tools read and \
@@ -51,6 +51,55 @@ fn page_id() -> Value {
 fn token_type() -> Value {
     let kinds: Vec<&str> = TokenKind::ALL.iter().map(|k| k.key()).collect();
     json!({"type": "string", "enum": kinds, "description": "Design token type."})
+}
+
+/// The `types` filter of the listing tools: token types, plus `textStyle`.
+fn types_filter() -> Value {
+    let mut kinds: Vec<&str> = TokenKind::ALL.iter().map(|k| k.key()).collect();
+    kinds.push("textStyle");
+    json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles. Omit for all."})
+}
+
+/// The properties of a text style entry: its fields plus `extra`.
+fn style_props(extra: &[(&str, Value)]) -> Value {
+    let mut m = style_fields();
+    for (k, v) in extra {
+        m.insert((*k).into(), v.clone());
+    }
+    Value::Object(m)
+}
+
+/// The fields of a text style, for create_text_styles and set_text_styles.
+fn style_fields() -> Map<String, Value> {
+    let field =
+        |d: &str| json!({"anyOf": [{"type": "string"}, {"type": "number"}], "description": d});
+    let mut m = Map::new();
+    m.insert(
+        "fontFamily".into(),
+        field("Family name or var(--font-family-token). Default Inter."),
+    );
+    m.insert(
+        "fontSize".into(),
+        field("px (\"32px\") or var(--font-size-token). Default 16px."),
+    );
+    m.insert(
+        "fontWeight".into(),
+        field("1 to 1000 or var(--font-weight-token). Default 400."),
+    );
+    m.insert(
+        "fontStyle".into(),
+        json!({"type": "string", "enum": ["normal", "italic"]}),
+    );
+    m.insert("lineHeight".into(), field("A multiple or percent (1.2, \"120%\"), \"normal\", or var(--line-height-token). Default normal."));
+    m.insert(
+        "letterSpacing".into(),
+        field("px or em (\"-0.02em\") or var(--letter-spacing-token). Default 0."),
+    );
+    m.insert(
+        "description".into(),
+        json!({"type": "string", "maxLength": 1024, "description": "What the style is for."}),
+    );
+    m
 }
 
 fn token_value() -> Value {
@@ -430,6 +479,8 @@ pub fn definitions() -> Vec<Value> {
              <svg> markup is imported as vector layers.\n\
              - layer-name=\"...\" names layers; <x-sketch-clone node-id=\"ID\" style=\"...\"/> \
              clones an existing node.\n\
+             - class=\"heading-l\" applies that text style (see get_tokens); inline styles \
+             after it override single fields. Text inside the element inherits it.\n\
              Returns the ids of the created top-level layers and the styles that were ignored.",
             json!({
                 "html": {"type": "string", "description": "HTML to parse into layers."},
@@ -472,8 +523,10 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "update_styles",
             "Update styles on one or more nodes (camelCase CSS, like React.CSSProperties). Setting \
-             left/top on an artboard moves it. Hand-drawn keys: sketch, roughness, fillStyle, \
-             strokeStyle, seed. Styles with no effect are returned under ignoredStyles.",
+             left/top on an artboard moves it. textStyle: \"heading-l\" applies a text style to \
+             text layers; keys after it override single fields. Hand-drawn keys: sketch, \
+             roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
+             ignoredStyles.",
             json!({"updates": {"type": "array", "description": "Each item applies styles to nodeIds.", "items": {
                 "type": "object",
                 "properties": {
@@ -571,14 +624,15 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "get_tokens",
             "Lists the project's design tokens (colors, spacing, typography...), grouped by \
-             type. Tokens belong to the project, so every page shares them. By default only the \
-             file's own tokens, plus one line per design system the file uses; pass `system` \
-             to list a design system's tokens.",
+             type, and its text styles in short form (`class` and one line of CSS). Tokens and \
+             styles belong to the project, so every page shares them. By default only the \
+             file's own, plus one line per design system the file uses; pass `system` to list \
+             a design system's.",
             json!({
                 "system": {"type": "string", "description": "A design system the file uses (id, name or prefix) to list its tokens instead, or \"all\" for every token."},
                 "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
-                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case. `*` is the wildcard: \"--color-*\", \"*-500\", \"*brand*\"."},
-                "types": {"type": "array", "items": token_type(), "description": "Only these token types. Omit for all."},
+                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case. `*` is the wildcard: \"--color-*\", \"*-500\", \"*brand*\". Text styles match as \".class\"."},
+                "types": types_filter(),
             }),
             &[],
             true,
@@ -624,6 +678,42 @@ pub fn definitions() -> Vec<Value> {
             &["tokens"],
             false,
         ),
+        tool(
+            "create_text_styles",
+            "Creates text styles: named sets of font family, size, weight, style, line height \
+             and letter spacing, like \"Heading/L\". Each field is a value or var(--token) of \
+             the matching type, so the style follows the token. Missing fields take the \
+             defaults. The name becomes a CSS class (\"Heading/L\" is heading-l). Apply a \
+             style with class=\"heading-l\" in write_html or {textStyle: \"heading-l\"} in \
+             update_styles. Results are per entry.",
+            json!({"styles": {"type": "array", "minItems": 1, "description": "Styles to create.", "items": {
+                "type": "object",
+                "properties": style_props(&[
+                    ("name", json!({"type": "string", "description": "Style name, e.g. \"Heading/L\"."})),
+                ]),
+                "required": ["name"],
+            }}}),
+            &["styles"],
+            false,
+        ),
+        tool(
+            "set_text_styles",
+            "Updates or deletes text styles by class or name, applied in order. Set `newName` \
+             to rename, any field to change it, `delete: true` to delete. Changing a style \
+             updates every layer that uses it, on all pages, except fields a layer overrides. \
+             Deleting keeps those layers' current values.",
+            json!({"styles": {"type": "array", "minItems": 1, "description": "Changes to apply.", "items": {
+                "type": "object",
+                "properties": style_props(&[
+                    ("name", json!({"type": "string", "description": "The style's class (\"heading-l\") or name."})),
+                    ("newName", json!({"type": "string"})),
+                    ("delete", json!({"type": "boolean"})),
+                ]),
+                "required": ["name"],
+            }}}),
+            &["styles"],
+            false,
+        ),
         // ----------------------------------------------------------------- design systems
         tool(
             "list_design_systems",
@@ -641,8 +731,8 @@ pub fn definitions() -> Vec<Value> {
              open project.",
             json!({
                 "id": {"type": "string", "description": "The system's id, name or prefix, from list_design_systems."},
-                "types": {"type": "array", "items": token_type(), "description": "Only these token types. Omit for all."},
-                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case, e.g. \"--brand-color-*\"."},
+                "types": types_filter(),
+                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case, e.g. \"--brand-color-*\". Text styles match as \".class\"."},
                 "format": {"type": "string", "enum": ["text", "json", "css", "tailwind"], "description": "\"text\" (default): notes and `--name: value;` lines. \"json\": structured. \"css\" or \"tailwind\": a stylesheet without notes."},
             }),
             &["id"],
@@ -671,10 +761,11 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "publish_design_system",
-            "Publishes the open file's own tokens as a design system other files can use, or \
-             publishes a new version. Files that use it update when they open. Omitted \
-             fields keep their last values. The prefix is fixed after the first publish. Not \
-             an undo step: publish again to roll back. Returns the changed token names.",
+            "Publishes the open file's own tokens and text styles as a design system other \
+             files can use, or publishes a new version. Files that use it update when they \
+             open. Omitted fields keep their last values. The prefix is fixed after the first \
+             publish. Not an undo step: publish again to roll back. Returns the changed token \
+             and style names.",
             json!({
                 "name": {"type": "string", "description": "Defaults to the project name."},
                 "prefix": {"type": "string", "description": "CSS prefix for the tokens in other files: lowercase letters, digits and dashes, at most 16 characters. Defaults to the name."},
@@ -739,15 +830,24 @@ without a binding. Setting a plain value on a bound property detaches it. get_co
 and get_jsx show bound properties as var(--token). Letter spacing in em, plain or from a token,
 follows the text's font size.
 
+Text styles: a style names a set of text settings (family, size, weight, italic, line height,
+letter spacing), each a value or var(--token). get_tokens lists them as a class and one line of
+CSS. Pick the style for each text role instead of setting five properties: class=\"heading-l\"
+in write_html, or {textStyle: \"heading-l\"} in update_styles. A property set after the style
+overrides that field on the layer; get_computed_styles shows textStyle and
+textStyleOverrides. create_text_styles adds styles and set_text_styles edits or deletes them;
+editing a style updates every layer that uses it.
+
 Design systems: a project can publish its tokens for other projects to use. Load only what the
 task needs: list_design_systems gives one summary per system; get_design_system returns one
 system's usage notes and tokens, and takes types and namePattern to narrow them. Follow the
 usage notes. use_design_system adds a system to the open file: its tokens are read-only and
-named with its prefix (--brand-primary), and var() binds to them like any token. To customize
-one, alias it from a local token (create_tokens with value var(--brand-primary)). get_tokens
-lists the file's own tokens and one line per system; pass system to see a system's tokens.
-publish_design_system publishes the open file's own tokens; write notes that say which token to
-use where.
+named with its prefix (--brand-primary), and var() binds to them like any token. Its text
+styles are read-only classes with the same prefix (brand-heading-l). To customize a token, alias
+it from a local token (create_tokens with value var(--brand-primary)). get_tokens lists the
+file's own tokens and one line per system; pass system to see a system's tokens.
+publish_design_system publishes the open file's own tokens and text styles; write notes that say
+which token or style to use where.
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 

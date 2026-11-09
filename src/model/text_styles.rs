@@ -324,6 +324,31 @@ impl TokenSet {
         })
     }
 
+    /// Replace each `textStyle: name` in styles with the style's values, followed by a
+    /// [`css::STYLE_MARKER`] entry that makes `css::apply` record the style on a text layer.
+    /// Later styles still win, so `fontSize` after `textStyle` overrides the style's size.
+    /// An unknown name stays as it is, so `css::apply` reports it as ignored.
+    pub fn expand_styles(&self, styles: &mut Vec<(String, String)>) {
+        if !styles.iter().any(|(k, _)| k == "textStyle") {
+            return;
+        }
+        let mut out = Vec::with_capacity(styles.len() + 7);
+        for (k, v) in styles.drain(..) {
+            let found = (k == "textStyle")
+                .then(|| self.style_by_name(&v))
+                .flatten()
+                .and_then(|s| Some((s.id.clone(), self.resolve_style(&s.id)?)));
+            match found {
+                Some((id, r)) => {
+                    out.extend(r.literal_css());
+                    out.push((crate::mcp::css::STYLE_MARKER.into(), id));
+                }
+                None => out.push((k, v)),
+            }
+        }
+        *styles = out;
+    }
+
     fn literal(&self, v: &TokenValue) -> Option<TokenValue> {
         match v {
             TokenValue::Alias(a) => self.resolve(a),
