@@ -6,8 +6,7 @@ use crate::history::Recording;
 use crate::model::{Node, NodeId, TokenClip, TokenProp, TokenSet};
 
 impl Editor {
-    /// Change the project's tokens or text styles as one undo step on the active page. Bound
-    /// properties and styled layers on every page follow. `key` merges repeated edits, as a drag on a color picker makes.
+    /// Edit tokens or text styles as one undo step; all pages follow. `key` merges repeated edits.
     pub fn edit_tokens<R>(
         &mut self,
         label: &str,
@@ -111,9 +110,7 @@ impl Editor {
         }
     }
 
-    /// Bring every page's bound properties up to their tokens, and styled layers up to their
-    /// text styles. The values are derived from the tokens, so this isn't an undo step, and
-    /// undo calls it again afterwards.
+    /// Sync bound fields on every page. These derived values need no undo step; undo resyncs them.
     pub fn sync_tokens(&mut self) {
         if self.tokens.is_blank() {
             return;

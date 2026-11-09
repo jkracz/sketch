@@ -758,7 +758,6 @@ mod tests {
         assert!(p.manifest.published.is_none());
     }
 
-    /// The source gets a `Heading` style that aliases a `size` token (24px).
     fn add_heading(ed: &mut Editor) -> String {
         ed.edit_tokens("add", None, |t| {
             t.create(crate::model::TokenKind::FontSize, "size", "24px", None)
@@ -820,7 +819,6 @@ mod tests {
         c.save(&mut app).unwrap();
         let dir = c.project.as_ref().unwrap().dir.clone();
 
-        // A new version changes the token the style aliases: the layer follows on open.
         let size = ed.tokens.by_css_name("--size").unwrap().id.clone();
         ed.edit_tokens("edit", None, |t| t.update(&size, None, Some("40px"), None))
             .unwrap();
@@ -831,7 +829,6 @@ mod tests {
         c.open(&mut app, &dir).unwrap();
         assert_eq!(app.doc.get(id).unwrap().kind.font_size(), Some(40.0));
 
-        // Dropping the style keeps the layer's values.
         ed.edit_tokens("delete", None, |t| t.delete_styles(&[heading]));
         let r = publish_open(&s, &mut ed, &PublishRequest::default());
         assert_eq!(r.removed, [".brand-heading"]);

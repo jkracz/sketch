@@ -101,8 +101,7 @@ impl Editor {
             .ok_or_else(|| "This file doesn't use that design system.".to_string())
     }
 
-    /// Layers on any page with a property bound to one of these tokens, or that use one of
-    /// these text styles.
+    /// Layers on any page using these token or style ids.
     fn layers_bound_to(&self, ids: &[String]) -> usize {
         let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
         (0..self.pages.len())

@@ -350,7 +350,6 @@ fn apply_list<'a, T: Keyed + 'a>(
 pub struct TokenSet {
     pub(super) tokens: Vec<Token>,
     pub(super) systems: Vec<SystemLink>,
-    /// See `text_styles.rs`.
     pub(super) styles: Vec<TextStyleDef>,
 }
 

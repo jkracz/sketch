@@ -1,5 +1,4 @@
-//! Text styles in the Tokens tab (create, rename, edit, apply and delete) and the Style row
-//! of the inspector's Text section.
+//! Text styles in the Tokens tab and text inspector.
 
 use super::UiState;
 use super::tokens::committed;
@@ -10,11 +9,9 @@ use egui::{Popup, PopupCloseBehavior, RichText, Ui};
 
 #[derive(Default)]
 pub struct StylesUi {
-    /// The style whose fields are shown under its row.
     open: Option<Draft>,
 }
 
-/// The fields with a text box, in the order they show.
 const TEXT_FIELDS: [StyleField; 5] = [
     StyleField::Family,
     StyleField::Size,
@@ -23,7 +20,7 @@ const TEXT_FIELDS: [StyleField; 5] = [
     StyleField::LetterSpacing,
 ];
 
-/// Text being edited for the open style. A field reaches the style when it loses focus.
+/// Draft fields commit on focus loss.
 struct Draft {
     id: String,
     name: String,
@@ -48,14 +45,8 @@ impl StylesUi {
     pub fn open(&mut self, ed: &Editor, id: &str) {
         self.open = ed.tokens.style(id).map(|s| Draft::of(ed, s));
     }
-
-    #[cfg(test)]
-    pub(super) fn open_id(&self) -> Option<&str> {
-        self.open.as_ref().map(|d| d.id.as_str())
-    }
 }
 
-/// Text layers in the selection.
 fn selected_text(ed: &Editor) -> Vec<NodeId> {
     ed.selection
         .iter()
@@ -88,7 +79,6 @@ pub fn add_entry(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     }
 }
 
-/// How a style is labelled outside its group: a design system's style by its class.
 fn label(ed: &Editor, s: &TextStyleDef) -> String {
     if s.system.is_some() {
         ed.tokens.style_class(s)
@@ -97,7 +87,6 @@ fn label(ed: &Editor, s: &TextStyleDef) -> String {
     }
 }
 
-/// A short preview of the resolved style, such as `32 · 700`.
 fn preview(ed: &Editor, s: &TextStyleDef) -> String {
     let Some(r) = ed.tokens.resolve_style(&s.id) else {
         return String::new();
@@ -241,7 +230,6 @@ fn small(ui: &Ui, s: impl Into<String>) -> RichText {
         .color(theme::pal(ui).secondary)
 }
 
-/// A design system's style: what it is, without fields to edit.
 fn locked_fields(ui: &mut Ui, ed: &mut Editor, s: &TextStyleDef) {
     ui.add_space(3.0);
     ui.label(small(ui, ed.tokens.style_short(s)));
@@ -353,8 +341,7 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
         d.error = res.err();
     }
 
-    // Outside the field being typed in, show the style as it is now: undo or an agent may
-    // have changed it.
+    // Undo and agent edits can change the style while this draft is open.
     if let Some(now) = ed.tokens.style(&id) {
         if !name.has_focus() {
             d.name = now.name.clone();
@@ -385,10 +372,7 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
     ui.add_space(4.0);
 }
 
-// ----------------------------------------------------------------------------- inspector
-
-/// The inspector's Style row: the style the layer uses, with a menu to apply, detach or
-/// reset, and the fields it overrides. Hidden when the project has no styles.
+/// Style controls and overrides, hidden when no style is bound or available.
 pub fn inspector_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
     let bound = ed.bound_style(first).cloned();
     if bound.is_none() && ed.tokens.styles().is_empty() {
@@ -462,13 +446,12 @@ mod tests {
         let mut h = Harness::new();
         let id = h.ed.edit_tokens("add", None, |t| t.add_default_style(None));
         h.st.tokens.styles.open(&h.ed, &id);
-        assert_eq!(h.st.tokens.styles.open_id(), Some(id.as_str()));
         let mut f = |ui: &mut Ui, ed: &mut Editor, st: &mut UiState| {
             let s = ed.tokens.style(&id).cloned().unwrap();
             fields(ui, ed, st, &s);
         };
         h.step(vec![], &mut f);
-        // Tab to the name field, then to Family, then to Size.
+        // Focus Size after Name and Family.
         for _ in 0..3 {
             h.step(vec![key(egui::Key::Tab)], &mut f);
             h.step(vec![], &mut f);

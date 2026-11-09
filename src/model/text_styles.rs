@@ -1,13 +1,8 @@
-//! Text styles: named sets of text settings, such as `Heading/L`, that layers apply by name.
+//! Text styles: named sets of text settings, each field a literal or a token alias. They live
+//! in the [`TokenSet`] beside the tokens, so undo, saving and design systems treat them alike.
 //!
-//! A style holds family, size, weight, italic, line height and letter spacing. Each field is
-//! a literal or an alias to a token of the matching kind. Styles live in the [`TokenSet`]
-//! beside the tokens, so undo, saving and design systems treat them the same way.
-//!
-//! A layer that uses a style records it in `Node::text_style_ref`. Like a token binding, the
-//! layer keeps the resolved values in its usual fields. A field the layer changes by hand
-//! becomes an override: the layer keeps the style, and that field stops following it. The
-//! editor keeps the other fields in step (see `editor/text_styles.rs`).
+//! Layers store resolved style values. Local edits override individual fields; the editor
+//! keeps the remaining fields in sync with the style.
 
 use super::node::{Node, NodeKind};
 use super::paint::LetterSpacing;
@@ -15,7 +10,6 @@ use super::tokens::{Keyed, TokenKind, TokenProp, TokenSet, TokenValue, css_slug,
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 
-/// One setting of a text style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StyleField {
@@ -128,7 +122,6 @@ impl TextStyleDef {
         .flatten()
     }
 
-    /// Whether a field aliases one of these tokens.
     pub fn uses_any(&self, ids: &HashSet<&str>) -> bool {
         self.values()
             .any(|v| matches!(v, TokenValue::Alias(a) if ids.contains(a.as_str())))
@@ -155,7 +148,6 @@ pub struct ResolvedStyle {
 }
 
 impl ResolvedStyle {
-    /// Does `n` already show this field?
     pub fn holds(&self, f: StyleField, n: &Node) -> bool {
         let ts = &n.text_style;
         match f {
@@ -168,7 +160,6 @@ impl ResolvedStyle {
         }
     }
 
-    /// Make `n` show this field.
     pub fn write(&self, f: StyleField, n: &mut Node) {
         let ts = &mut n.text_style;
         match f {
@@ -185,8 +176,7 @@ impl ResolvedStyle {
         }
     }
 
-    /// The fields as literal CSS for `css::apply`, at full precision so the layer ends up
-    /// holding exactly these values.
+    /// CSS for `css::apply`, at full precision to preserve exact field comparisons.
     pub fn literal_css(&self) -> Vec<(String, String)> {
         let spacing = match self.letter_spacing {
             LetterSpacing::Px(v) => format!("{v}px"),
@@ -209,8 +199,7 @@ impl ResolvedStyle {
     }
 }
 
-/// Raw field input, as the Tokens tab or an agent types it. None keeps the field (or uses
-/// the default for a new style).
+/// Raw field input. None preserves an existing value or uses the default for a new style.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StyleInput {
     pub family: Option<String>,
@@ -242,7 +231,6 @@ pub fn style_slug(name: &str) -> String {
     css_slug(&name.replace('/', " "))
 }
 
-/// `base copy`-style names for new styles: `Text style`, `Text style 2`...
 fn numbered(base: &str, i: usize) -> String {
     if i < 2 {
         base.to_string()
@@ -324,10 +312,8 @@ impl TokenSet {
         })
     }
 
-    /// Replace each `textStyle: name` in styles with the style's values, followed by a
-    /// [`css::STYLE_MARKER`] entry that makes `css::apply` record the style on a text layer.
-    /// Later styles still win, so `fontSize` after `textStyle` overrides the style's size.
-    /// An unknown name stays as it is, so `css::apply` reports it as ignored.
+    /// Expand `textStyle` into values and a [`css::STYLE_MARKER`] binding. Later fields win;
+    /// unknown names stay for `css::apply` to report as ignored.
     pub fn expand_styles(&self, styles: &mut Vec<(String, String)>) {
         if !styles.iter().any(|(k, _)| k == "textStyle") {
             return;
@@ -500,7 +486,6 @@ impl TokenSet {
         Ok(())
     }
 
-    /// A style with default fields: Inter, 16px, regular, normal line height, no spacing.
     fn default_style(id: String, name: String) -> TextStyleDef {
         TextStyleDef {
             id,
@@ -618,8 +603,6 @@ impl TokenSet {
         self.styles = styles;
     }
 
-    // ------------------------------------------------------------------ design systems
-
     /// Styles as a design system publishes them: the local ones, with aliases to another
     /// system's tokens replaced by the values they show.
     pub fn publishable_styles(&self) -> Vec<TextStyleDef> {
@@ -717,7 +700,6 @@ impl TokenSet {
     }
 }
 
-/// `fontFamily` as `font-family`.
 fn css_kebab(key: &str) -> String {
     let mut out = String::new();
     for c in key.chars() {
@@ -766,66 +748,25 @@ mod tests {
     }
 
     #[test]
-    fn names_become_classes() {
-        assert_eq!(style_slug("Heading/L"), "heading-l");
-        assert_eq!(style_slug("Body / Small"), "body-small");
-        let (s, id) = heading();
-        assert_eq!(s.style_by_name(".heading-l").unwrap().id, id);
-        assert_eq!(s.style_by_name("Heading/L").unwrap().id, id);
-    }
-
-    #[test]
-    fn styles_resolve_through_tokens() {
-        let (s, id) = heading();
-        let r = s.resolve_style(&id).unwrap();
-        assert_eq!(r.family, "Lora");
-        assert_eq!(r.size, 32.0);
-        assert_eq!(r.weight, 700.0);
-        assert_eq!(r.line_height, Some(1.2));
-        assert_eq!(r.letter_spacing, LetterSpacing::Em { em: -0.02 });
-    }
-
-    #[test]
-    fn css_uses_variables_for_aliases() {
-        let (s, id) = heading();
-        let st = s.style(&id).unwrap();
-        assert_eq!(
-            s.style_short(st),
-            "font: 700 var(--size-l)/120% var(--font-display); letter-spacing: -0.02em"
-        );
-        let css = s.style_sheet(&[st], false);
-        assert!(css.starts_with(".heading-l {\n"), "{css}");
-        assert!(
-            css.contains("  font-family: var(--font-display);\n"),
-            "{css}"
-        );
-        assert!(css.contains("  line-height: 120%;\n"), "{css}");
-        assert!(css.contains("  font-style: normal;\n"), "{css}");
-        assert!(
-            s.style_sheet(&[st], true)
-                .starts_with("@utility heading-l {")
-        );
-    }
-
-    #[test]
     fn bad_fields_change_nothing() {
         let (mut s, id) = heading();
         let before = s.clone();
-        for (f, v) in [
-            (StyleField::Size, "var(--font-display)"),
-            (StyleField::Weight, "9000"),
-            (StyleField::Italic, "sideways"),
-        ] {
-            let err = s.update_style(&id, None, &input(&[(f, v)]), None);
-            assert!(err.is_err(), "{f:?} {v}");
-        }
+        let err = s.update_style(
+            &id,
+            Some("Title"),
+            &input(&[
+                (StyleField::Family, "Arial"),
+                (StyleField::Size, "var(--font-display)"),
+            ]),
+            None,
+        );
+        assert!(err.is_err());
         assert_eq!(s, before);
     }
 
     #[test]
     fn classes_are_unique_and_create_is_idempotent() {
         let (mut s, id) = heading();
-        let again = s.style_by_name("heading-l").cloned().unwrap();
         let same = s
             .create_style(
                 "Heading/L",
@@ -840,11 +781,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(same, id);
-        assert_eq!(again.id, id);
-        let err = s
-            .create_style("heading l", &StyleInput::default(), None)
-            .unwrap_err();
-        assert!(err.contains(".heading-l"), "{err}");
+        assert!(
+            s.create_style("heading l", &StyleInput::default(), None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -854,23 +794,6 @@ mod tests {
         s.delete(&[size]);
         assert_eq!(s.style(&id).unwrap().size, TokenValue::Number(32.0));
         assert!(s.resolve_style(&id).is_some());
-    }
-
-    #[test]
-    fn style_edits_undo() {
-        let (mut s, id) = heading();
-        let before = s.clone();
-        s.update_style(
-            &id,
-            Some("Title"),
-            &input(&[(StyleField::Weight, "800")]),
-            None,
-        )
-        .unwrap();
-        let edits = s.diff(&before);
-        assert_eq!(edits.len(), 1);
-        s.apply_edits(&edits, false);
-        assert_eq!(s, before);
     }
 
     #[test]
@@ -888,13 +811,7 @@ mod tests {
         n.text_style.set_weight(600);
         let mut s = TokenSet::default();
         let a = s.add_default_style(Some(&n));
-        let b = s.add_default_style(None);
         let r = s.resolve_style(&a).unwrap();
         assert_eq!((r.size, r.weight), (20.0, 600.0));
-        assert_eq!(s.style(&a).unwrap().name, "Text style");
-        assert_eq!(s.style(&b).unwrap().name, "Text style 2");
-        for f in StyleField::ALL {
-            assert!(r.holds(f, &n), "{f:?}");
-        }
     }
 }

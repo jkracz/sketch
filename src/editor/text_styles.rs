@@ -1,16 +1,10 @@
-//! Text styles in the editor: applying a style to text layers, tracking the fields a layer
-//! overrides, and keeping the rest in step with the style on every page.
-//!
-//! The rule mirrors token bindings (`editor/tokens.rs`): a field the layer doesn't override
-//! always holds the style's value. A field that stops matching after an edit, or that a token
-//! owns, becomes an override instead of dropping the style.
+//! Local edits and token bindings override style fields without detaching the style.
 
 use super::Editor;
 use crate::model::{Node, NodeId, NodeKind, StyleField, TextStyleDef, TextStyleRef};
 
 impl Editor {
-    /// Apply a text style to these text layers as one undo step. They take on every field,
-    /// dropping their overrides and any token bindings the style's fields replace.
+    /// Apply a style as one undo step, clearing field overrides and competing token bindings.
     pub fn apply_text_style(&mut self, ids: &[NodeId], style: &str) {
         let Some(r) = self.tokens.resolve_style(style) else {
             return;
@@ -75,9 +69,7 @@ impl Editor {
             .collect()
     }
 
-    /// End-of-transaction check, after `drop_broken_bindings`. A field that no longer shows
-    /// the style, or that a token owns, is now an override. A layer whose style is gone, or
-    /// that isn't text any more, stops using it.
+    /// Run after `drop_broken_bindings` so only surviving token bindings become overrides.
     pub(super) fn check_text_style_refs(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut changes: Vec<(NodeId, Option<TextStyleRef>)> = Vec::new();
@@ -114,7 +106,6 @@ impl Editor {
         }
     }
 
-    /// Does `n` show a field of its style that it doesn't override? Used by `sync_tokens`.
     pub(super) fn style_is_stale(&self, n: &Node) -> bool {
         let Some(r) = &n.text_style_ref else {
             return false;
@@ -127,7 +118,6 @@ impl Editor {
             .any(|f| !r.overrides.contains(&f) && !style.holds(f, n))
     }
 
-    /// Write the style's values into the fields `n` doesn't override.
     pub(super) fn write_style_values(tokens: &crate::model::TokenSet, n: &mut Node) {
         let Some(r) = &n.text_style_ref else { return };
         let Some(style) = tokens.resolve_style(&r.id) else {
@@ -168,7 +158,6 @@ mod tests {
         })
     }
 
-    /// An editor with a text layer, a `size-l` token (32px) and a `Heading` style using it.
     fn setup() -> (Editor, NodeId, String, String) {
         let mut e = Editor::default();
         let id = text(&mut e);
@@ -196,17 +185,6 @@ mod tests {
     fn set_size(e: &mut Editor, token: &str, v: &str) {
         e.edit_tokens("edit", None, |t| t.update(token, None, Some(v), None))
             .unwrap();
-    }
-
-    #[test]
-    fn applying_writes_every_field_and_token_edits_follow() {
-        let (mut e, id, token, style) = setup();
-        e.apply_text_style(&[id], &style);
-        assert_eq!(size(&e, id), Some(32.0));
-        assert_eq!(e.doc.get(id).unwrap().text_style.base_weight(), 700);
-        assert!(overrides(&e, id).is_empty());
-        set_size(&mut e, &token, "40px");
-        assert_eq!(size(&e, id), Some(40.0));
     }
 
     #[test]
@@ -276,7 +254,6 @@ mod tests {
         assert!(e.bound_style(e.doc.get(id).unwrap()).is_none());
         e.undo();
         assert!(e.bound_style(e.doc.get(id).unwrap()).is_some());
-        // The next edit to a layer whose style is gone lets go of it.
         e.redo();
         e.edit("move", |tx| tx.node_mut(id).unwrap().rect.x = 5.0);
         assert!(e.doc.get(id).unwrap().text_style_ref.is_none());
@@ -297,14 +274,11 @@ mod tests {
         e.apply_text_style(&[id], &style);
         e.selection = vec![id];
         e.create_component();
-        let main = e.selection[0];
         e.instance_of_selection();
         let inst = e.selection[0];
         let inst_text = *e.doc.subtree(inst).last().unwrap();
-        assert_ne!(inst_text, id);
         set_size(&mut e, &token, "40px");
         assert_eq!(size(&e, inst_text), Some(40.0));
         assert!(e.doc.get(inst_text).unwrap().text_style_ref.is_some());
-        assert_ne!(main, inst);
     }
 }

@@ -1099,7 +1099,6 @@ fn token_kinds(a: &Args) -> Result<(Option<Vec<TokenKind>>, bool), String> {
     Ok((Some(kinds.ok_or("unknown token type in `types`")?), styles))
 }
 
-/// The `types` entry that picks text styles.
 const TEXT_STYLE_TYPE: &str = "textStyle";
 
 /// `tokens`' text styles, filtered by `types` and by `namePattern` against `.class`.
@@ -1304,7 +1303,6 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"count": results.len(), "tokens": results}))
 }
 
-/// A text style's fields from a tool entry, by camelCase CSS key.
 fn style_input(e: &Args) -> Result<StyleInput, String> {
     let mut input = StyleInput::default();
     for f in StyleField::ALL {

@@ -64,7 +64,6 @@ fn types_filter() -> Value {
     json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles. Omit for all."})
 }
 
-/// The properties of a text style entry: its fields plus `extra`.
 fn style_props(extra: &[(&str, Value)]) -> Value {
     let mut m = style_fields();
     for (k, v) in extra {
@@ -73,7 +72,6 @@ fn style_props(extra: &[(&str, Value)]) -> Value {
     Value::Object(m)
 }
 
-/// The fields of a text style, for create_text_styles and set_text_styles.
 fn style_fields() -> Map<String, Value> {
     let field =
         |d: &str| json!({"anyOf": [{"type": "string"}, {"type": "number"}], "description": d});

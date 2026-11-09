@@ -509,8 +509,7 @@ pub fn url(s: &str) -> Option<String> {
 /// Style key prefix that binds a property to a token: `<marker><cssKey>` holds the token id.
 /// [`crate::model::TokenSet::expand`] adds these after replacing `var(--token)`.
 pub const TOKEN_MARKER: &str = "--token:";
-/// Marks a text style applied with `textStyle` (`TokenSet::expand_styles`). The value is the
-/// style id. Text children inherit it, like the font properties it stands for.
+/// Carries the style id from `TokenSet::expand_styles`; text children inherit it.
 pub const STYLE_MARKER: &str = "--token:textStyle";
 
 /// Where the node sits, for properties whose meaning depends on the parent.
