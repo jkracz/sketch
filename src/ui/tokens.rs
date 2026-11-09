@@ -33,6 +33,11 @@ impl TokensUi {
         self.selected = vec![id.to_string()];
         self.open = ed.tokens.get(id).map(|t| Draft::of(ed, t));
     }
+
+    /// Show this text style's fields under its row.
+    pub fn open_style(&mut self, ed: &Editor, id: &str) {
+        self.styles.open(ed, id);
+    }
 }
 
 impl Draft {

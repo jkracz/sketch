@@ -32,10 +32,14 @@ update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure
 - Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
 var(--token) in update_styles and write_html styles to bind a property to a token, so later \
 token changes reach it.
+- Text styles name a set of text settings, like Heading/L. get_tokens lists them as classes. \
+Apply one with class=\"heading-l\" in write_html or {\"textStyle\": \"heading-l\"} in \
+update_styles; create_text_styles and set_text_styles manage them.
 - Design systems are token sets other projects publish. list_design_systems gives a short \
 summary of each; get_design_system loads one system's usage notes and tokens (filter by types or \
 namePattern to load less); use_design_system lets the open file bind them as \
-var(--prefix-name). publish_design_system publishes the open file's own tokens.
+var(--prefix-name) and its text styles as prefix-name classes. publish_design_system publishes \
+the open file's own tokens and text styles.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
