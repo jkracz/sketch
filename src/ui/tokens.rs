@@ -305,9 +305,18 @@ fn context_menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
         ui.close();
     }
     ui.separator();
-    let deletable = ids.iter().any(|id| ed.tokens.locked(id).is_none());
+    // `delete` skips design system tokens, so count only the rest.
+    let deletable = ids
+        .iter()
+        .filter(|id| ed.tokens.locked(id).is_none())
+        .count();
+    let label = if deletable > 1 {
+        format!("Delete {deletable} tokens")
+    } else {
+        "Delete".to_string()
+    };
     if ui
-        .add_enabled(deletable, egui::Button::new(plural("Delete")))
+        .add_enabled(deletable > 0, egui::Button::new(label))
         .on_disabled_hover_text("Design system tokens are read-only. Remove the system instead.")
         .clicked()
     {
