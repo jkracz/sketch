@@ -1308,6 +1308,24 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
             ..t.clone()
         })
         .collect();
+    let styles = tokens
+        .styles()
+        .iter()
+        .filter(|s| s.system.as_deref() == Some(l.id.as_str()))
+        .map(|s| {
+            let mut s = crate::model::TextStyleDef {
+                id: strip(&s.id),
+                system: None,
+                ..s.clone()
+            };
+            for (_, v) in s.values_mut() {
+                if let crate::model::TokenValue::Alias(a) = v {
+                    *a = strip(a);
+                }
+            }
+            s
+        })
+        .collect();
     Published {
         format: design_systems::FORMAT.into(),
         version: design_systems::VERSION,
@@ -1320,6 +1338,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
         source: String::new(),
         published: 0,
         tokens: list,
+        text_styles: styles,
     }
 }
 
