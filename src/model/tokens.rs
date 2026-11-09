@@ -228,7 +228,8 @@ pub struct TokenClip {
     pub tokens: Vec<Token>,
     /// Resolved values of alias targets outside the copied set, keyed by token id.
     resolved: HashMap<String, TokenValue>,
-    /// Name and kind of those targets, to find the same token in another project.
+    /// Kind and CSS name (without dashes) of those targets, to find the same token in
+    /// another project.
     targets: HashMap<String, (TokenKind, String)>,
 }
 
@@ -578,10 +579,9 @@ impl TokenSet {
     /// Add a token with the kind's default value and an unused name (the Tokens panel's `+`).
     pub fn add_default(&mut self, kind: TokenKind) -> String {
         let base = kind.key().to_string();
-        let taken = |n: &str| self.of_kind(kind).any(|t| t.name == n);
         let mut name = base.clone();
         let mut i = 2;
-        while taken(&name) {
+        while self.name_taken(kind, &name) {
             name = format!("{base}-{i}");
             i += 1;
         }
@@ -733,7 +733,7 @@ impl TokenSet {
                 }
                 if let Some(target) = self.get(a) {
                     clip.targets
-                        .insert(a.clone(), (target.kind, target.name.clone()));
+                        .insert(a.clone(), (target.kind, self.slug(target)));
                 }
             }
         }
@@ -784,7 +784,7 @@ impl TokenSet {
             return Some(TokenValue::Alias(id.to_string()));
         }
         let (kind, name) = clip.targets.get(id)?;
-        let t = self.of_kind(*kind).find(|t| t.name == *name)?;
+        let t = self.of_kind(*kind).find(|t| self.slug(t) == *name)?;
         Some(TokenValue::Alias(t.id.clone()))
     }
 
@@ -1542,21 +1542,61 @@ mod tests {
         assert!(s.by_css_name("--red-copy").is_some());
     }
 
-    #[test]
-    fn paste_renames_on_collision_with_a_design_system_token() {
+    /// A set using a system with `prefix` and one color token, `name` (#ffffff).
+    fn using(prefix: &str, name: &str) -> TokenSet {
         let mut src = TokenSet::default();
-        src.create(TokenKind::Color, "primary", "#ffffff", None)
-            .unwrap();
+        src.create(TokenKind::Color, name, "#ffffff", None).unwrap();
         let link = SystemLink {
-            id: "acme".into(),
-            name: "Acme".into(),
-            prefix: "acme".into(),
+            id: prefix.into(),
+            name: prefix.into(),
+            prefix: prefix.into(),
             release: 1,
             description: None,
             notes: None,
         };
         let mut s = TokenSet::default();
         s.attach(link, &src.publishable()).unwrap();
+        s
+    }
+
+    #[test]
+    fn new_tokens_skip_design_system_names() {
+        let mut s = using("color", "2");
+        s.add_default(TokenKind::Color);
+        let second = s.add_default(TokenKind::Color);
+        assert_eq!(s.css_name(s.get(&second).unwrap()), "--color-3");
+    }
+
+    #[test]
+    fn copied_aliases_to_a_design_system_token_match_by_css_name() {
+        let mut s = using("acme", "primary");
+        let cta = s
+            .create(TokenKind::Color, "cta", "var(--acme-primary)", None)
+            .unwrap();
+        let clip = s.copy(&[cta]);
+
+        let mut unrelated = TokenSet::default();
+        unrelated
+            .create(TokenKind::Color, "primary", "#000000", None)
+            .unwrap();
+        unrelated.paste(&clip);
+        assert_eq!(
+            unrelated.by_css_name("--cta").unwrap().value,
+            TokenValue::Color(Color::rgb(255, 255, 255))
+        );
+
+        let mut same = using("acme", "primary");
+        same.paste(&clip);
+        let target = same.by_css_name("--acme-primary").unwrap().id.clone();
+        assert_eq!(
+            same.by_css_name("--cta").unwrap().value,
+            TokenValue::Alias(target)
+        );
+    }
+
+    #[test]
+    fn paste_renames_on_collision_with_a_design_system_token() {
+        let mut s = using("acme", "primary");
         let mut other = TokenSet::default();
         let id = other
             .create(TokenKind::Color, "acme-primary", "#000000", None)

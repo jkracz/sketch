@@ -237,7 +237,7 @@ pub fn check_prefix(prefix: &str) -> Result<(), String> {
 
 /// A prefix made from a system name.
 pub fn default_prefix(name: &str) -> String {
-    let slug = css_slug(name).replace('_', "-");
+    let slug = css_slug(&name.replace('_', "-"));
     let mut p: String = slug
         .trim_start_matches(|c: char| !c.is_ascii_lowercase())
         .chars()
@@ -523,6 +523,7 @@ mod tests {
         assert!(check_prefix("a--b").is_err());
         assert!(check_prefix("brand-2").is_ok());
         assert_eq!(default_prefix("2 Acme Design!"), "acme-design");
+        assert_eq!(default_prefix("My__System"), "my-system");
     }
 
     #[test]
