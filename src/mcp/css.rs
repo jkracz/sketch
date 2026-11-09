@@ -50,12 +50,16 @@ pub fn parse_inline(s: &str) -> Styles {
 }
 
 /// A JSON style object (`{"padding": 8, "color": "#000"}`) as styles. Numbers become px for
-/// lengths and stay unitless for the few unitless properties.
+/// lengths and stay unitless for the few unitless properties. JSON objects lose their key
+/// order, so `textStyle` goes first and the other keys override its fields.
 pub fn from_json(v: &Value) -> Result<Styles, String> {
     let Some(m) = v.as_object() else {
         return Err("styles must be an object".into());
     };
-    Ok(m.iter()
+    let mut entries: Vec<(&String, &Value)> = m.iter().collect();
+    entries.sort_by_key(|(k, _)| camel(k) != "textStyle");
+    Ok(entries
+        .into_iter()
         .filter_map(|(k, v)| {
             let s = match v {
                 Value::String(s) => s.clone(),

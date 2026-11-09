@@ -173,6 +173,21 @@ fn update_styles_applies_and_style_edits_reach_every_layer_as_one_undo() {
     let (a, b) = (node(&ids[0]), node(&ids[1]));
     assert_eq!((font_size(&h, a), font_size(&h, b)), (32.0, 32.0));
 
+    // Keys after textStyle override its fields, whatever order JSON keeps them in.
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [ids[1]], "styles": {"textStyle": "heading-l", "fontSize": "20px"}}]}),
+    );
+    assert_eq!(font_size(&h, b), 20.0);
+    let r = h.ed.doc.get(b).unwrap().text_style_ref.clone().unwrap();
+    assert!(r.overrides.contains(&StyleField::Size), "{r:?}");
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [ids[1]], "styles": {"textStyle": "heading-l"}}]}),
+    );
+
     let bad = call(
         &mut h,
         "update_styles",

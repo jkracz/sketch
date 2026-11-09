@@ -409,11 +409,6 @@ impl TokenSet {
                 out.push_str(&format!(".{class} {{\n"));
             }
             for f in StyleField::ALL {
-                if f == StyleField::Italic && !s.italic
-                    || f == StyleField::LineHeight && s.line_height.is_none()
-                {
-                    continue;
-                }
                 let key = css_kebab(f.css_key());
                 out.push_str(&format!("  {key}: {};\n", self.style_value_css(s, f)));
             }
@@ -805,7 +800,7 @@ mod tests {
             "{css}"
         );
         assert!(css.contains("  line-height: 120%;\n"), "{css}");
-        assert!(!css.contains("font-style"), "{css}");
+        assert!(css.contains("  font-style: normal;\n"), "{css}");
         assert!(
             s.style_sheet(&[st], true)
                 .starts_with("@utility heading-l {")
