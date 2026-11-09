@@ -237,12 +237,13 @@ impl App {
         if self.session.project.is_some() {
             self.save_project(true);
         }
+        // Cleared first: opening reports design system updates in it.
+        self.ed.status.clear();
         match self.session.open(&mut self.ed, dir) {
             Ok(()) => {
                 self.st.home = None;
                 self.st.project_name = self.session.project_name();
                 self.st.save_state.clear();
-                self.ed.status.clear();
             }
             Err(e) => self.error(format!("Could not open {}: {e}", dir.display())),
         }
@@ -675,6 +676,12 @@ impl App {
         let Some(g) = self.gfx.as_mut() else { return };
         let input = g.egui.take_egui_input(&g.window);
         let appearance = self.st.appearance;
+        let project = self
+            .session
+            .project
+            .as_ref()
+            .map(|p| (p.manifest.id.as_str(), p.manifest.name.as_str()));
+        self.st.systems.set_context(&self.session.store, project);
         let mut l = frame::layout(&self.ctx, input, &mut self.ed, &mut self.st);
         if self.st.appearance != appearance {
             self.set_appearance();
@@ -1423,6 +1430,8 @@ impl App {
             let _ = c.reply.send(r);
         }
         self.st.project_name = self.session.project_name();
+        // An agent may have published or used a design system.
+        self.st.systems.invalidate();
         // An agent may have changed folders or projects behind the home screen.
         if self.st.home.is_some() {
             self.show_home();
@@ -1457,13 +1466,13 @@ impl crate::mcp::exec::Host for App {
                 .save_all(&mut self.ed)
                 .map_err(|e| format!("could not save the open project: {e}"))?;
         }
+        self.ed.status.clear();
         self.session
             .open(&mut self.ed, dir)
             .map_err(|e| format!("could not open {}: {e}", dir.display()))?;
         self.st.home = None;
         self.st.project_name = self.session.project_name();
         self.st.save_state.clear();
-        self.ed.status.clear();
         Ok(())
     }
     fn project_moved(&mut self, dir: &std::path::Path) {

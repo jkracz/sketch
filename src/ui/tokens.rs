@@ -1,9 +1,10 @@
-//! The Tokens tab of the left sidebar: add, edit, duplicate, copy and delete design tokens.
+//! The Tokens tab of the left sidebar: add, edit, duplicate, copy and delete design tokens,
+//! with the design systems this project uses listed below its own tokens (`ui::systems`).
 //! Also the token picker the inspector opens next to a bindable property.
 
 use super::{UiState, c32, from32};
 use crate::editor::Editor;
-use crate::model::{NodeId, Token, TokenKind, TokenProp, TokenValue};
+use crate::model::{NodeId, SystemLink, Token, TokenKind, TokenProp, TokenValue};
 use crate::theme::{self, Icon};
 use egui::{Popup, PopupCloseBehavior, RichText, Ui};
 
@@ -47,6 +48,9 @@ impl Draft {
 
 const ROW_H: f32 = 24.0;
 
+/// Tokens grouped by kind, in listing order.
+type Kinds = Vec<(TokenKind, Vec<Token>)>;
+
 pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     let p = theme::pal(ui);
     ui.horizontal(|ui| {
@@ -86,14 +90,18 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             {
                 st.tokens.selected = ed.paste_tokens();
             }
+            ui.separator();
+            super::systems::menu(ui, ed, st);
         });
     });
     ui.add_space(4.0);
+    super::systems::header(ui, ed, st);
+    super::systems::dialog(ui.ctx(), ed, st);
     if ed.tokens.is_empty() {
         ui.label(
             RichText::new(
                 "No tokens yet. Tokens are named colors and sizes that every page can share. \
-                 Add one with +.",
+                 Add one with +, or use a published design system from the menu.",
             )
             .size(theme::SECONDARY)
             .color(p.secondary),
@@ -106,31 +114,64 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             || t.name.to_lowercase().contains(&search)
             || ed.tokens.css_value(t).to_lowercase().contains(&search)
     };
-    let groups: Vec<(TokenKind, Vec<Token>)> = TokenKind::ALL
+    // This project's own tokens first, then each design system's.
+    let mut sources: Vec<Option<SystemLink>> = vec![None];
+    sources.extend(ed.tokens.systems().iter().cloned().map(Some));
+    let groups: Vec<(Option<SystemLink>, Kinds)> = sources
         .into_iter()
-        .map(|k| {
-            let list = ed.tokens.of_kind(k).filter(|t| matches(t));
-            (k, list.cloned().collect())
+        .map(|sys| {
+            let id = sys.as_ref().map(|s| s.id.clone());
+            let kinds = TokenKind::ALL
+                .into_iter()
+                .map(|k| {
+                    let list = ed
+                        .tokens
+                        .of_kind(k)
+                        .filter(|t| t.system == id && matches(t));
+                    (k, list.cloned().collect::<Vec<Token>>())
+                })
+                .filter(|(_, list)| !list.is_empty())
+                .collect();
+            (sys, kinds)
         })
-        .filter(|(_, list): &(TokenKind, Vec<Token>)| !list.is_empty())
         .collect();
     let visible: Vec<String> = groups
         .iter()
-        .flat_map(|(_, l)| l.iter().map(|t| t.id.clone()))
+        .flat_map(|(_, kinds)| {
+            kinds
+                .iter()
+                .flat_map(|(_, l)| l.iter().map(|t| t.id.clone()))
+        })
         .collect();
     egui::ScrollArea::vertical()
         .id_salt("tokens")
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            for (kind, list) in groups {
-                ui.add_space(6.0);
-                super::section(ui, kind.label());
-                for t in &list {
-                    ui.push_id(&t.id, |ui| row(ui, ed, st, t, &visible));
+            for (sys, kinds) in groups {
+                if let Some(link) = &sys {
+                    ui.push_id(&link.id, |ui| {
+                        super::systems::system_header(ui, ed, st, link)
+                    });
+                }
+                for (kind, list) in kinds {
+                    ui.add_space(6.0);
+                    super::section(ui, kind.label());
+                    for t in &list {
+                        ui.push_id(&t.id, |ui| row(ui, ed, st, t, &visible));
+                    }
                 }
             }
         });
+}
+
+/// How a token is labelled outside its group: a design system's token by its CSS name.
+fn label(ed: &Editor, t: &Token) -> String {
+    if t.system.is_some() {
+        ed.tokens.slug(t)
+    } else {
+        t.name.clone()
+    }
 }
 
 fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token, visible: &[String]) {
@@ -264,7 +305,12 @@ fn context_menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
         ui.close();
     }
     ui.separator();
-    if ui.button(plural("Delete")).clicked() {
+    let deletable = ids.iter().any(|id| ed.tokens.locked(id).is_none());
+    if ui
+        .add_enabled(deletable, egui::Button::new(plural("Delete")))
+        .on_disabled_hover_text("Design system tokens are read-only. Remove the system instead.")
+        .clicked()
+    {
         ed.edit_tokens("Delete tokens", None, |s| s.delete(&ids));
         st.tokens.selected.clear();
         st.tokens.open = None;
@@ -272,7 +318,26 @@ fn context_menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
     }
 }
 
+/// A design system's token: what it is, without fields to edit.
+fn locked_fields(ui: &mut Ui, ed: &Editor, t: &Token) {
+    let p = theme::pal(ui);
+    ui.add_space(3.0);
+    let small = |s: String| RichText::new(s).size(theme::SECONDARY).color(p.secondary);
+    ui.label(small(ed.tokens.css_value(t)));
+    if let Some(d) = &t.description {
+        ui.label(small(d.clone()));
+    }
+    ui.label(small(ed.tokens.css_name(t)).monospace());
+    ui.label(small(
+        "Read-only. Alias it from a local token, or detach the system to edit it.".into(),
+    ));
+    ui.add_space(4.0);
+}
+
 fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
+    if t.system.is_some() {
+        return locked_fields(ui, ed, t);
+    }
     let p = theme::pal(ui);
     let id = t.id.clone();
     let Some(d) = &mut st.tokens.open else { return };
@@ -400,7 +465,7 @@ pub fn picker(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], prop: TokenProp) {
         return;
     }
     let tip = match &bound {
-        Some(t) => format!("Token: {}", t.name),
+        Some(t) => format!("Token: {}", label(ed, t)),
         None => "Apply a token".into(),
     };
     let button = ui.push_id(prop, |ui| {
@@ -463,7 +528,7 @@ fn picker_list(
     let list: Vec<Token> = ed
         .tokens
         .of_kind(prop.kind())
-        .filter(|t| matches_search(&search, &t.name, &ed.tokens.css_value(t)))
+        .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value(t)))
         .cloned()
         .collect();
     if submitted && let Some(t) = list.first() {
@@ -483,7 +548,7 @@ fn picker_list(
                     _ => None,
                 };
                 let r = ui.add(
-                    egui::Button::selectable(on, t.name.as_str())
+                    egui::Button::selectable(on, label(ed, t))
                         .shortcut_text(RichText::new(value).color(p.secondary))
                         .min_size(egui::vec2(180.0, 22.0)),
                 );
