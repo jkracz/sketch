@@ -1399,6 +1399,13 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
         return text(v);
     }
     if matches!(format, "css" | "tailwind") {
+        if too_many {
+            return Ok(vec![Out::Text(format!(
+                "/* {} tokens: {}. Pass `types` or `namePattern` to load some of them. */\n",
+                chosen.len(),
+                type_counts(chosen.iter().copied())
+            ))]);
+        }
         return Ok(vec![Out::Text(
             set.stylesheet(&chosen, format == "tailwind"),
         )]);

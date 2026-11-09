@@ -203,6 +203,16 @@ fn large_systems_return_counts_until_filtered() {
     let full = full.as_str().unwrap();
     assert!(full.contains("200 tokens"), "{full}");
     assert!(!full.contains("--big-s-1:"), "{full}");
+    for format in ["css", "tailwind"] {
+        let css = call(
+            &mut h,
+            "get_design_system",
+            json!({"id": "big", "format": format}),
+        );
+        let css = css.as_str().unwrap();
+        assert!(css.contains("200 tokens"), "{css}");
+        assert!(!css.contains("--big-s-1:"), "{css}");
+    }
     let some = call(
         &mut h,
         "get_design_system",
