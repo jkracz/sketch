@@ -7,6 +7,7 @@ pub mod inspector;
 pub mod library;
 pub mod pages;
 pub mod palette;
+pub mod systems;
 pub mod tokens;
 
 use crate::editor::shortcuts::{self, Action};
@@ -38,6 +39,7 @@ pub struct UiState {
     pub pages: pages::PagesUi,
     pub library: library::LibraryUi,
     pub tokens: tokens::TokensUi,
+    pub systems: systems::SystemsUi,
     /// What the lower part of the left sidebar shows.
     pub sidebar: SidebarTab,
     pub palette: palette::PaletteUi,

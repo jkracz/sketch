@@ -354,28 +354,56 @@ pub fn publish(
     Ok(report)
 }
 
-fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishReport {
+/// Tokens a publish would add, change and remove, as CSS names with `prefix`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Changes {
+    pub added: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
+    }
+}
+
+pub fn changes(old: Option<&Published>, prefix: &str, tokens: &[Token]) -> Changes {
+    let css = |t: &Token| format!("--{prefix}-{}", css_slug(&t.name));
     let old_tokens = old.map(|o| o.tokens.as_slice()).unwrap_or_default();
     let find = |list: &[Token], id: &str| list.iter().find(|t| t.id == id).cloned();
-    let mut added = Vec::new();
-    let mut changed = Vec::new();
-    for t in &system.tokens {
+    let mut c = Changes::default();
+    for t in tokens {
         match find(old_tokens, &t.id) {
-            None => added.push(system.css_name(t)),
-            Some(o) if o != *t => changed.push(system.css_name(t)),
+            None => c.added.push(css(t)),
+            Some(o) if o != *t => c.changed.push(css(t)),
             Some(_) => {}
         }
     }
-    let removed = old_tokens
+    c.removed = old_tokens
         .iter()
-        .filter(|o| find(&system.tokens, &o.id).is_none())
-        .map(|o| old.map_or_else(String::new, |p| p.css_name(o)))
+        .filter(|o| find(tokens, &o.id).is_none())
+        .map(css)
         .collect();
-    let users = store
+    c
+}
+
+/// Projects in the store that use design system `id`.
+pub fn users(store: &Store, id: &str) -> usize {
+    store
         .list()
         .iter()
-        .filter(|e| e.manifest.systems.iter().any(|s| s.id == system.id))
-        .count();
+        .filter(|e| e.manifest.systems.iter().any(|s| s.id == id))
+        .count()
+}
+
+fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishReport {
+    let Changes {
+        added,
+        changed,
+        removed,
+    } = changes(old, &system.prefix, &system.tokens);
+    let users = users(store, &system.id);
     PublishReport {
         system,
         added,
