@@ -8,6 +8,7 @@ pub mod library;
 pub mod pages;
 pub mod palette;
 pub mod systems;
+pub mod text_styles;
 pub mod tokens;
 
 use crate::editor::shortcuts::{self, Action};

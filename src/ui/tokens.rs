@@ -10,7 +10,8 @@ use egui::{Popup, PopupCloseBehavior, RichText, Ui};
 
 #[derive(Default)]
 pub struct TokensUi {
-    search: String,
+    pub(super) search: String,
+    pub(super) styles: super::text_styles::StylesUi,
     /// Selected token ids, for the context menu's multi-token actions.
     selected: Vec<String>,
     /// The token whose fields are shown under its row.
@@ -68,21 +69,30 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                     st.tokens.open(ed, &id);
                 }
             }
+            ui.separator();
+            super::text_styles::add_entry(ui, ed, st);
         });
         let more = theme::icon_button(ui, Icon::More, 20.0, false).on_hover_text("More");
         Popup::menu(&more).show(|ui| {
             let all = ed.tokens.sorted();
+            let styles: Vec<&crate::model::TextStyleDef> = ed.tokens.styles().iter().collect();
+            let sheet = |tailwind| {
+                let mut css = ed.tokens.stylesheet(&all, tailwind);
+                css.push_str(&ed.tokens.style_sheet(&styles, tailwind));
+                css
+            };
+            let any = !ed.tokens.is_blank();
             if ui
-                .add_enabled(!all.is_empty(), egui::Button::new("Copy all as CSS"))
+                .add_enabled(any, egui::Button::new("Copy all as CSS"))
                 .clicked()
             {
-                ui.ctx().copy_text(ed.tokens.stylesheet(&all, false));
+                ui.ctx().copy_text(sheet(false));
             }
             if ui
-                .add_enabled(!all.is_empty(), egui::Button::new("Copy all as Tailwind"))
+                .add_enabled(any, egui::Button::new("Copy all as Tailwind"))
                 .clicked()
             {
-                ui.ctx().copy_text(ed.tokens.stylesheet(&all, true));
+                ui.ctx().copy_text(sheet(true));
             }
             if ui
                 .add_enabled(ed.can_paste_tokens(), egui::Button::new("Paste tokens"))
@@ -97,11 +107,12 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     ui.add_space(4.0);
     super::systems::header(ui, ed, st);
     super::systems::dialog(ui.ctx(), ed, st);
-    if ed.tokens.is_empty() {
+    if ed.tokens.is_blank() {
         ui.label(
             RichText::new(
-                "No tokens yet. Tokens are named colors and sizes that every page can share. \
-                 Add one with +, or use a published design system from the menu.",
+                "No tokens yet. Tokens are named colors and sizes that every page can share, \
+                 and text styles name a set of text settings. Add one with +, or use a \
+                 published design system from the menu.",
             )
             .size(theme::SECONDARY)
             .color(p.secondary),
@@ -161,6 +172,9 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                         ui.push_id(&t.id, |ui| row(ui, ed, st, t, &visible));
                     }
                 }
+                let system = sys.as_ref().map(|s| s.id.as_str());
+                let styles = super::text_styles::matching(ed, system, &search);
+                super::text_styles::section(ui, ed, st, &styles);
             }
         });
 }
@@ -459,7 +473,7 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
 
 /// The field gave up focus with an edit to keep. Escape discards the edit instead. egui
 /// reports a lost focus for two frames, so callers check that the text really differs.
-fn committed(ui: &Ui, r: &egui::Response) -> bool {
+pub(super) fn committed(ui: &Ui, r: &egui::Response) -> bool {
     r.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape))
 }
 
@@ -607,7 +621,7 @@ pub(super) mod tests {
     pub(in crate::ui) struct Harness {
         pub(in crate::ui) ctx: egui::Context,
         pub(in crate::ui) ed: Editor,
-        st: UiState,
+        pub(in crate::ui) st: UiState,
     }
 
     pub(in crate::ui) fn key(key: egui::Key) -> egui::Event {

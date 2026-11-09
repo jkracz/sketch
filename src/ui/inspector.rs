@@ -968,6 +968,7 @@ fn text_section(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
             );
         }
     });
+    super::text_styles::inspector_row(ui, ed, ids, first);
     super::fonts::font_picker(ui, ed, ids);
     super::fonts::weight_menu(ui, ed);
     let cs = ed.current_char_style();
