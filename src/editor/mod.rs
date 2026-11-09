@@ -9,6 +9,7 @@ pub mod pages;
 pub mod shortcuts;
 pub mod snap;
 pub mod structure;
+pub mod systems;
 pub mod text_edit;
 pub mod tokens;
 pub mod vector_ops;
@@ -276,6 +277,8 @@ pub struct Editor {
     pub sticky_color: Color,
     /// The project's design tokens, shared by all pages.
     pub tokens: crate::model::TokenSet,
+    /// The design system this project last published, if any. Not part of undo.
+    pub published: Option<crate::model::SystemLink>,
     /// Tokens copied in the Tokens panel; kept across projects like `clipboard`.
     token_clipboard: crate::model::TokenClip,
     /// Requests for the chrome (command palette, rename...).
@@ -351,6 +354,7 @@ impl Editor {
             clipboard_io: None,
             clipboard_written: None,
             tokens: Default::default(),
+            published: None,
             token_clipboard: Default::default(),
         }
     }

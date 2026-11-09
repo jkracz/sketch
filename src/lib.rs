@@ -20,6 +20,7 @@ pub mod project;
 pub mod render;
 pub mod session;
 pub mod settings;
+pub mod systems;
 pub mod text;
 pub mod theme;
 pub mod ui;

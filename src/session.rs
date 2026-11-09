@@ -46,10 +46,20 @@ impl Session {
         crate::assets::load_dir(&dir.join(crate::project::ASSETS_DIR));
         let pages = p.load_pages()?;
         ed.open_pages(pages, p.manifest.active_page.as_deref());
-        ed.tokens = p.manifest.tokens.clone();
+        ed.tokens = p
+            .manifest
+            .tokens
+            .clone()
+            .with_systems(p.manifest.systems.clone());
+        ed.published = p.manifest.published.clone();
         // Freshly loaded pages are saved by definition.
         for i in 0..ed.pages.len() {
             ed.mark_page_saved(i);
+        }
+        // After marking pages saved, so pages the updates change get saved.
+        let updates = crate::systems::update_all(&self.store, ed);
+        if !updates.is_empty() {
+            ed.status = updates.join(" ");
         }
         self.project = Some(p);
         self.dirty_since = None;
@@ -144,6 +154,8 @@ impl Session {
         p.manifest.pages = pages;
         p.manifest.active_page = Some(ed.active_page_id().to_string());
         p.manifest.tokens = ed.tokens.clone();
+        p.manifest.systems = ed.tokens.systems().to_vec();
+        p.manifest.published = ed.published.clone();
         if wrote {
             p.manifest.modified = now_ms();
             self.thumb_stale = true;

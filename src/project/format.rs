@@ -6,7 +6,7 @@
 //! unit-testable on its own.
 
 use crate::geom::Camera;
-use crate::model::{Document, Node, NodeId, TokenSet};
+use crate::model::{Document, Node, NodeId, SystemLink, TokenSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -82,6 +82,13 @@ pub struct Manifest {
     /// Design tokens. They live here because every page shares them.
     #[serde(default, skip_serializing_if = "TokenSet::is_empty")]
     pub tokens: TokenSet,
+    /// The design systems this project uses. Their tokens are in `tokens`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub systems: Vec<SystemLink>,
+    /// The design system this project last published, so the next publish keeps its id and
+    /// prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<SystemLink>,
 }
 
 impl Manifest {
@@ -101,6 +108,8 @@ impl Manifest {
             active_page: Some(page.id.clone()),
             pages: vec![page],
             tokens: TokenSet::default(),
+            systems: Vec::new(),
+            published: None,
         }
     }
 
