@@ -32,6 +32,10 @@ update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure
 - Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
 var(--token) in update_styles and write_html styles to bind a property to a token, so later \
 token changes reach it.
+- Design systems are token sets other projects publish. list_design_systems gives a short \
+summary of each; get_design_system loads one system's usage notes and tokens (filter by types or \
+namePattern to load less); use_design_system lets the open file bind them as \
+var(--prefix-name). publish_design_system publishes the open file's own tokens.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
@@ -89,6 +93,8 @@ fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool
                 | "search_fonts"
                 | "get_guide"
                 | "open_file"
+                | "list_design_systems"
+                | "get_design_system"
         )
     {
         m.insert("fileId".into(), file_id());
@@ -565,8 +571,11 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "get_tokens",
             "Lists the project's design tokens (colors, spacing, typography...), grouped by \
-             type. Tokens belong to the project, so every page shares them.",
+             type. Tokens belong to the project, so every page shares them. By default only the \
+             file's own tokens, plus one line per design system the file uses; pass `system` \
+             to list a design system's tokens.",
             json!({
+                "system": {"type": "string", "description": "A design system the file uses (id, name or prefix) to list its tokens instead, or \"all\" for every token."},
                 "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
                 "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case. `*` is the wildcard: \"--color-*\", \"*-500\", \"*brand*\"."},
                 "types": {"type": "array", "items": token_type(), "description": "Only these token types. Omit for all."},
@@ -613,6 +622,66 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["name"],
             }}}),
             &["tokens"],
+            false,
+        ),
+        // ----------------------------------------------------------------- design systems
+        tool(
+            "list_design_systems",
+            "Lists published design systems: token sets other projects can use. Returns a \
+             short summary of each (name, CSS prefix, version, description, token counts by \
+             type), not the tokens. Load one with get_design_system.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "get_design_system",
+            "Loads one design system: its usage notes and tokens, one compact line per token. \
+             Pass `types` or `namePattern` to load only what the task needs. Works without an \
+             open project.",
+            json!({
+                "id": {"type": "string", "description": "The system's id, name or prefix, from list_design_systems."},
+                "types": {"type": "array", "items": token_type(), "description": "Only these token types. Omit for all."},
+                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case, e.g. \"--brand-color-*\"."},
+                "format": {"type": "string", "enum": ["text", "json", "css", "tailwind"], "description": "\"text\" (default): notes and `--name: value;` lines. \"json\": structured. \"css\" or \"tailwind\": a stylesheet without notes."},
+            }),
+            &["id"],
+            true,
+        ),
+        tool(
+            "use_design_system",
+            "Lets the open file use a design system, as one undo step. Its tokens become \
+             read-only CSS variables named with the system's prefix (--brand-primary), so \
+             var() in styles binds to them. The file gets each new version when it opens.",
+            json!({"id": {"type": "string", "description": "The system's id, name or prefix."}}),
+            &["id"],
+            false,
+        ),
+        tool(
+            "remove_design_system",
+            "Stops the open file using a design system, as one undo step. Layers bound to its \
+             tokens keep their values. With `detach: true` its tokens become local tokens \
+             instead, keeping their names and bindings.",
+            json!({
+                "id": {"type": "string", "description": "The system's id, name or prefix."},
+                "detach": {"type": "boolean", "description": "Keep the tokens as local tokens."},
+            }),
+            &["id"],
+            false,
+        ),
+        tool(
+            "publish_design_system",
+            "Publishes the open file's own tokens as a design system other files can use, or \
+             publishes a new version. Files that use it update when they open. Omitted \
+             fields keep their last values. The prefix is fixed after the first publish. Not \
+             an undo step: publish again to roll back. Returns the changed token names.",
+            json!({
+                "name": {"type": "string", "description": "Defaults to the project name."},
+                "prefix": {"type": "string", "description": "CSS prefix for the tokens in other files: lowercase letters, digits and dashes, at most 16 characters. Defaults to the name."},
+                "description": {"type": "string", "maxLength": 280, "description": "One line on what the system is for. An empty string clears it."},
+                "notes": {"type": "string", "maxLength": 10000, "description": "Usage notes in Markdown, for people and agents: which tokens to use where. An empty string clears them."},
+            }),
+            &[],
             false,
         ),
         tool(
@@ -669,6 +738,16 @@ Inside a longer value (1px solid var(--line)) or on an inline span, the token's 
 without a binding. Setting a plain value on a bound property detaches it. get_computed_styles
 and get_jsx show bound properties as var(--token). Letter spacing in em, plain or from a token,
 follows the text's font size.
+
+Design systems: a project can publish its tokens for other projects to use. Load only what the
+task needs: list_design_systems gives one summary per system; get_design_system returns one
+system's usage notes and tokens, and takes types and namePattern to narrow them. Follow the
+usage notes. use_design_system adds a system to the open file: its tokens are read-only and
+named with its prefix (--brand-primary), and var() binds to them like any token. To customize
+one, alias it from a local token (create_tokens with value var(--brand-primary)). get_tokens
+lists the file's own tokens and one line per system; pass system to see a system's tokens.
+publish_design_system publishes the open file's own tokens; write notes that say which token to
+use where.
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 

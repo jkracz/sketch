@@ -21,6 +21,7 @@ use crate::project::{Entry, Folder, Project, Store};
 use crate::render::gpu::Headless;
 use crate::render::scene::CanvasStyle;
 use crate::session::Session;
+use crate::systems::{self as design_systems, PublishRequest, Published, Registry};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -263,8 +264,21 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
         "get_font_family_info" => font_info(&a),
         "search_fonts" => search_fonts(&a),
         "get_guide" => guide(&a),
+        "list_design_systems" => list_design_systems(host),
+        "get_design_system" => get_design_system(host, &a),
         _ => {
             check_file(host, &a)?;
+            if matches!(
+                name,
+                "write_html"
+                    | "update_styles"
+                    | "create_artboard"
+                    | "create_shape"
+                    | "create_tokens"
+                    | "set_tokens"
+            ) {
+                check_system_vars(host, args)?;
+            }
             let ed = host.editor();
             ed.commit_pending();
             // The first content on the page the user is looking at is brought into view.
@@ -295,7 +309,10 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "move_nodes" => move_nodes(ed, &a),
                 "select_nodes" => select_nodes(ed, &a),
                 "undo" | "redo" => undo_redo(ed, &a, name == "undo"),
-                "get_tokens" => get_tokens(ed, &a),
+                "get_tokens" => get_tokens(host, &a),
+                "use_design_system" => use_design_system(host, &a),
+                "remove_design_system" => remove_design_system(ed, &a),
+                "publish_design_system" => publish_design_system(host, &a),
                 "create_tokens" => create_tokens(ed, &a),
                 "set_tokens" => set_tokens(ed, &a),
                 "finish_working_on_nodes" => {
@@ -755,6 +772,9 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
         "otherTopLevelLayers": others,
         "fontFamilies": font_families(doc),
         "tokens": token_list(&ed.tokens),
+        "designSystems": ed.tokens.systems().iter().map(|s| json!({
+            "name": s.name, "prefix": format!("--{}-", s.prefix),
+        })).collect::<Vec<_>>(),
         "selectionCount": if page == ed.active_page { ed.selection.len() } else { 0 },
         "nodeIdFormat": "\"<page>:<n>\", e.g. \"".to_string() + &node_key(ed, page, NodeId(1)) + "\"",
     }))
@@ -1005,10 +1025,13 @@ fn token_json(tokens: &TokenSet, t: &Token) -> Value {
     v
 }
 
+/// The project's own tokens. Design systems' tokens are left out: `get_tokens` and
+/// `get_design_system` list them on request.
 fn token_list(tokens: &TokenSet) -> Vec<Value> {
     tokens
         .sorted()
         .into_iter()
+        .filter(|t| t.system.is_none())
         .map(|t| token_json(tokens, t))
         .collect()
 }
@@ -1042,31 +1065,96 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     }
 }
 
-fn get_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
-    let kinds: Option<Vec<TokenKind>> = match a.get("types") {
-        Some(_) => {
-            let names = a.strs("types")?;
-            let kinds: Option<Vec<TokenKind>> =
-                names.iter().map(|k| TokenKind::from_key(k)).collect();
-            Some(kinds.ok_or("unknown token type in `types`")?).filter(|k| !k.is_empty())
-        }
-        None => None,
-    };
+/// The `types` argument: None for every type.
+fn token_kinds(a: &Args) -> Result<Option<Vec<TokenKind>>, String> {
+    if a.get("types").is_none() {
+        return Ok(None);
+    }
+    let names = a.strs("types")?;
+    let kinds: Option<Vec<TokenKind>> = names.iter().map(|k| TokenKind::from_key(k)).collect();
+    Ok(Some(kinds.ok_or("unknown token type in `types`")?).filter(|k| !k.is_empty()))
+}
+
+/// `tokens` in listing order, filtered by `types` and `namePattern`.
+fn chosen_tokens<'a>(
+    tokens: &'a TokenSet,
+    a: &Args,
+    keep: impl Fn(&Token) -> bool,
+) -> Result<Vec<&'a Token>, String> {
+    let kinds = token_kinds(a)?;
     let pattern = a.str("namePattern");
-    let tokens = &ed.tokens;
-    let chosen: Vec<&Token> = tokens
+    Ok(tokens
         .sorted()
         .into_iter()
+        .filter(|t| keep(t))
         .filter(|t| kinds.as_ref().is_none_or(|k| k.contains(&t.kind)))
         .filter(|t| pattern.is_none_or(|p| glob(p, &tokens.css_name(t))))
-        .collect();
+        .collect())
+}
+
+fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let store = host.store().clone();
+    let ed = host.editor();
+    let tokens = &ed.tokens;
+    // Which tokens: the file's own (default), one design system's, or all of them.
+    let scope: Option<Option<String>> = match a.str("system").map(str::trim) {
+        None | Some("") => Some(None),
+        Some("all") => None,
+        Some(key) => {
+            let link = attached(tokens, key).ok_or_else(|| {
+                format!(
+                    "The open file doesn't use a design system `{key}`. get_design_system reads \
+                     one it doesn't use."
+                )
+            })?;
+            Some(Some(link.id.clone()))
+        }
+    };
+    let chosen = chosen_tokens(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
+    // One line per design system the file uses, so its tokens can be loaded on demand.
+    let others: Vec<Value> = match &scope {
+        Some(None) => tokens
+            .systems()
+            .iter()
+            .map(|l| {
+                let n = tokens
+                    .sorted()
+                    .iter()
+                    .filter(|t| t.system.as_deref() == Some(l.id.as_str()))
+                    .count();
+                json!({
+                    "id": l.id, "name": l.name, "prefix": format!("--{}-", l.prefix),
+                    "version": l.release, "tokens": n,
+                    "sourceAvailable": design_systems::source_available(&store, &l.id),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     match a.str("format").unwrap_or("json") {
         "json" => {
             let list: Vec<Value> = chosen.iter().map(|t| token_json(tokens, t)).collect();
-            text(json!({"tokens": list}))
+            let mut v = json!({"tokens": list});
+            if !others.is_empty() {
+                v["designSystems"] = json!(others);
+                v["hint"] = json!(
+                    "Pass `system` (id, name or prefix, or \"all\") to list a design system's tokens."
+                );
+            }
+            text(v)
         }
-        "css" => Ok(vec![Out::Text(tokens.stylesheet(&chosen, false))]),
-        "tailwind" => Ok(vec![Out::Text(tokens.stylesheet(&chosen, true))]),
+        f @ ("css" | "tailwind") => {
+            let mut css = tokens.stylesheet(&chosen, f == "tailwind");
+            for o in &others {
+                css.push_str(&format!(
+                    "/* Also uses {} ({}*, {} tokens). Pass `system` to include them. */\n",
+                    o["name"].as_str().unwrap_or_default(),
+                    o["prefix"].as_str().unwrap_or_default(),
+                    o["tokens"]
+                ));
+            }
+            Ok(vec![Out::Text(css)])
+        }
         f => Err(format!(
             "format must be \"json\", \"css\" or \"tailwind\", not `{f}`"
         )),
@@ -1118,6 +1206,9 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                         format!("Token not found: \"{name}\". No token has that CSS variable name.")
                     })?;
                     let (id, css_name) = (t.id.clone(), tokens.css_name(t));
+                    if let Some(why) = tokens.locked(&id) {
+                        return Err(why);
+                    }
                     if e.get("delete").and_then(Value::as_bool) == Some(true) {
                         tokens.delete(std::slice::from_ref(&id));
                         return Ok::<_, String>((css_name, "deleted"));
@@ -1139,6 +1230,358 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
             .collect()
     });
     text(json!({"count": results.len(), "tokens": results}))
+}
+
+// ------------------------------------------------------------------ design systems
+
+/// Above this many tokens, `get_design_system` without filters returns counts instead.
+const MAX_SYSTEM_TOKENS: usize = 150;
+/// Token names listed in a publish result before "and N more".
+const MAX_LISTED_NAMES: usize = 20;
+
+/// Token counts by type.
+fn type_counts<'a>(tokens: impl Iterator<Item = &'a Token>) -> Value {
+    let list: Vec<&Token> = tokens.collect();
+    let mut m = Map::new();
+    for k in TokenKind::ALL {
+        let n = list.iter().filter(|t| t.kind == k).count();
+        if n > 0 {
+            m.insert(k.key().into(), json!(n));
+        }
+    }
+    Value::Object(m)
+}
+
+fn matches_system(key: &str, id: &str, name: &str, prefix: &str) -> bool {
+    let k = key.trim();
+    let bare = k.trim_start_matches("--").trim_end_matches('-');
+    k == id || name.eq_ignore_ascii_case(k) || prefix == bare
+}
+
+/// A design system the open file uses, by id, name or prefix.
+fn attached<'a>(tokens: &'a TokenSet, key: &str) -> Option<&'a crate::model::SystemLink> {
+    tokens
+        .systems()
+        .iter()
+        .find(|l| matches_system(key, &l.id, &l.name, &l.prefix))
+}
+
+/// A design system by id, name or prefix: a published one, else the copy the open file
+/// keeps of one that is no longer published.
+fn find_system(host: &mut dyn Host, key: &str) -> Result<Published, String> {
+    let found = Registry::in_store(host.store())
+        .list()
+        .into_iter()
+        .find(|p| matches_system(key, &p.id, &p.name, &p.prefix));
+    if let Some(p) = found {
+        return Ok(p);
+    }
+    if host.canvas_open() {
+        let ed = host.editor();
+        if let Some(l) = attached(&ed.tokens, key) {
+            return Ok(cached_system(&ed.tokens, l));
+        }
+    }
+    Err(format!(
+        "No design system matches `{key}`. list_design_systems shows the published ones."
+    ))
+}
+
+/// What the open file holds of a design system, in published form.
+fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
+    let strip = |id: &str| {
+        id.strip_prefix(&format!("{}/", l.id))
+            .unwrap_or(id)
+            .to_string()
+    };
+    let list = tokens
+        .sorted()
+        .into_iter()
+        .filter(|t| t.system.as_deref() == Some(l.id.as_str()))
+        .map(|t| Token {
+            id: strip(&t.id),
+            value: match &t.value {
+                crate::model::TokenValue::Alias(a) => crate::model::TokenValue::Alias(strip(a)),
+                v => v.clone(),
+            },
+            system: None,
+            ..t.clone()
+        })
+        .collect();
+    Published {
+        format: design_systems::FORMAT.into(),
+        version: design_systems::VERSION,
+        id: l.id.clone(),
+        name: l.name.clone(),
+        prefix: l.prefix.clone(),
+        description: l.description.clone(),
+        notes: l.notes.clone(),
+        release: l.release,
+        source: String::new(),
+        published: 0,
+        tokens: list,
+    }
+}
+
+fn list_design_systems(host: &mut dyn Host) -> ToolResult {
+    let store = host.store().clone();
+    let open = host.canvas_open() && host.project().is_some();
+    let ed = host.editor();
+    let own = ed.published.as_ref().map(|l| l.id.clone());
+    let list: Vec<Value> = design_systems::available(&store)
+        .iter()
+        .map(|p| {
+            let mut v = json!({
+                "id": p.id, "name": p.name, "prefix": format!("--{}-", p.prefix),
+                "version": p.release, "tokens": type_counts(p.tokens.iter()),
+            });
+            if let Some(d) = &p.description {
+                v["description"] = json!(d);
+            }
+            if open && ed.tokens.system(&p.id).is_some() {
+                v["usedByOpenFile"] = json!(true);
+            }
+            if open && own.as_deref() == Some(p.id.as_str()) {
+                v["publishedByOpenFile"] = json!(true);
+            }
+            v
+        })
+        .collect();
+    text(json!({
+        "systems": list,
+        "hint": "get_design_system loads one system's notes and tokens. use_design_system lets \
+                 the open file bind them.",
+    }))
+}
+
+fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let p = find_system(host, a.req_str("id")?)?;
+    let used = host.canvas_open() && host.editor().tokens.system(&p.id).is_some();
+    let set = p.token_set();
+    let chosen = chosen_tokens(&set, a, |_| true)?;
+    let filtered = a.get("types").is_some() || a.get("namePattern").is_some();
+    let too_many = !filtered && chosen.len() > MAX_SYSTEM_TOKENS;
+    let usage = if used {
+        "The open file uses this system: bind its tokens with var(--name).".to_string()
+    } else {
+        format!(
+            "The open file doesn't use this system. Call use_design_system({{\"id\": \"{}\"}}) \
+             before binding its tokens.",
+            p.id
+        )
+    };
+    let format = a.str("format").unwrap_or("text");
+    if format == "json" {
+        let mut v = json!({
+            "id": p.id, "name": p.name, "prefix": format!("--{}-", p.prefix),
+            "version": p.release, "usage": usage,
+        });
+        if let Some(d) = &p.description {
+            v["description"] = json!(d);
+        }
+        if let Some(n) = &p.notes {
+            v["notes"] = json!(n);
+        }
+        if too_many {
+            v["tokenCounts"] = type_counts(chosen.iter().copied());
+            v["hint"] = json!(format!(
+                "{} tokens. Pass `types` or `namePattern` to load some of them.",
+                chosen.len()
+            ));
+        } else {
+            v["tokens"] = json!(
+                chosen
+                    .iter()
+                    .map(|t| token_json(&set, t))
+                    .collect::<Vec<_>>()
+            );
+        }
+        return text(v);
+    }
+    if matches!(format, "css" | "tailwind") {
+        if too_many {
+            return Ok(vec![Out::Text(format!(
+                "/* {} tokens: {}. Pass `types` or `namePattern` to load some of them. */\n",
+                chosen.len(),
+                type_counts(chosen.iter().copied())
+            ))]);
+        }
+        return Ok(vec![Out::Text(
+            set.stylesheet(&chosen, format == "tailwind"),
+        )]);
+    }
+    if format != "text" {
+        return Err(format!(
+            "format must be \"text\", \"json\", \"css\" or \"tailwind\", not `{format}`"
+        ));
+    }
+    let mut out = format!("# {} v{} (prefix --{}-)\n", p.name, p.release, p.prefix);
+    if let Some(d) = &p.description {
+        out.push_str(&format!("{d}\n"));
+    }
+    out.push_str(&format!("{usage}\n"));
+    if let Some(n) = &p.notes {
+        out.push_str(&format!("\n## Usage notes\n{}\n", n.trim_end()));
+    }
+    out.push_str("\n## Tokens\n");
+    if too_many {
+        let counts = type_counts(chosen.iter().copied());
+        out.push_str(&format!(
+            "{} tokens: {counts}. Pass `types` or `namePattern` to load some of them.\n",
+            chosen.len()
+        ));
+        return Ok(vec![Out::Text(out)]);
+    }
+    let mut kind = None;
+    for t in &chosen {
+        if kind != Some(t.kind) {
+            kind = Some(t.kind);
+            out.push_str(&format!("/* {} */\n", t.kind.label()));
+        }
+        out.push_str(&format!("{}: {};", set.css_name(t), set.css_value(t)));
+        if let Some(d) = &t.description {
+            out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
+        }
+        out.push('\n');
+    }
+    if chosen.is_empty() {
+        out.push_str("No tokens match.\n");
+    }
+    Ok(vec![Out::Text(out)])
+}
+
+fn use_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let p = find_system(host, a.req_str("id")?)?;
+    if !design_systems::source_available(host.store(), &p.id) {
+        return Err(format!(
+            "{} isn't available: it was unpublished, or its source project is in the trash or \
+             was deleted.",
+            p.name
+        ));
+    }
+    let ed = host.editor();
+    ed.use_system(&p)?;
+    ed.status = format!("Using {}.", p.name);
+    text(json!({
+        "name": p.name, "prefix": format!("--{}-", p.prefix), "version": p.release,
+        "tokens": type_counts(p.tokens.iter()),
+        "hint": format!(
+            "Bind with var(--{}-…) in styles. get_design_system lists the tokens.",
+            p.prefix
+        ),
+    }))
+}
+
+fn remove_design_system(ed: &mut Editor, a: &Args) -> ToolResult {
+    let key = a.req_str("id")?;
+    let l = attached(&ed.tokens, key)
+        .cloned()
+        .ok_or_else(|| format!("The open file doesn't use a design system `{key}`."))?;
+    if a.get("detach").and_then(Value::as_bool) == Some(true) {
+        ed.detach_system(&l.id)?;
+        ed.status = format!("Detached {}.", l.name);
+        return text(json!({
+            "name": l.name, "result": "detached",
+            "hint": "Its tokens are local now, with the same names and bindings.",
+        }));
+    }
+    let layers = ed.remove_system(&l.id)?;
+    ed.status = format!("Removed {}.", l.name);
+    text(json!({"name": l.name, "result": "removed", "layersKeptValues": layers}))
+}
+
+/// At most `MAX_LISTED_NAMES` names, then "and N more".
+fn capped(names: &[String]) -> Value {
+    let mut v: Vec<Value> = names
+        .iter()
+        .take(MAX_LISTED_NAMES)
+        .map(|n| json!(n))
+        .collect();
+    if names.len() > MAX_LISTED_NAMES {
+        v.push(json!(format!(
+            "and {} more",
+            names.len() - MAX_LISTED_NAMES
+        )));
+    }
+    Value::Array(v)
+}
+
+fn publish_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
+    let (id, name) = host
+        .project()
+        .map(|p| (p.manifest.id.clone(), p.manifest.name.clone()))
+        .ok_or("Only a project can publish a design system. Open one with open_file.")?;
+    let store = host.store().clone();
+    let req = PublishRequest {
+        name: a.str("name"),
+        prefix: a.str("prefix"),
+        description: a.str("description"),
+        notes: a.str("notes"),
+    };
+    let ed = host.editor();
+    let r = design_systems::publish(&store, ed, &id, &name, &req)?;
+    ed.status = r.message();
+    host.save()?;
+    let s = &r.system;
+    text(json!({
+        "id": s.id, "name": s.name, "prefix": format!("--{}-", s.prefix), "version": s.release,
+        "added": capped(&r.added), "changed": capped(&r.changed), "removed": capped(&r.removed),
+        "filesToUpdate": r.users,
+    }))
+}
+
+/// A `var(--x)` naming a token of a design system the file doesn't use would silently do
+/// nothing, so say which system to use instead.
+fn check_system_vars(host: &mut dyn Host, args: &Value) -> Result<(), String> {
+    let mut names = Vec::new();
+    collect_vars(args, &mut names);
+    let ed = host.editor();
+    names.retain(|n| ed.tokens.by_css_name(n).is_none());
+    if names.is_empty() {
+        return Ok(());
+    }
+    let used: HashSet<String> = ed.tokens.systems().iter().map(|s| s.id.clone()).collect();
+    let systems = Registry::in_store(host.store()).list();
+    for n in &names {
+        let bare = n.trim_start_matches("--");
+        let owner = systems
+            .iter()
+            .filter(|p| bare.starts_with(&format!("{}-", p.prefix)))
+            .max_by_key(|p| p.prefix.len());
+        if let Some(p) = owner
+            && !used.contains(&p.id)
+        {
+            return Err(format!(
+                "`{n}` is a token of the {} design system, which the open file doesn't use. \
+                 Call use_design_system({{\"id\": \"{}\"}}), then retry.",
+                p.name, p.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every `var(--name)` in the strings of `v`.
+fn collect_vars(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            let mut rest = s.as_str();
+            while let Some(i) = rest.find("var(") {
+                rest = &rest[i + 4..];
+                let name: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                    .collect();
+                if name.starts_with("--") {
+                    out.push(name);
+                }
+            }
+        }
+        Value::Array(list) => list.iter().for_each(|x| collect_vars(x, out)),
+        Value::Object(m) => m.values().for_each(|x| collect_vars(x, out)),
+        _ => {}
+    }
 }
 
 /// Case-insensitive glob with `*`, anchored at both ends.
