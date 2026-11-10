@@ -123,7 +123,7 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             .desired_width(f32::INFINITY),
     );
     ui.add_space(6.0);
-    let found: Vec<LinkedComponent> = search(ed, &a.query).into_iter().cloned().collect();
+    let found = search(ed, &a.query);
     if found.is_empty() {
         ui.label(
             RichText::new(format!("No components match “{}”.", a.query.trim()))
@@ -221,13 +221,7 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             }
         });
     // Drop thumbnails of components the file no longer has.
-    let ids: Vec<&str> = ed
-        .tokens
-        .components()
-        .iter()
-        .map(|c| c.id.as_str())
-        .collect();
-    a.thumbs.retain(|id, _| ids.contains(&id.as_str()));
+    a.thumbs.retain(|id, _| ed.tokens.component(id).is_some());
     if let Some(id) = insert_id {
         insert(ed, &id);
     }
@@ -246,7 +240,7 @@ fn on_canvas(ctx: &egui::Context, canvas: egui::Rect, p: egui::Pos2) -> bool {
 pub fn drag(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState, canvas: egui::Rect) {
     let a = &mut st.assets;
     let Some(id) = a.dragging.clone() else { return };
-    let Some(c) = ed.tokens.component(&id).cloned() else {
+    let Some(c) = ed.tokens.component(&id) else {
         a.dragging = None;
         return;
     };
