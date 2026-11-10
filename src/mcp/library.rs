@@ -10,9 +10,9 @@ use crate::editor::Editor;
 use crate::geom::{V2, v2};
 use crate::library::{LibItem, Library};
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::PathBuf;
 
-/// Tools that work without an open project.
 const GLOBAL: [&str; 2] = ["list_library_items", "update_library_items"];
 
 pub fn definitions() -> Vec<Value> {
@@ -21,8 +21,8 @@ pub fn definitions() -> Vec<Value> {
     let mut v = vec![
         tool(
             "list_library_items",
-            "Lists the user's personal library: reusable shapes shared by every project, the \
-             same items as the app's Library tab. Each item has id, name, size and layer count. \
+            "Lists reusable shapes from the app's Library tab, shared across projects. \
+             Each item has id, name, size and layer count. \
              Works without an open project.",
             json!({}),
             &[],
@@ -30,8 +30,8 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "add_library_item",
-            "Saves copies of layers to the personal library as one item, like Add selection in \
-             the Library tab. The layers stay on the canvas. Instances become plain copies. \
+            "Saves copies of layers to the personal library as one item. \
+             The layers stay on the canvas. Instances become plain copies. \
              The name defaults to the first layer's. Returns the item.",
             json!({
                 "nodeIds": ids("Layers to save, on one page."),
@@ -76,7 +76,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "import_excalidraw",
-            "Imports an Excalidraw file, like File › Import or dropping it on the canvas. Give \
+            "Imports an Excalidraw file. Give \
              `path` (a .excalidraw or .excalidrawlib file) or `data` (its JSON, as a string or \
              object). A scene lands on the page as one undo step: shapes, text, arrows with \
              their bindings, freehand lines and images, with the hand-drawn look. It is \
@@ -119,7 +119,6 @@ pub(super) fn is_global(name: &str, a: &Args) -> bool {
                 || source(a).is_ok_and(|(json, _)| is_library(&json))))
 }
 
-/// Run a call [`is_global`] accepts.
 pub(super) fn call_global(host: &mut dyn Host, name: &str, a: &Args) -> ToolResult {
     match name {
         "list_library_items" => list_items(host),
@@ -160,19 +159,24 @@ fn find_item(lib: &Library, key: &str) -> Result<usize, String> {
     if let Some(i) = lib.items.iter().position(|x| x.id == key) {
         return Ok(i);
     }
-    let named: Vec<usize> = (lib.items.iter().enumerate())
+    let mut named = lib
+        .items
+        .iter()
+        .enumerate()
         .filter(|(_, x)| x.name.eq_ignore_ascii_case(key))
-        .map(|(i, _)| i)
-        .collect();
-    match named[..] {
-        [i] => Ok(i),
-        [] => Err(format!(
+        .map(|(i, _)| i);
+    let Some(index) = named.next() else {
+        return Err(format!(
             "no library item `{key}`; call list_library_items for ids"
-        )),
-        _ => Err(format!(
-            "{} library items are named `{key}`; pass an id from list_library_items",
-            named.len()
-        )),
+        ));
+    };
+    let count = 1 + named.count();
+    if count > 1 {
+        Err(format!(
+            "{count} library items are named `{key}`; pass an id from list_library_items"
+        ))
+    } else {
+        Ok(index)
     }
 }
 
@@ -186,22 +190,20 @@ fn list_items(host: &mut dyn Host) -> ToolResult {
 fn update_items(host: &mut dyn Host, a: &Args) -> ToolResult {
     let lib = host.library();
     // Check every update first, so a bad one changes nothing.
-    let mut plan = Vec::new();
-    let mut ids: Vec<String> = Vec::new();
+    let mut plan: Vec<(String, Option<&str>, bool)> = Vec::new();
     for (i, u) in a.arr("updates")?.iter().enumerate() {
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let at = find_item(lib, u.req_str("itemId")?).map_err(|e| format!("updates[{i}]: {e}"))?;
-        let id = lib.items[at].id.clone();
-        if ids.contains(&id) {
+        let id = &lib.items[at].id;
+        if plan.iter().any(|(planned_id, _, _)| planned_id == id) {
             return Err(format!("updates[{i}]: the item is already in this call"));
         }
         let delete = u.get("delete").and_then(Value::as_bool) == Some(true);
-        let name = u.str("name").filter(|n| !n.is_empty()).map(String::from);
+        let name = u.str("name").filter(|n| !n.is_empty());
         if !delete && name.is_none() {
             return Err(format!("updates[{i}]: pass `name` or `delete: true`"));
         }
-        ids.push(id.clone());
-        plan.push((id, name, delete));
+        plan.push((id.clone(), name, delete));
     }
     let (mut renamed, mut removed) = (Vec::new(), Vec::new());
     for (id, name, delete) in plan {
@@ -209,7 +211,7 @@ fn update_items(host: &mut dyn Host, a: &Args) -> ToolResult {
             lib.items.retain(|x| x.id != id);
             removed.push(id);
         } else if let (Some(n), Some(it)) = (name, lib.items.iter_mut().find(|x| x.id == id)) {
-            it.name = n;
+            it.name = n.into();
             renamed.push(item_json(it));
         }
     }
@@ -227,11 +229,11 @@ fn add_item(host: &mut dyn Host, a: &Args) -> ToolResult {
     let ids: Vec<_> = (ids.iter().copied())
         .filter(|id| !doc.ancestors(*id).iter().any(|p| ids.contains(p)))
         .collect();
-    let name = match a.str("name").filter(|n| !n.is_empty()) {
-        Some(n) => n.to_string(),
-        None => doc.get(ids[0]).map_or("Item".into(), |n| n.name.clone()),
-    };
-    let item = LibItem::from_selection(doc, &ids, &name).ok_or("those layers have no size")?;
+    let name = a
+        .str("name")
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| doc.get(ids[0]).map_or("Item", |n| n.name.as_str()));
+    let item = LibItem::from_selection(doc, &ids, name).ok_or("those layers have no size")?;
     let v = item_json(&item);
     let lib = host.library();
     lib.items.push(item);
@@ -239,7 +241,6 @@ fn add_item(host: &mut dyn Host, a: &Args) -> ToolResult {
     text(v)
 }
 
-/// Where the center of `w` x `h` content goes on a page: at x/y, else in free space.
 fn target(ed: &Editor, page: usize, a: &Args, w: f64, h: f64) -> V2 {
     match (a.num("x"), a.num("y")) {
         (Some(x), Some(y)) => v2(x, y),
@@ -276,11 +277,11 @@ fn insert_item(host: &mut dyn Host, a: &Args) -> ToolResult {
 }
 
 /// The Excalidraw JSON from `path` or `data`, and a name for it.
-fn source(a: &Args) -> Result<(String, String), String> {
+fn source<'a>(a: &Args<'a>) -> Result<(Cow<'a, str>, String), String> {
     if let Some(d) = a.get("data") {
         let s = match d {
-            Value::String(s) => s.clone(),
-            v => v.to_string(),
+            Value::String(s) => Cow::Borrowed(s.as_str()),
+            v => Cow::Owned(v.to_string()),
         };
         return Ok((s, "Excalidraw".into()));
     }
@@ -298,7 +299,7 @@ fn source(a: &Args) -> Result<(String, String), String> {
     let name = path
         .file_stem()
         .map_or("Excalidraw".into(), |s| s.to_string_lossy().to_string());
-    Ok((s, name))
+    Ok((Cow::Owned(s), name))
 }
 
 fn is_library(json: &str) -> bool {
@@ -318,9 +319,9 @@ fn import_library(host: &mut dyn Host, json: &str) -> ToolResult {
 
 fn import_into_page(host: &mut dyn Host, a: &Args) -> ToolResult {
     let (json, name) = source(a)?;
-    let doc = crate::io::excalidraw::import_scene(&json)?;
+    let mut doc = crate::io::excalidraw::import_scene(&json)?;
     let nodes: Vec<_> = (doc.paint_order().into_iter())
-        .filter_map(|id| doc.get(id).cloned())
+        .filter_map(|id| doc.nodes.remove(&id))
         .collect();
     if nodes.is_empty() {
         return Err("the scene has no elements".into());
@@ -343,7 +344,6 @@ fn import_into_page(host: &mut dyn Host, a: &Args) -> ToolResult {
     }))
 }
 
-/// A library into the personal library; a scene into a new project (createFile).
 fn import_as_file_or_library(host: &mut dyn Host, a: &Args) -> ToolResult {
     let (json, stem) = source(a)?;
     if is_library(&json) {

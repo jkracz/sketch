@@ -129,9 +129,10 @@ impl Host for SessionHost {
         })
     }
     fn library(&mut self) -> &mut crate::library::Library {
-        let path = crate::library::Library::path_in(&self.session.store.root);
-        self.library
-            .get_or_insert_with(|| crate::library::Library::load(&path))
+        self.library.get_or_insert_with(|| {
+            let path = crate::library::Library::path_in(&self.session.store.root);
+            crate::library::Library::load(&path)
+        })
     }
 }
 
@@ -3886,7 +3887,7 @@ fn clone_subtree(
 }
 
 /// A free spot for a new top-level frame: right of the existing artboards, 80 px apart.
-fn free_spot(doc: &Document, w: f64) -> V2 {
+pub(super) fn free_spot(doc: &Document, w: f64) -> V2 {
     let rects: Vec<Rect> = doc
         .root
         .iter()
