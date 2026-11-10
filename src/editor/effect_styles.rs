@@ -63,17 +63,8 @@ impl Editor {
         {
             let mut tx = self.tx();
             for id in ids {
-                let Some(n) = tx.node_mut(*id) else { continue };
-                let Some(style) = n.effect_style.take() else {
-                    continue;
-                };
-                let Some(s) = tokens.effect_style(&style) else {
-                    continue;
-                };
-                for (i, e) in s.effects.iter().enumerate() {
-                    if let Some(t) = e.color_token.as_ref().filter(|t| tokens.get(t).is_some()) {
-                        n.tokens.insert(TokenProp::EffectColor(i), t.clone());
-                    }
+                if let Some(n) = tx.node_mut(*id) {
+                    tokens.detach_effect_style_from(n);
                 }
             }
         }

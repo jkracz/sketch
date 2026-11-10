@@ -50,7 +50,11 @@ Apply one with class=\"heading-l\" in write_html or {\"textStyle\": \"heading-l\
 update_styles; create_text_styles and set_text_styles manage them.
 - Effect styles name a list of shadows and blurs, like Elevation/2. get_tokens lists them as \
 CSS variables. Apply one with box-shadow: var(--elevation-2) in write_html or \
-{\"effectStyle\": \"elevation-2\"} in update_styles.
+{\"effectStyle\": \"elevation-2\"} in update_styles; create_effect_styles and \
+set_effect_styles manage them. {\"textStyle\": \"none\"} or {\"effectStyle\": \"none\"} \
+detaches a layer. set_effects edits one layer's effects, including hiding one.
+- Modes such as Light and Dark give each token a value per mode. create_modes and set_modes \
+add, rename and remove them; a frame picks one with {\"mode\": \"Dark\"} in update_styles.
 - Components: create_component makes a main from layers; place instances of it with \
 <x-sketch-instance component=\"Name\"/> in write_html. Edits to an instance's layers are \
 overrides; reset_overrides undoes them and detach_instances turns instances into plain layers. \
@@ -351,7 +355,9 @@ fn core_definitions() -> Vec<Value> {
         tool(
             "get_node_info",
             "Details of one node: type, name, size, visibility, lock state, parent, children ids, \
-             text content, x/y (relative to parent) and worldX/worldY. Errors if it doesn't exist.\n\
+             text content, x/y (relative to parent) and worldX/worldY. `effects` lists the \
+             layer's shadows and blurs, hidden ones included (see set_effects). Errors if it \
+             doesn't exist.\n\
              - A main component has component: true and instanceCount.\n\
              - An instance has instanceOf (its component's name) and, for the file's own \
              components, mainComponentId. A layer inside one has instanceRootId. overrides lists \
@@ -608,7 +614,8 @@ fn core_definitions() -> Vec<Value> {
              text layers; keys after it override single fields. effectStyle: \"elevation-2\" gives a \
              layer an effect style's shadows and blurs, as does boxShadow: \"var(--elevation-2)\". It \
              wins over shadow and blur values in the same update; setting one by value without it \
-             detaches the style. mode: \"Dark\" makes frames and \
+             detaches the style. textStyle: \"none\" or effectStyle: \"none\" detaches the \
+             layer from its style and keeps what it shows. mode: \"Dark\" makes frames and \
              their children show tokens in that mode (\"inherit\" clears it). Hand-drawn keys: sketch, \
              roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
              ignoredStyles.",
@@ -709,8 +716,8 @@ fn core_definitions() -> Vec<Value> {
         tool(
             "get_tokens",
             "Lists the project's design tokens (colors, spacing, typography...), grouped by \
-             type, and its text styles (`class` and one line of CSS) and effect styles (`var` \
-             and one line of CSS) in short form. Tokens and styles belong to the project, so \
+             type, and its text styles (`class` and one line of CSS) and effect styles (`var`, \
+             one line of CSS and the `effects` list set_effect_styles takes) in short form. Tokens and styles belong to the project, so \
              every page shares them. By default only the \
              file's own, plus one line per design system the file uses; pass `system` to list \
              a design system's. Tokens can have a value per mode (`modes` lists the file's, \
@@ -881,6 +888,7 @@ fn core_definitions() -> Vec<Value> {
         ),
     ];
     all.extend(components::definitions());
+    all.extend(super::styles::definitions());
     all
 }
 
@@ -972,6 +980,13 @@ overrides that field on the layer; get_computed_styles shows textStyle and
 textStyleOverrides. create_text_styles adds styles and set_text_styles edits or deletes them;
 editing a style updates every layer that uses it.
 
+Modes: a file has one or more token modes (Light and Dark by default); get_tokens lists them
+and the first is the default. create_modes adds modes by name, and set_modes renames them
+(newName) or removes them (delete: true, which drops their values; removing the first makes
+the next the default). Give tokens a value per mode with `modes` in create_tokens and
+set_tokens, e.g. {\"Dark\": \"#111111\"}. A frame shows a mode for itself and its children with
+{mode: \"Dark\"} in update_styles or data-theme=\"dark\" in write_html.
+
 Effect styles: a style names a list of shadows and blurs, such as Elevation/2. A shadow's color
 is a value or var(--token). get_tokens lists them as a variable and one line of CSS. Give a
 layer the whole list with box-shadow: var(--elevation-2) in write_html (text-shadow on text), or
@@ -983,7 +998,22 @@ inset shadows); write_html takes that as effect-style. Vector shapes export as i
 their shadows as filter values, without the style. effectStyle wins over
 shadow and blur values set beside it. Setting a shadow or blur by value without it detaches the
 style and keeps the rest.
-Editing a style in the app updates every layer that uses it.
+create_effect_styles makes styles and set_effect_styles renames, edits or deletes them;
+editing a style updates every layer that uses it. Both take `effects`, a list of
+{type, x, y, blur, spread, color, visible} with type drop-shadow, inner-shadow, layer-blur or
+background-blur, and get_tokens returns each style's list in that form. Styles hold no
+per-mode values: for a shadow that changes in Dark, make a color token with a Dark value and
+use var(--token) as the color. An elevation scale:
+  create_tokens [{type: color, name: --shadow, value: \"#0000001a\", modes: {Dark: \"#00000066\"}}]
+  create_effect_styles [{name: \"Elevation/1\", effects: [{type: \"drop-shadow\", y: 1, blur: 2,
+    color: \"var(--shadow)\"}]}, {name: \"Elevation/2\", effects: [{type: \"drop-shadow\", y: 4,
+    blur: 8, color: \"var(--shadow)\"}]}, ...]
+{effectStyle: \"none\"} in update_styles detaches a layer and keeps its effects and shadow
+color tokens; {textStyle: \"none\"} does the same for a text style.
+
+Layer effects: get_node_info lists a layer's `effects` in the same form, hidden ones included,
+and set_effects replaces the list. CSS can't say an effect is hidden, so to hide one shadow
+pass the list back with that shadow's visible: false.
 
 Design systems: a project can publish its tokens for other projects to use. Load only what the
 task needs: list_design_systems gives one summary per system; get_design_system returns one
