@@ -97,17 +97,15 @@ impl Editor {
                 let gone = t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles);
                 (gone, t.replace_components(&p.id, p.linked_components()))
             },
-            // This page's instances in the same step, so undo brings back layers the update
-            // removed with their overrides.
+            // Undo must restore removed layers and their overrides in the same step.
             |ed| {
-                // New token values first, or the commit would count bound layers that still
-                // show old ones as edited by hand and unbind them.
+                // Write token values before commit mistakes stale values for hand edits.
                 ed.write_stale_values();
                 let roots = ed.linked_roots(&ed.doc);
                 ed.sync_instances(&roots);
             },
         );
-        // Other pages now, so the update is saved whole and not when each page is next shown.
+        // Other pages now, so the next save writes the whole update.
         self.sync_all_instances();
         let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
         let comp_ids: Vec<&str> = gone_components.iter().map(|c| c.id.as_str()).collect();
@@ -146,7 +144,7 @@ impl Editor {
             .ok_or_else(|| "This file doesn't use that design system.".to_string())
     }
 
-    /// Instance roots on any page linked to these design system components.
+    /// Instances of these design system components on every page.
     fn instances_of(&self, ids: &[&str]) -> usize {
         (0..self.pages.len())
             .map(|i| {

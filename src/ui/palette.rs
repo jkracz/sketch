@@ -31,7 +31,6 @@ pub enum Command {
     Page(usize),
     Layer(NodeId),
     Library(String),
-    /// A design system component, by id.
     Component(String),
     ToggleLibrary,
     ToggleTokens,

@@ -505,7 +505,6 @@ fn node_icon(ed: &Editor, n: &crate::model::Node) -> Icon {
     if n.component {
         return Icon::Component;
     }
-    // An instance whose main is gone shows as the frame it acts as.
     let live = (n.instance.as_ref())
         .is_some_and(|l| ed.main_doc(l).is_some_and(|d| d.get(l.main).is_some()));
     if live && n.is_frame() {

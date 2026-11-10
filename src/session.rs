@@ -158,7 +158,7 @@ impl Session {
             }
         }
         if ed.meta_dirty {
-            // A design system's images, so its components still show once it's unpublished.
+            // Keep images available after the system is unpublished.
             let used = (ed.tokens.components().iter()).flat_map(|c| crate::assets::used_by(&c.doc));
             crate::assets::save_to_dir(&p.dir.join(crate::project::ASSETS_DIR), used)?;
         }

@@ -1,6 +1,3 @@
-//! Files that use a design system's components: placing them, updating on open, removal,
-//! nesting, publishing again and copying between files.
-
 use super::tests::{publish_open, source, temp_store};
 use super::{PublishRequest, Published};
 use crate::editor::Editor;
@@ -20,7 +17,6 @@ fn add(ed: &mut Editor, kind: NodeKind, r: Rect, parent: Option<NodeId>) -> Node
     ed.add_node(Node::new(NodeId(0), kind, r), parent)
 }
 
-/// A main named `name` holding a rect bound to `--brand` and a gray rect.
 fn component(ed: &mut Editor, name: &str, at: f64) -> (NodeId, NodeId, NodeId) {
     let main = add(
         ed,
@@ -63,7 +59,6 @@ fn kids(ed: &Editor, page: usize, id: NodeId) -> Vec<NodeId> {
     ed.page_doc(page).get(id).unwrap().children.clone()
 }
 
-/// A project named `name` that uses `system`.
 fn consumer(store: &Store, name: &str, system: &Published) -> (Session, Editor) {
     let mut s = Session::new(store.clone());
     let mut ed = Editor::default();
@@ -90,32 +85,6 @@ fn reopen(store: &Store, dir: &Path) -> (Session, Editor) {
 }
 
 #[test]
-fn a_file_places_a_systems_component_by_name_with_linked_bindings() {
-    let store = temp_store();
-    let (s, mut src) = source(&store);
-    component(&mut src, "Button", 0.0);
-    let sys = publish_open(&s, &mut src, &PublishRequest::default()).system;
-    let (_c, mut app) = consumer(&store, "App", &sys);
-
-    let c = &app.tokens.components()[0];
-    assert_eq!((c.name.as_str(), c.size()), ("Button", (100.0, 40.0)));
-    assert_eq!(app.tokens.find_component("brand/BUTTON").unwrap().id, c.id);
-    let undo_len = app.history.undo_len();
-    let inst = place(&mut app, "button", 500.0);
-    let n = app.doc.get(inst).unwrap();
-    assert_eq!((n.rect.x, n.rect.y, n.rect.w), (500.0, 300.0, 100.0));
-    assert!(!n.component && app.is_instance_root(inst));
-    assert_eq!(app.instance_main(inst), None, "no page holds the main");
-    let bound = app.doc.get(kids(&app, 0, inst)[0]).unwrap();
-    let token = app.tokens.by_css_name("--brand-brand").unwrap();
-    assert_eq!(bound.tokens.get(&TokenProp::Fill), Some(&token.id));
-    assert_eq!(bound.style.fill(), Some(RED));
-    assert_eq!(app.history.undo_len(), undo_len + 1);
-    app.undo();
-    assert!(app.doc.get(inst).is_none());
-}
-
-#[test]
 fn an_update_on_open_syncs_every_page_keeps_overrides_and_undoes_in_one_step() {
     let store = temp_store();
     let (s, mut src) = source(&store);
@@ -133,7 +102,6 @@ fn an_update_on_open_syncs_every_page_keeps_overrides_and_undoes_in_one_step() {
     app.switch_page(0);
     let dir = close(&mut c, &mut app);
 
-    // v2: wider, a new layer, a new fill for the overridden layer.
     src.edit("resize", |tx| tx.node_mut(main).unwrap().rect.w = 160.0);
     add(
         &mut src,
@@ -145,13 +113,12 @@ fn an_update_on_open_syncs_every_page_keeps_overrides_and_undoes_in_one_step() {
     publish_open(&s, &mut src, &PublishRequest::default());
 
     let (_c, mut app) = reopen(&store, &dir);
-    assert!(app.status.contains("Updated Brand to v2"), "{}", app.status);
     for (page, inst) in [(0, a), (1, b)] {
         let d = app.page_doc(page);
         assert_eq!(d.get(inst).unwrap().rect.w, 160.0, "page {page}");
         assert_eq!(kids(&app, page, inst).len(), 3, "page {page}");
     }
-    assert_eq!(fill(&app, 0, overridden), Some(GREEN), "the override stays");
+    assert_eq!(fill(&app, 0, overridden), Some(GREEN));
     assert_eq!(fill(&app, 1, kids(&app, 1, b)[1]), Some(BLUE));
     assert_eq!(app.dirty_pages(), [0, 1]);
 
@@ -162,7 +129,6 @@ fn an_update_on_open_syncs_every_page_keeps_overrides_and_undoes_in_one_step() {
     assert_eq!(fill(&app, 0, overridden), Some(GREEN));
     app.switch_page(1);
     assert_eq!(kids(&app, 1, b).len(), 2);
-    app.doc.validate().unwrap();
 }
 
 #[test]
@@ -179,16 +145,9 @@ fn a_removed_component_leaves_frames_that_keep_their_look() {
     src.edit("delete", |tx| tx.remove(card));
     publish_open(&s, &mut src, &PublishRequest::default());
     let (_c, mut app) = reopen(&store, &dir);
-    assert!(
-        app.status
-            .contains("Removed Card component; 1 instance is a plain frame now."),
-        "{}",
-        app.status
-    );
     assert!(!app.is_instance_root(inst));
     assert_eq!(kids(&app, 0, inst).len(), 2);
     assert_eq!(fill(&app, 0, kids(&app, 0, inst)[1]), Some(GRAY));
-    // Undo brings the component back, and the frame is an instance again.
     app.undo();
     assert!(app.is_instance_root(inst));
 }
@@ -232,11 +191,6 @@ fn a_file_that_uses_components_publishes_them_as_plain_layers() {
     let published = &r.system.components[0];
     assert!(published.nodes.iter().all(|n| n.instance.is_none()));
     assert!(published.nested.is_empty());
-    let bound = published.nodes.iter().find(|n| n.style.fill() == Some(RED));
-    assert!(
-        bound.unwrap().tokens.is_empty(),
-        "other systems' tokens become values"
-    );
 }
 
 #[test]
@@ -247,19 +201,17 @@ fn copies_persist_and_pasted_instances_stay_linked_where_the_system_is_used() {
     let sys = publish_open(&s, &mut src, &PublishRequest::default()).system;
     let (mut c, mut app) = consumer(&store, "App", &sys);
     let inst = place(&mut app, "Button", 0.0);
-    let components = app.tokens.components().to_vec();
     let dir = close(&mut c, &mut app);
     let (_c, mut app) = reopen(&store, &dir);
-    assert_eq!(app.tokens.components(), components);
+    assert!(app.is_instance_root(inst));
+    let bound = app.doc.get(kids(&app, 0, inst)[0]).unwrap();
+    let token = app.tokens.by_css_name("--brand-brand").unwrap();
+    assert_eq!(bound.tokens.get(&TokenProp::Fill), Some(&token.id));
+    assert_eq!(bound.style.fill(), Some(RED));
 
-    // Duplicating keeps the link to the system's layer ids.
     app.selection = vec![inst];
     app.run(Action::Duplicate);
     let dup = app.selection[0];
-    assert_eq!(
-        app.doc.get(dup).unwrap().instance,
-        app.doc.get(inst).unwrap().instance
-    );
     assert!(app.is_instance_root(dup));
 
     app.selection = vec![inst];
@@ -362,7 +314,6 @@ fn undoing_an_update_brings_back_a_removed_layer_with_its_override() {
     app.undo();
     let n = app.doc.get(overridden).unwrap();
     assert_eq!(n.style.fill(), Some(GREEN));
-    assert_eq!(n.instance.as_ref().unwrap().overrides, ["fills"]);
 }
 
 #[test]

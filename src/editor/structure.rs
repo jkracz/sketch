@@ -574,14 +574,13 @@ impl Editor {
         self.commit();
     }
 
-    /// Whether `id` is an instance whose main still exists, on a page or in a design system.
     pub fn is_instance_root(&self, id: NodeId) -> bool {
         (self.doc.get(id).and_then(|n| n.instance.as_ref()))
             .and_then(|l| self.main_doc(l)?.get(l.main))
             .is_some_and(|m| m.component)
     }
 
-    /// The page and id of an instance's main, when it is on a page of this file.
+    /// `None` for design system components, which have no page in this file.
     pub fn instance_main(&self, id: NodeId) -> Option<(usize, NodeId)> {
         let l = self.doc.get(id)?.instance.as_ref()?;
         let page = self.main_page(l)?;

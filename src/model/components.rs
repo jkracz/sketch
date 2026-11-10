@@ -1,10 +1,5 @@
-//! Components of the design systems a file uses.
-//!
-//! A file that uses a design system keeps a hidden, read-only copy of each component the
-//! system publishes, in its manifest beside the system's tokens. Instances link to a copy's
-//! layers by `<system>/<component>` plus the layer's id in the source file
-//! ([`InstanceLink::component`](super::InstanceLink::component)). Those ids stay the same
-//! when the system publishes again, so an update keeps the instances' overrides.
+//! Hidden, read-only copies of published components, stored in the file manifest.
+//! Instances use stable component and source layer ids to keep overrides across updates.
 
 use super::tokens::{Keyed, TokenSet, replace_linked};
 use super::{Document, Node, NodeId};
@@ -12,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A design system's component as a file that uses the system holds it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "Stored", into = "Stored")]
 pub struct LinkedComponent {
@@ -55,7 +49,6 @@ impl LinkedComponent {
         self.doc.root.first().copied()
     }
 
-    /// Width and height of the main.
     pub fn size(&self) -> (f64, f64) {
         (self.main().and_then(|m| self.doc.get(m))).map_or((0.0, 0.0), |m| (m.rect.w, m.rect.h))
     }
@@ -74,8 +67,7 @@ impl Keyed for LinkedComponent {
     }
 }
 
-/// How the manifest stores a copy: its layers main first, parents before children, so a save
-/// writes the same bytes each time.
+/// Store parents before children for repeatable saves.
 #[derive(Serialize, Deserialize)]
 struct Stored {
     id: String,
@@ -109,7 +101,7 @@ impl From<LinkedComponent> for Stored {
 }
 
 impl TokenSet {
-    /// Components of every design system this file uses, each system's by name.
+    /// Grouped by system, then sorted by name.
     pub fn components(&self) -> &[LinkedComponent] {
         &self.components
     }
@@ -133,14 +125,12 @@ impl TokenSet {
             })
     }
 
-    /// Restore component copies stored separately in the project manifest.
     pub fn with_components(mut self, components: Vec<LinkedComponent>) -> TokenSet {
         self.components = components;
         self
     }
 
-    /// Replace design system `system`'s components, keeping their place. Returns the ones
-    /// the new list doesn't have.
+    /// Keep the system's position in the list and return removed components.
     pub fn replace_components(
         &mut self,
         system: &str,

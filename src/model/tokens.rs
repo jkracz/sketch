@@ -436,7 +436,6 @@ pub struct TokenSet {
     pub(super) systems: Vec<SystemLink>,
     pub(super) styles: Vec<TextStyleDef>,
     pub(super) effect_styles: Vec<EffectStyleDef>,
-    /// Hidden copies of the components of the design systems this file uses.
     pub(super) components: Vec<LinkedComponent>,
 }
 
@@ -1774,7 +1773,7 @@ impl TokenSet {
         }
         self.detach_styles(id);
         self.detach_effect_styles(id);
-        // Its components have no system to update from, so their instances become frames.
+        // Removing the copies makes their instances act as plain frames.
         self.replace_components(id, Vec::new());
         self.systems.retain(|s| s.id != id);
     }

@@ -4107,7 +4107,6 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 )
             })?;
             *node.kind.text_mut().unwrap() = t.clone();
-            // Like editing on the canvas, so a component sync keeps the text.
             mark_override(node, "text");
             let len = t.chars().count();
             for s in &mut node.text_style.spans {
@@ -4126,7 +4125,6 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"updated": n}))
 }
 
-/// Record that `key` was edited on a layer inside an instance (`Editor::mark_overrides`).
 fn mark_override(n: &mut Node, key: &str) {
     if let Some(l) = &mut n.instance
         && !l.overrides.iter().any(|o| o == key)

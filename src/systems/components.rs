@@ -79,7 +79,6 @@ fn publish_one(ed: &Editor, doc: &Document, page: &str, main: NodeId) -> Publish
         }
         flatten_bindings(&mut n, &ed.tokens);
         if n.instance.as_ref().is_some_and(|l| l.component.is_some()) {
-            // Another system's component: plain layers, the same as its tokens.
             n.instance = None;
         }
         if let Some(l) = &n.instance {
@@ -106,9 +105,7 @@ fn publish_one(ed: &Editor, doc: &Document, page: &str, main: NodeId) -> Publish
     }
 }
 
-/// `c` as a file that uses `system` holds it: bindings and modes under linked ids. Its layers
-/// drop their links to nested components, whose looks they already hold, since instances
-/// sync from this copy alone.
+/// Use linked binding ids. Flatten nested instances so they sync through this copy alone.
 pub fn linked(system: &str, c: &PublishedComponent) -> LinkedComponent {
     let nodes = (c.nodes.iter().cloned())
         .map(|mut n| {

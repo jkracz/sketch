@@ -11,8 +11,7 @@ use crate::model::{Document, InstanceLink, LinkedComponent, Node, NodeId};
 use std::collections::HashSet;
 
 impl Editor {
-    /// Resolve the main's page relative to the page currently held in `doc`. None for a
-    /// design system's component.
+    /// `None` for design system components, which have no page in this file.
     pub fn main_page(&self, link: &InstanceLink) -> Option<usize> {
         if link.component.is_some() {
             return None;
@@ -23,7 +22,6 @@ impl Editor {
         }
     }
 
-    /// The document that holds the main: a page, or a design system component's copy.
     pub fn main_doc(&self, link: &InstanceLink) -> Option<&Document> {
         match &link.component {
             Some(c) => self.tokens.component(c).map(|c| &*c.doc),
@@ -103,8 +101,7 @@ impl Editor {
         }
     }
 
-    /// Instances in `doc` of design system components this file has: the outermost layer
-    /// linked to each.
+    /// Outermost layers linked to design system components this file has.
     pub(super) fn linked_roots(&self, doc: &Document) -> Vec<NodeId> {
         let comp = |id: Option<NodeId>| {
             id.and_then(|id| doc.get(id)?.instance.as_ref()?.component.as_deref())
@@ -231,7 +228,6 @@ impl Editor {
         for n in &mut out {
             let Some(l) = &mut n.instance else { continue };
             if let Some(c) = &l.component {
-                // Linked while this file uses that system; otherwise plain layers.
                 if self.tokens.component(c).is_none() {
                     n.instance = None;
                 }

@@ -89,7 +89,6 @@ impl Published {
         format!("--{}-{}", self.prefix, css_slug(&t.name))
     }
 
-    /// The components as a file that uses this system holds them.
     pub fn linked_components(&self) -> Vec<crate::model::LinkedComponent> {
         (self.components.iter())
             .map(|c| components::linked(&self.id, c))
@@ -140,7 +139,6 @@ impl Registry {
         read(&self.path(id)?)
     }
 
-    /// Register the images system `id`'s components use, for a file that uses it.
     pub fn load_assets(&self, id: &str) {
         if let Some(dir) = self.assets_dir(id) {
             crate::assets::load_dir(&dir);
