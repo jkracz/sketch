@@ -1734,7 +1734,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
     }
 }
 
-/// A file's copy of a component in published form: local ids, the main first.
+/// Restore local ids and put the main first, as published components require.
 fn unlinked_component(
     c: &crate::model::LinkedComponent,
     strip: impl Fn(&str) -> String,
@@ -2008,10 +2008,8 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     Ok(vec![Out::Text(out)])
 }
 
-/// Above this many components, `get_design_system` without filters returns the count.
 const MAX_SYSTEM_COMPONENTS: usize = 100;
 
-/// A system's components, filtered by `types` and by `namePattern` against the name.
 fn chosen_components<'a>(
     p: &'a Published,
     a: &Args,
@@ -2025,18 +2023,16 @@ fn chosen_components<'a>(
         .collect())
 }
 
-/// `120x40`, to two decimals.
 fn size_short(w: f64, h: f64) -> String {
     let r = |v: f64| (v * 100.0).round() / 100.0;
     format!("{}x{}", r(w), r(h))
 }
 
-/// The main's size. Published components list the main first.
+/// Published components list the main first.
 fn component_size(c: &PublishedComponent) -> (f64, f64) {
     c.nodes.first().map_or((0.0, 0.0), |m| (m.rect.w, m.rect.h))
 }
 
-/// `Name 120x40`, with the id to place it by when another component has the same name.
 fn component_line(p: &Published, c: &PublishedComponent) -> String {
     let (w, h) = component_size(c);
     let mut s = format!("{} {}", c.name, size_short(w, h));
@@ -2048,7 +2044,6 @@ fn component_line(p: &Published, c: &PublishedComponent) -> String {
     s
 }
 
-/// A component by name (ignoring case) or by id, local or linked.
 fn published_component<'a>(p: &'a Published, key: &str) -> Option<&'a PublishedComponent> {
     let key = key.trim();
     let id = key.strip_prefix(&format!("{}/", p.id)).unwrap_or(key);
@@ -2056,7 +2051,6 @@ fn published_component<'a>(p: &'a Published, key: &str) -> Option<&'a PublishedC
         .or_else(|| (p.components.iter()).find(|c| c.name.eq_ignore_ascii_case(key)))
 }
 
-/// One component's layers as JSX, the same as get_jsx shows an instance of it.
 fn component_tree(host: &mut dyn Host, p: &Published, key: &str, format: &str) -> ToolResult {
     let Some(c) = published_component(p, key) else {
         let names: Vec<&str> = p.components.iter().map(|c| c.name.as_str()).collect();
@@ -2234,8 +2228,6 @@ fn check_system_vars(host: &mut dyn Host, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Instances in `write_html` must name a component of a system the file uses. Point an agent
-/// that names another system's component at use_design_system.
 fn check_components(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     fn names(nodes: &[Html], out: &mut Vec<String>) {
         for n in nodes {
@@ -3194,7 +3186,7 @@ struct Builder<'t, 'a> {
     page_id: String,
     ignored: BTreeSet<String>,
     warnings: Vec<String>,
-    /// Design system component instances placed, in order.
+    /// In placement order.
     instances: Vec<NodeId>,
 }
 
@@ -3742,8 +3734,7 @@ impl Builder<'_, '_> {
 }
 
 impl Builder<'_, '_> {
-    /// An instance of a design system component the file uses, at the component's size
-    /// unless `own` sets one. Styles count as overrides, so syncs from the main keep them.
+    /// Styles override component properties across syncs.
     fn instance_el(
         &mut self,
         el: &Element,
@@ -3789,7 +3780,6 @@ impl Builder<'_, '_> {
     }
 }
 
-/// The `write_html` element that places a design system component by name.
 const INSTANCE_TAG: &str = "x-sketch-instance";
 
 /// Deep-copy a subtree under `parent` (keeping its world position plus `offset`). Returns the
@@ -4038,7 +4028,6 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     text(v)
 }
 
-/// A placed instance with its text layers, so a label can change with set_text_content.
 fn instance_json(ed: &Editor, page: usize, id: NodeId) -> Value {
     let doc = ed.page_doc(page);
     let texts: Vec<Value> = (doc.subtree(id).into_iter())
@@ -4058,7 +4047,6 @@ fn instance_json(ed: &Editor, page: usize, id: NodeId) -> Value {
     v
 }
 
-/// `<system>/<component>` for an instance of a design system component this file has.
 fn instance_of(ed: &Editor, n: Option<&Node>) -> Option<String> {
     let c = ed
         .tokens
@@ -4438,7 +4426,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
             node.text_style.spans.retain(|s| s.end > s.start);
             let size = (node.rect.w, node.rect.h);
             fit_text(tx, id, false);
-            // The new text's size, or the next sync from the main puts back the old one.
+            // Keep the measured size when the main syncs.
             let node = tx.node_mut(id).unwrap();
             if (node.rect.w, node.rect.h) != size {
                 mark_override(node, "size");
@@ -4450,8 +4438,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"updated": n}))
 }
 
-/// The override groups an edit changed on an instance layer, the groups `copy_props` syncs,
-/// so the next sync from the main keeps the edit.
+/// Group edits to match `copy_props`, so syncs preserve them.
 fn edited_overrides(before: &Node, after: &Node) -> Vec<&'static str> {
     let (b, a) = (&before.style, &after.style);
     let text = |n: &Node| match &n.kind {
@@ -4521,7 +4508,7 @@ fn edited_overrides(before: &Node, after: &Node) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = (changed.into_iter())
         .filter_map(|(k, c)| c.then_some(k))
         .collect();
-    // A token bound or unbound changes its group even when the value stays.
+    // Token bindings can change without changing the resolved value.
     for p in TokenProp::ALL {
         let k = crate::editor::structure::override_key(p.field());
         if before.tokens.get(&p) != after.tokens.get(&p) && !out.contains(&k) {

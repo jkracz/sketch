@@ -69,7 +69,6 @@ fn types_filter() -> Value {
     json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles and \"effectStyle\" for effect styles. Omit for all."})
 }
 
-/// `types_filter` plus `component`.
 fn design_system_types() -> Value {
     let mut v = types_filter();
     v["items"]["enum"]

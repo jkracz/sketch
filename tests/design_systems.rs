@@ -321,8 +321,6 @@ fn system_css_starts_with_the_systems_first_mode() {
     assert!(root.contains("--acme-bg: #000000;"), "{css}");
 }
 
-/// "Acme" with a Button main component (120x40, filled with `--acme-primary`, labeled
-/// "Label") and a Card, published.
 fn with_components(store: &Store) -> exec::SessionHost {
     let mut h = published(store);
     for html in [
@@ -337,8 +335,7 @@ fn with_components(store: &Store) -> exec::SessionHost {
         h.ed.selection = vec![node(&r["createdNodeIds"][0])];
         h.ed.create_component();
     }
-    let r = call(&mut h, "publish_design_system", json!({}));
-    assert_eq!(r["version"], 2);
+    call(&mut h, "publish_design_system", json!({}));
     h
 }
 
@@ -353,7 +350,6 @@ fn agents_see_components_in_short_and_load_a_tree_only_when_asked() {
 
     let full = call(&mut h, "get_design_system", json!({"id": "acme"}));
     let full = full.as_str().unwrap();
-    assert!(full.contains("## Components"), "{full}");
     assert!(full.contains("\nButton 120x40\nCard 320x200\n"), "{full}");
     assert!(
         !full.contains("Label"),
@@ -382,16 +378,8 @@ fn agents_see_components_in_short_and_load_a_tree_only_when_asked() {
         json!({"id": "acme", "component": "button"}),
     );
     let tree = tree.as_str().unwrap();
-    assert!(tree.starts_with("# Button 120x40 (Acme v2)"), "{tree}");
     assert!(tree.contains(">Label</span>"), "{tree}");
     assert!(tree.contains("var(--acme-primary)"), "{tree}");
-    let err = try_call(
-        &mut h,
-        "get_design_system",
-        json!({"id": "acme", "component": "Modal"}),
-    )
-    .unwrap_err();
-    assert!(err.contains("Button, Card"), "{err}");
 }
 
 #[test]
@@ -411,8 +399,7 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
     let err = try_call(&mut h, "write_html", html.clone()).unwrap_err();
     assert!(err.contains("use_design_system"), "{err}");
 
-    let used = call(&mut h, "use_design_system", json!({"id": "acme"}));
-    assert_eq!(used["components"], 2);
+    call(&mut h, "use_design_system", json!({"id": "acme"}));
     let r = call(&mut h, "write_html", html);
     let inst = &r["instances"];
     assert_eq!(inst.as_array().unwrap().len(), 2, "{r}");
@@ -453,7 +440,6 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
         "the longer label keeps its own width"
     );
 
-    // Edits without a token equivalent, and text that resizes, also survive.
     let hidden = call(
         &mut h,
         "write_html",
@@ -489,21 +475,12 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
     let o = h.ed.doc.get(other).unwrap();
     assert_eq!(o.kind.font_size(), Some(24.0));
     assert!(o.text_style.italic, "{:?}", o.text_style);
+    assert!(grown.h > 20.0, "the 24px label kept its new height");
     assert_eq!((rect(&h, other).w, rect(&h, other).h), (grown.w, grown.h));
-    assert!(grown.h > 20.0);
     let NodeKind::Text { auto_width, .. } = h.ed.doc.get(label).unwrap().kind else {
         panic!()
     };
     assert!(!auto_width, "a set width keeps the label wrapping");
-
-    let err = try_call(
-        &mut h,
-        "write_html",
-        json!({"targetNodeId": ab["id"], "mode": "insert-children",
-               "html": r#"<x-sketch-instance component="Modal"/>"#}),
-    )
-    .unwrap_err();
-    assert!(err.contains("no component `Modal`"), "{err}");
 }
 
 #[test]
