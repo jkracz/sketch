@@ -665,25 +665,10 @@ impl TokenSet {
         new: Vec<TextStyleDef>,
     ) -> Vec<(String, String)> {
         let ours = |s: &TextStyleDef| s.system.as_deref() == Some(system);
-        let gone: Vec<(String, String)> = self
-            .styles
-            .iter()
-            .filter(|s| ours(s) && !new.iter().any(|n| n.id == s.id))
+        let gone = super::tokens::replace_linked(&mut self.styles, ours, new);
+        (gone.iter())
             .map(|s| (s.id.clone(), format!(".{}", self.style_class(s))))
-            .collect();
-        self.styles
-            .retain(|s| !gone.iter().any(|(id, _)| *id == s.id));
-        for s in &mut self.styles {
-            if let Some(n) = new.iter().find(|n| n.id == s.id) {
-                *s = n.clone();
-            }
-        }
-        let fresh: Vec<TextStyleDef> = new
-            .into_iter()
-            .filter(|n| self.style(&n.id).is_none())
-            .collect();
-        self.styles.extend(fresh);
-        gone
+            .collect()
     }
 
     /// Turn a system's styles into local ones that keep their classes.

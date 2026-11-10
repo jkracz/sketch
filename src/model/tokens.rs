@@ -7,6 +7,7 @@
 //! token changes, and drops a binding when a field stops matching (see `editor/tokens.rs`).
 
 use super::document::Document;
+use super::effect_styles::EffectStyleDef;
 use super::node::{Color, Node, NodeId, NodeKind};
 use super::paint::{LetterSpacing, Paint};
 use super::text_styles::TextStyleDef;
@@ -328,13 +329,14 @@ impl<T: Keyed> Edit<T> {
     }
 }
 
-/// A change to one token, mode, text style or design system link.
+/// A change to one token, mode, text style, effect style or design system link.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenEdit {
     Token(Edit<Token>),
     Mode(Edit<Mode>),
     System(Edit<SystemLink>),
     Style(Box<Edit<TextStyleDef>>),
+    EffectStyle(Edit<EffectStyleDef>),
 }
 
 impl TokenEdit {
@@ -344,6 +346,7 @@ impl TokenEdit {
             TokenEdit::Mode(e) => e.changes(),
             TokenEdit::System(e) => e.changes(),
             TokenEdit::Style(e) => e.changes(),
+            TokenEdit::EffectStyle(e) => e.changes(),
         }
     }
 
@@ -363,6 +366,10 @@ impl TokenEdit {
                 true
             }
             (TokenEdit::Style(a), TokenEdit::Style(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            (TokenEdit::EffectStyle(a), TokenEdit::EffectStyle(b)) if a.id == b.id => {
                 a.after = b.after.clone();
                 true
             }
@@ -409,9 +416,10 @@ fn apply_list<'a, T: Keyed + 'a>(
     }
 }
 
-/// The project's tokens, modes and text styles, and the design systems it uses. Vector order
-/// is creation order, and duplicates sit after their source. Only the tokens are serialized
-/// here: the project manifest keeps the modes, system links and styles in fields of their own.
+/// The project's tokens, modes, text styles and effect styles, and the design systems it
+/// uses. Vector order is creation order, and duplicates sit after their source. Only the
+/// tokens are serialized here: the project manifest keeps the modes, system links and styles
+/// in fields of their own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "Vec<Token>", into = "Vec<Token>")]
 pub struct TokenSet {
@@ -420,6 +428,7 @@ pub struct TokenSet {
     pub(super) modes: Vec<Mode>,
     pub(super) systems: Vec<SystemLink>,
     pub(super) styles: Vec<TextStyleDef>,
+    pub(super) effect_styles: Vec<EffectStyleDef>,
 }
 
 impl Default for TokenSet {
@@ -429,6 +438,7 @@ impl Default for TokenSet {
             modes: Mode::defaults(),
             systems: Vec::new(),
             styles: Vec::new(),
+            effect_styles: Vec::new(),
         }
     }
 }
@@ -639,14 +649,14 @@ impl TokenSet {
         }
     }
 
-    /// No tokens. There may still be text styles.
+    /// No tokens. There may still be text and effect styles.
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
     }
 
-    /// No tokens and no text styles.
+    /// No tokens and no styles.
     pub fn is_blank(&self) -> bool {
-        self.tokens.is_empty() && self.styles.is_empty()
+        self.tokens.is_empty() && self.styles.is_empty() && self.effect_styles.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -817,6 +827,12 @@ impl TokenSet {
             return Err(format!(
                 "\"--{slug}\" is a token of the {} design system. Pick another name.",
                 sys.name
+            ));
+        }
+        if let Some(s) = self.effect_var_taken(&slug, "") {
+            return Err(format!(
+                "\"--{slug}\" belongs to the effect style \"{}\". Pick another name.",
+                s.name
             ));
         }
         if let TokenValue::Alias(target) = value
@@ -1018,6 +1034,7 @@ impl TokenSet {
     fn remove(&mut self, ids: &[String]) {
         let gone: HashSet<&str> = ids.iter().map(String::as_str).collect();
         self.flatten_style_aliases(&gone);
+        self.flatten_effect_style_aliases(&gone);
         let flat: Vec<Token> = self
             .tokens
             .iter()
@@ -1148,12 +1165,15 @@ impl TokenSet {
         n
     }
 
-    /// Whether a local token of `kind`, or any design system token, has `name`'s CSS name.
+    /// Whether a local token of `kind`, any design system token, or an effect style has
+    /// `name`'s CSS name.
     fn name_taken(&self, kind: TokenKind, name: &str) -> bool {
         let slug = css_slug(name);
-        self.tokens
-            .iter()
-            .any(|t| (t.kind == kind || t.system.is_some()) && self.slug(t) == slug)
+        self.effect_var_taken(&slug, "").is_some()
+            || self
+                .tokens
+                .iter()
+                .any(|t| (t.kind == kind || t.system.is_some()) && self.slug(t) == slug)
     }
 
     /// Capture tokens for pasting, here or in another project.
@@ -1307,37 +1327,58 @@ impl TokenSet {
     /// other mode adds a `[data-theme="dark"] { ... }` block. Each mode's block sets every
     /// token that differs in any mode, so a frame of one mode inside another turns back.
     pub fn stylesheet(&self, tokens: &[&Token], tailwind: bool) -> String {
-        let block = |selector: &str, list: &[&Token], mode: Option<&str>| {
+        self.stylesheet_with(tokens, &[], tailwind)
+    }
+
+    /// [`stylesheet`](Self::stylesheet) with the variables of `effects` after the tokens.
+    pub fn stylesheet_with(
+        &self,
+        tokens: &[&Token],
+        effects: &[&EffectStyleDef],
+        tailwind: bool,
+    ) -> String {
+        /// A variable, its value in a mode, and whether any mode changes what it shows.
+        type Decl<'a> = (String, Box<dyn Fn(Option<&str>) -> String + 'a>, bool);
+        let others: Vec<&str> = (self.choices().into_iter().skip(1))
+            .map(|m| m.name.as_str())
+            .collect();
+        let mut decls: Vec<Decl> = Vec::new();
+        for t in tokens.iter().copied() {
+            let varies = others.iter().any(|m| !self.varies_in(&[t], m).is_empty());
+            let value = Box::new(move |mode: Option<&str>| self.css_value_in(t, mode));
+            decls.push((self.css_name(t), value, varies));
+        }
+        for s in effects.iter().copied() {
+            let varies = self.effect_style_varies(s);
+            for (name, css) in self.effect_style_decls(s) {
+                decls.push((name, Box::new(move |_| css.clone()), varies));
+            }
+        }
+        let block = |selector: &str, varied: bool, mode: Option<&str>| {
             let mut s = format!("{selector} {{\n");
-            for t in list {
-                let v = self.css_value_in(t, mode);
-                s.push_str(&format!("  {}: {v};\n", self.css_name(t)));
+            for (name, value, _) in decls.iter().filter(|d| d.2 || !varied) {
+                s.push_str(&format!("  {name}: {};\n", value(mode)));
             }
             s.push_str("}\n");
             s
         };
         let theme = |name: &str| format!("[data-theme=\"{}\"]", css_slug(name));
-        let others: Vec<&str> = (self.choices().into_iter().skip(1))
-            .map(|m| m.name.as_str())
-            .collect();
-        let varied: Vec<&Token> = (tokens.iter().copied())
-            .filter(|t| others.iter().any(|m| !self.varies_in(&[*t], m).is_empty()))
-            .collect();
+        let any_varied = decls.iter().any(|d| d.2);
         let first = theme(self.default_mode());
-        let root = match (tailwind, varied.is_empty()) {
+        let root = match (tailwind, any_varied) {
             (true, _) => "@theme".to_string(),
-            (false, true) => ":root".to_string(),
-            (false, false) => format!(":root,\n{first}"),
+            (false, false) => ":root".to_string(),
+            (false, true) => format!(":root,\n{first}"),
         };
-        let mut s = block(&root, tokens, None);
-        if varied.is_empty() {
+        let mut s = block(&root, false, None);
+        if !any_varied {
             return s;
         }
         if tailwind {
-            s.push_str(&block(&first, &varied, None));
+            s.push_str(&block(&first, true, None));
         }
         for name in others {
-            s.push_str(&block(&theme(name), &varied, Some(name)));
+            s.push_str(&block(&theme(name), true, Some(name)));
         }
         s
     }
@@ -1345,7 +1386,9 @@ impl TokenSet {
     /// Replace `var(--token)` in styles with the token's value. A style whose whole value is
     /// one variable also gets a [`css::TOKEN_MARKER`] entry, which binds the node's property
     /// when `css::apply` reaches it. So does each shadow in a list that names a color token.
-    /// Unknown variables fall back to their default, if any.
+    /// `effectStyle`, or an effect property whose whole value is an effect style's variable,
+    /// becomes a [`css::EFFECT_STYLE_MARKER`] entry. Unknown variables fall back to their
+    /// default, if any.
     pub fn expand(&self, styles: &mut Vec<(String, String)>) {
         self.expand_in(styles, None);
     }
@@ -1356,6 +1399,11 @@ impl TokenSet {
         let mut bound = Vec::new();
         for (k, v) in styles.iter_mut() {
             if k.starts_with(css::TOKEN_MARKER) {
+                continue;
+            }
+            if let Some(marker) = self.effect_style_marker(k, v, mode) {
+                *k = format!("{}{k}", css::EFFECT_STYLE_MARKER);
+                *v = marker;
                 continue;
             }
             if let Some(t) = var_name(v).and_then(|n| self.by_css_name(n))
@@ -1407,9 +1455,11 @@ impl TokenSet {
                 return out;
             };
             let call = &tail[..=end];
-            let lit = var_name(call)
+            let name = var_name(call);
+            let lit = name
                 .and_then(|n| self.by_css_name(n))
-                .and_then(|t| Some(self.literal_css(t.kind, self.resolve_in(&t.id, mode)?)));
+                .and_then(|t| Some(self.literal_css(t.kind, self.resolve_in(&t.id, mode)?)))
+                .or_else(|| self.effect_var_literal(name?, mode));
             match (lit, call[4..end].split_once(',')) {
                 (Some(l), _) => out.push_str(&l),
                 (None, Some((_, fallback))) => out.push_str(fallback.trim()),
@@ -1429,12 +1479,14 @@ impl TokenSet {
         let modes = diff_list(&before.modes, &self.modes);
         let tokens = diff_list(&before.tokens, &self.tokens);
         let styles = diff_list(&before.styles, &self.styles);
+        let effects = diff_list(&before.effect_styles, &self.effect_styles);
         systems
             .into_iter()
             .map(TokenEdit::System)
             .chain(modes.into_iter().map(TokenEdit::Mode))
             .chain(tokens.into_iter().map(TokenEdit::Token))
             .chain(styles.into_iter().map(|e| TokenEdit::Style(Box::new(e))))
+            .chain(effects.into_iter().map(TokenEdit::EffectStyle))
             .collect()
     }
 
@@ -1461,6 +1513,11 @@ impl TokenSet {
             _ => None,
         });
         apply_list(&mut self.styles, styles, forward);
+        let effects = edits.iter().filter_map(|e| match e {
+            TokenEdit::EffectStyle(e) => Some(e),
+            _ => None,
+        });
+        apply_list(&mut self.effect_styles, effects, forward);
     }
 
     // ------------------------------------------------------------------ design systems
@@ -1504,6 +1561,7 @@ impl TokenSet {
         link: SystemLink,
         published: &[Token],
         styles: &[TextStyleDef],
+        effects: &[EffectStyleDef],
     ) -> Result<(), String> {
         if self.system(&link.id).is_some() {
             return Err(format!(
@@ -1524,7 +1582,14 @@ impl TokenSet {
             .filter(|s| taken.contains(s))
             .map(|s| format!("--{s}"))
             .collect();
+        clashes.extend(
+            (published.iter())
+                .map(|t| format!("{}-{}", link.prefix, css_slug(&t.name)))
+                .filter(|s| self.effect_var_taken(s, "").is_some())
+                .map(|s| format!("--{s}")),
+        );
         clashes.extend(self.style_clashes(&link.prefix, styles));
+        clashes.extend(self.effect_style_clashes(&link.prefix, effects));
         clashes.dedup();
         if !clashes.is_empty() {
             let more = clashes.len().saturating_sub(5);
@@ -1540,6 +1605,8 @@ impl TokenSet {
         }
         self.tokens.extend(Self::linked(&link.id, published));
         self.styles.extend(Self::linked_styles(&link.id, styles));
+        self.effect_styles
+            .extend(Self::linked_effect_styles(&link.id, effects));
         self.systems.push(link);
         Ok(())
     }
@@ -1554,6 +1621,7 @@ impl TokenSet {
         link: SystemLink,
         published: &[Token],
         styles: &[TextStyleDef],
+        effects: &[EffectStyleDef],
     ) -> Vec<(String, String)> {
         let Some(at) = self.systems.iter().position(|s| s.id == link.id) else {
             return Vec::new();
@@ -1580,6 +1648,8 @@ impl TokenSet {
         self.tokens.extend(fresh);
         let mut gone = gone;
         gone.extend(self.replace_linked_styles(&link.id, Self::linked_styles(&link.id, styles)));
+        let effects = Self::linked_effect_styles(&link.id, effects);
+        gone.extend(self.replace_linked_effect_styles(&link.id, effects));
         self.systems[at] = link;
         gone
     }
@@ -1593,7 +1663,8 @@ impl TokenSet {
             .filter(|t| t.system.as_deref() == Some(id))
             .map(|t| t.id.clone())
             .collect();
-        let styles = self.replace_linked_styles(id, Vec::new());
+        let mut styles = self.replace_linked_styles(id, Vec::new());
+        styles.extend(self.replace_linked_effect_styles(id, Vec::new()));
         self.remove(&ids);
         self.systems.retain(|s| s.id != id);
         ids.extend(styles.into_iter().map(|(id, _)| id));
@@ -1631,8 +1702,31 @@ impl TokenSet {
             }
         }
         self.detach_styles(id);
+        self.detach_effect_styles(id);
         self.systems.retain(|s| s.id != id);
     }
+}
+
+/// Swap one design system's items (those `ours` picks) for `new`, already linked. Items in
+/// both keep their place, new ones go at the end. Returns the ones `new` no longer has.
+pub(super) fn replace_linked<T: Keyed>(
+    list: &mut Vec<T>,
+    ours: impl Fn(&T) -> bool,
+    new: Vec<T>,
+) -> Vec<T> {
+    let has = |list: &[T], id: &str| list.iter().any(|t| t.key() == id);
+    let (gone, kept): (Vec<T>, Vec<T>) = std::mem::take(list)
+        .into_iter()
+        .partition(|t| ours(t) && !has(&new, t.key()));
+    *list = kept;
+    for t in list.iter_mut() {
+        if let Some(n) = new.iter().find(|n| n.key() == t.key()) {
+            *t = n.clone();
+        }
+    }
+    let fresh: Vec<T> = (new.into_iter()).filter(|n| !has(list, n.key())).collect();
+    list.extend(fresh);
+    gone
 }
 
 /// Fold `newer` into `older`, keeping the oldest before-state of each item.
@@ -2216,7 +2310,7 @@ mod tests {
             modes: Vec::new(),
         };
         let mut s = TokenSet::default();
-        s.attach(link, &src.publishable(), &[]).unwrap();
+        s.attach(link, &src.publishable(), &[], &[]).unwrap();
         s
     }
 
@@ -2474,7 +2568,7 @@ mod tests {
             modes: vec![Mode::new("s/d", "Dark"), Mode::new("s/l", "Light")],
         };
         let mut used = TokenSet::default();
-        used.attach(link, &src.publishable(), &[]).unwrap();
+        used.attach(link, &src.publishable(), &[], &[]).unwrap();
         used.detach_system("s");
         let id = linked_id("s", &bg);
         assert_eq!(used.resolve_in(&id, Some("Light")), Some(WHITE));
@@ -2504,7 +2598,7 @@ mod tests {
                 .collect(),
         };
         let mut s = TokenSet::default();
-        s.attach(link, &src.publishable(), &[]).unwrap();
+        s.attach(link, &src.publishable(), &[], &[]).unwrap();
         s
     }
 
@@ -2535,18 +2629,20 @@ mod tests {
     #[test]
     fn a_live_system_mode_wins_over_a_detached_one() {
         let mut s = TokenSet::default();
-        s.attach(bare_system("x", "Contrast"), &[], &[]).unwrap();
+        s.attach(bare_system("x", "Contrast"), &[], &[], &[])
+            .unwrap();
         s.rename_mode("dark", "Contrast").unwrap();
         s.detach_system("x");
         s.rename_mode("dark", "Dim").unwrap();
-        s.attach(bare_system("x", "Contrast"), &[], &[]).unwrap();
+        s.attach(bare_system("x", "Contrast"), &[], &[], &[])
+            .unwrap();
         assert_eq!(s.mode_name("x/m"), Some("Contrast"));
     }
 
     #[test]
     fn copies_keep_modes_another_system_brings() {
         let mut s = using_modes(&["Contrast", "Light"]);
-        s.attach(bare_system("t", "Sepia"), &[], &[]).unwrap();
+        s.attach(bare_system("t", "Sepia"), &[], &[], &[]).unwrap();
         let bg = s.by_css_name("--s-bg").unwrap().id.clone();
         let copy = s.duplicate(std::slice::from_ref(&bg));
         assert_eq!(s.resolve_in(&copy[0], Some("Sepia")), Some(WHITE));
@@ -2557,7 +2653,7 @@ mod tests {
     #[test]
     fn a_promoted_mode_stays_apart_from_the_systems() {
         let mut s = using_modes(&["Contrast", "Light"]);
-        s.attach(bare_system("t", "Sepia"), &[], &[]).unwrap();
+        s.attach(bare_system("t", "Sepia"), &[], &[], &[]).unwrap();
         let bg = s.by_css_name("--s-bg").unwrap().id.clone();
         s.duplicate(std::slice::from_ref(&bg));
         let sepia = s

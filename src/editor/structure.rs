@@ -66,6 +66,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
         inst.tokens.retain(|p, _| !color(p));
         let bound = main.tokens.iter().filter(|(p, _)| color(p));
         inst.tokens.extend(bound.map(|(p, t)| (*p, t.clone())));
+        inst.effect_style = main.effect_style.clone();
     }
     inst.style.rough = s.rough;
     match (&main.kind, &mut inst.kind) {
@@ -277,6 +278,7 @@ impl Editor {
         // 3. Sync token values before layout, since spacing and font size affect bounds.
         self.drop_broken_bindings();
         self.check_text_style_refs();
+        self.check_effect_style_refs();
         let resynced = self.resync_modes();
         let groups: HashSet<NodeId> = (resynced.iter())
             .flat_map(|id| self.doc.ancestors(*id))

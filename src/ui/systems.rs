@@ -100,6 +100,7 @@ impl SystemsUi {
             (Some(l), Some(p)) => {
                 p.tokens != ed.tokens.publishable()
                     || p.text_styles != ed.tokens.publishable_styles()
+                    || p.effect_styles != ed.tokens.publishable_effect_styles()
                     || p.link() != *l
             }
         }
@@ -153,8 +154,9 @@ pub fn header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
 /// Entries for the Tokens tab's More menu.
 pub fn menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     st.systems.refresh(ed);
-    let has_local =
-        !ed.tokens.publishable().is_empty() || !ed.tokens.publishable_styles().is_empty();
+    let has_local = !ed.tokens.publishable().is_empty()
+        || !ed.tokens.publishable_styles().is_empty()
+        || !ed.tokens.publishable_effect_styles().is_empty();
     let label = if ed.published.is_some() {
         "Publish changes…"
     } else {
@@ -369,17 +371,23 @@ pub fn dialog(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState) {
         ui.add_space(6.0);
         let prefix = d.prefix.trim();
         let styles = ed.tokens.publishable_styles();
+        let effects = ed.tokens.publishable_effect_styles();
         let tokens = ed.tokens.publishable();
-        let c = systems::changes(own.as_ref(), prefix, &tokens, &styles);
+        let c = systems::changes(own.as_ref(), prefix, &tokens, &styles, &effects);
         let summary = if own.is_none() {
-            let tokens = tokens.len();
-            match styles.len() {
-                0 => format!("Publishes {}.", plural(tokens, "token")),
-                n => format!(
-                    "Publishes {} and {}.",
-                    plural(tokens, "token"),
-                    plural(n, "text style")
-                ),
+            let mut parts = vec![plural(tokens.len(), "token")];
+            for (n, what) in [
+                (styles.len(), "text style"),
+                (effects.len(), "effect style"),
+            ] {
+                if n > 0 {
+                    parts.push(plural(n, what));
+                }
+            }
+            let last = parts.pop().unwrap_or_default();
+            match parts.is_empty() {
+                true => format!("Publishes {last}."),
+                false => format!("Publishes {} and {last}.", parts.join(", ")),
             }
         } else if c.is_empty() {
             "No token changes since the last publish.".to_string()

@@ -64,7 +64,7 @@ fn yes() -> bool {
 fn is_true(v: &bool) -> bool {
     *v
 }
-fn shadow_color() -> Color {
+pub(super) fn shadow_color() -> Color {
     Color::rgba(0, 0, 0, 64)
 }
 fn is_shadow_color(c: &Color) -> bool {
@@ -93,6 +93,19 @@ impl Effect {
             spread: 0.0,
             color: shadow_color(),
             visible: true,
+        }
+    }
+
+    /// This effect as another kind. A blur has no offset or color, so a shadow made from one
+    /// (or a blur from a shadow) starts from the kind's defaults.
+    pub fn with_kind(self, kind: EffectKind) -> Effect {
+        if kind.is_shadow() == self.kind.is_shadow() {
+            Effect { kind, ..self }
+        } else {
+            Effect {
+                visible: self.visible,
+                ..Effect::new(kind)
+            }
         }
     }
 

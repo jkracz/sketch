@@ -52,6 +52,7 @@ impl Session {
             .clone()
             .with_systems(p.manifest.systems.clone())
             .with_styles(p.manifest.text_styles.clone())
+            .with_effect_styles(p.manifest.effect_styles.clone())
             .with_modes(p.manifest.modes.clone());
         ed.published = p.manifest.published.clone();
         // Freshly loaded pages are saved by definition.
@@ -158,6 +159,7 @@ impl Session {
         p.manifest.tokens = ed.tokens.clone();
         p.manifest.systems = ed.tokens.systems().to_vec();
         p.manifest.text_styles = ed.tokens.styles().to_vec();
+        p.manifest.effect_styles = ed.tokens.effect_styles().to_vec();
         p.manifest.modes = ed.tokens.modes().to_vec();
         p.manifest.published = ed.published.clone();
         if wrote {

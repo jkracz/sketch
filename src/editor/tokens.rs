@@ -1,13 +1,13 @@
 //! Design tokens in the editor: undoable token edits, binding node properties to tokens, and
-//! keeping bound properties and text styles on every page in step with their tokens, each
-//! layer in the mode its frame picks.
+//! keeping bound properties, text styles and effect styles on every page in step with their
+//! tokens, each layer in the mode its frame picks.
 
 use super::Editor;
 use crate::history::Recording;
 use crate::model::{Node, NodeId, TokenClip, TokenProp, TokenSet};
 
 impl Editor {
-    /// Edit tokens or text styles as one undo step; all pages follow. `key` merges repeated edits.
+    /// Edit tokens or styles as one undo step; all pages follow. `key` merges repeated edits.
     pub fn edit_tokens<R>(
         &mut self,
         label: &str,
@@ -175,13 +175,14 @@ impl Editor {
     }
 
     fn is_stale(&self, doc: &crate::model::Document, n: &Node) -> bool {
-        if n.tokens.is_empty() && n.text_style_ref.is_none() {
+        if n.tokens.is_empty() && n.text_style_ref.is_none() && n.effect_style.is_none() {
             return false;
         }
         let mode = self.tokens.mode_at(doc, n.id);
         n.tokens.iter().any(|(prop, token)| {
             (self.tokens.resolve_in(token, mode)).is_some_and(|v| !prop.holds(n, &v))
         }) || self.style_is_stale(n, mode)
+            || self.effect_style_is_stale(n, mode)
     }
 
     fn write_token_values(&mut self, ids: &[NodeId]) {
@@ -209,6 +210,7 @@ impl Editor {
                     }
                 }
                 Self::write_style_values(&tokens, n, mode);
+                Self::write_effect_style_values(&tokens, n, mode);
             }
         }
         for id in ids {
@@ -668,7 +670,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        e.edit_tokens("use", None, |t| t.attach(link, &[], &[]))
+        e.edit_tokens("use", None, |t| t.attach(link, &[], &[], &[]))
             .unwrap();
         e.set_frame_mode(&[frame], Some("s/c"));
         assert_eq!(

@@ -6,7 +6,9 @@
 //! unit-testable on its own.
 
 use crate::geom::Camera;
-use crate::model::{Document, Mode, Node, NodeId, SystemLink, TextStyleDef, TokenSet};
+use crate::model::{
+    Document, EffectStyleDef, Mode, Node, NodeId, SystemLink, TextStyleDef, TokenSet,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -88,6 +90,9 @@ pub struct Manifest {
     /// Text styles, local ones and those of the design systems it uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_styles: Vec<TextStyleDef>,
+    /// Effect styles, local ones and those of the design systems it uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_styles: Vec<EffectStyleDef>,
     /// Token modes. A file saved before modes existed opens with one.
     #[serde(default = "Mode::single")]
     pub modes: Vec<Mode>,
@@ -116,6 +121,7 @@ impl Manifest {
             tokens: TokenSet::default(),
             systems: Vec::new(),
             text_styles: Vec::new(),
+            effect_styles: Vec::new(),
             modes: Mode::defaults(),
             published: None,
         }

@@ -7,7 +7,7 @@ use super::{UiState, c32, from32, section, title_text};
 use crate::editor::vector_ops::BoolOp;
 use crate::editor::{AppRequest, Editor};
 use crate::geom::v2;
-use crate::model::effects::{BoundEffect, edit_effects};
+use crate::model::effects::edit_effects;
 use crate::model::{
     Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, Effect, EffectKind, ImageMode,
     Join, LetterSpacing, Node, NodeId, NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign,
@@ -224,7 +224,7 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             separator(ui);
             layer(ui, ed, &ids, &first);
             separator(ui);
-            effects(ui, ed, &ids, &first);
+            effects(ui, ed, st, &ids, &first);
             if !matches!(
                 first.kind,
                 NodeKind::Text { .. }
@@ -1336,12 +1336,14 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
     mode_row(ui, ed, ids, first);
 }
 
-fn effects(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
+fn effects(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[NodeId], first: &Node) {
     let list = first.style.effects.clone();
+    let styled = ed.bound_effect_style(first).is_some();
     ui.horizontal(|ui| {
         ui.label(title_text("Effects"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("+").on_hover_text("Add effect").clicked() {
+            // A style owns the whole list, so there is nothing to add until it's detached.
+            if !styled && ui.small_button("+").on_hover_text("Add effect").clicked() {
                 apply(ed, "effects", ids, |n| {
                     edit_effects(n, |l| {
                         l.insert(0, (Effect::new(EffectKind::DropShadow), None))
@@ -1350,47 +1352,76 @@ fn effects(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
             }
         });
     });
+    super::effect_styles::inspector_row(ui, ed, st, ids, first);
+    if styled {
+        return;
+    }
     for (i, e) in list.iter().enumerate() {
-        ui.push_id(("effect", i), |ui| {
-            effect_row(ui, ed, ids, i, list.len(), e)
+        let prop = TokenProp::EffectColor(i);
+        let token = ed.bound_token(first, prop).map(|t| t.name.clone());
+        let change = ui.push_id(("effect", i), |ui| {
+            effect_fields(ui, ed, i, list.len(), e, token, |ui, ed| {
+                picker(ui, ed, ids, prop)
+            })
         });
+        // The color's token stays unless the color no longer matches it.
+        if let Some(change) = change.inner {
+            apply(ed, "effects", ids, |n| {
+                edit_effects(n, |l| change.apply(l, i, |(e, _)| e))
+            });
+        }
     }
 }
 
-fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usize, e: &Effect) {
-    // Keep the token binding unless the color no longer matches.
-    let set = |ed: &mut Editor, f: &dyn Fn(&mut Effect)| {
-        apply(ed, "effects", ids, |n| {
-            if let Some(slot) = n.style.effects.get_mut(i) {
-                f(slot);
+/// An edit to one effect of a list, from [`effect_fields`].
+pub(super) enum EffectChange {
+    Set(Box<dyn Fn(&mut Effect)>),
+    Remove,
+    /// Trade places with the effect at this index.
+    Swap(usize),
+}
+
+impl EffectChange {
+    /// Make the change to item `i` of `list`, whose effect `effect` picks out.
+    pub(super) fn apply<T>(
+        &self,
+        list: &mut Vec<T>,
+        i: usize,
+        effect: impl Fn(&mut T) -> &mut Effect,
+    ) {
+        if i >= list.len() {
+            return;
+        }
+        match self {
+            EffectChange::Set(f) => f(effect(&mut list[i])),
+            EffectChange::Remove => {
+                list.remove(i);
             }
-        });
-    };
-    let rearrange = |ed: &mut Editor, f: &dyn Fn(&mut Vec<BoundEffect>)| {
-        apply(ed, "effects", ids, |n| {
-            edit_effects(n, |l| {
-                if i < l.len() {
-                    f(l)
-                }
-            })
-        });
-    };
+            EffectChange::Swap(j) if *j < list.len() => list.swap(i, *j),
+            EffectChange::Swap(_) => {}
+        }
+    }
+}
+
+/// The controls of effect `i` of `count`, for a layer or an effect style. `token` names the
+/// token that owns a shadow's color, and `token_picker` draws the button that changes it.
+pub(super) fn effect_fields(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    i: usize,
+    count: usize,
+    e: &Effect,
+    token: Option<String>,
+    token_picker: impl FnOnce(&mut Ui, &mut Editor),
+) -> Option<EffectChange> {
+    let mut change = None;
+    let mut set = |f: Box<dyn Fn(&mut Effect)>| change = Some(EffectChange::Set(f));
+    let mut moved = None;
     ui.horizontal(|ui| {
         let kinds: Vec<(EffectKind, &str)> =
             EffectKind::ALL.iter().map(|k| (*k, k.label())).collect();
         if let Some(k) = combo(ui, "kind", e.kind, &kinds, 112.0) {
-            rearrange(ed, &|l| {
-                // A blur has no offset or color, so a shadow made from one gets the defaults.
-                let from = l[i].0;
-                l[i].0 = if k.is_shadow() == from.kind.is_shadow() {
-                    Effect { kind: k, ..from }
-                } else {
-                    Effect {
-                        visible: from.visible,
-                        ..Effect::new(k)
-                    }
-                };
-            });
+            set(Box::new(move |e| *e = e.with_kind(k)));
         }
         let (eye, tip) = if e.visible {
             (theme::Icon::Eye, "Hide effect")
@@ -1399,7 +1430,7 @@ fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usi
         };
         if icon_btn(ui, eye, false, tip) {
             let visible = !e.visible;
-            set(ed, &|e| e.visible = visible);
+            set(Box::new(move |e| e.visible = visible));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
@@ -1407,25 +1438,23 @@ fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usi
                 .on_hover_text("Remove effect")
                 .clicked()
             {
-                rearrange(ed, &|l| {
-                    l.remove(i);
-                });
+                moved = Some(EffectChange::Remove);
             }
         });
     });
-    let reorder = |ui: &mut Ui, ed: &mut Editor| {
+    let mut reorder = |ui: &mut Ui| {
         if count < 2 {
             return;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_enabled_ui(i + 1 < count, |ui| {
                 if icon_btn(ui, theme::Icon::ChevronDown, false, "Move down") {
-                    rearrange(ed, &|l| l.swap(i, i + 1));
+                    moved = Some(EffectChange::Swap(i + 1));
                 }
             });
             ui.add_enabled_ui(i > 0, |ui| {
                 if icon_btn(ui, theme::Icon::ChevronUp, false, "Move up") {
-                    rearrange(ed, &|l| l.swap(i, i - 1));
+                    moved = Some(EffectChange::Swap(i - 1));
                 }
             });
         });
@@ -1433,42 +1462,39 @@ fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usi
     if !e.kind.is_shadow() {
         ui.horizontal(|ui| {
             if let Some(v) = num_field(ui, ed, "Blur ", e.blur, 0.2, 0.0..=1000.0, 76.0) {
-                set(ed, &|e| e.blur = v);
+                set(Box::new(move |e| e.blur = v));
             }
-            reorder(ui, ed);
+            reorder(ui);
         });
-        return;
+        return moved.or(change);
     }
     ui.horizontal(|ui| {
         if let Some(c) = color_button(ui, ed, e.color) {
-            set(ed, &|e| e.color = c);
+            set(Box::new(move |e| e.color = c));
         }
-        let prop = TokenProp::EffectColor(i);
-        let bound = (ids.first())
-            .and_then(|id| ed.doc.get(*id))
-            .and_then(|n| ed.bound_token(n, prop));
-        match bound {
-            Some(t) => ui.label(RichText::new(t.name.as_str()).weak()),
+        match token {
+            Some(name) => ui.label(RichText::new(name).weak()),
             None => ui.label(RichText::new(e.color.to_hex()).monospace().weak()),
         };
-        picker(ui, ed, ids, prop);
-        reorder(ui, ed);
+        token_picker(ui, ed);
+        reorder(ui);
     });
     ui.horizontal(|ui| {
         let range = -1000.0..=1000.0;
         if let Some(v) = num_field(ui, ed, "X ", e.x, 0.2, range.clone(), 50.0) {
-            set(ed, &|e| e.x = v);
+            set(Box::new(move |e| e.x = v));
         }
         if let Some(v) = num_field(ui, ed, "Y ", e.y, 0.2, range.clone(), 50.0) {
-            set(ed, &|e| e.y = v);
+            set(Box::new(move |e| e.y = v));
         }
         if let Some(v) = num_field(ui, ed, "B ", e.blur, 0.2, 0.0..=1000.0, 50.0) {
-            set(ed, &|e| e.blur = v);
+            set(Box::new(move |e| e.blur = v));
         }
         if let Some(v) = num_field(ui, ed, "S ", e.spread, 0.2, range, 50.0) {
-            set(ed, &|e| e.spread = v);
+            set(Box::new(move |e| e.spread = v));
         }
     });
+    moved.or(change)
 }
 
 /// The token mode a frame shows. Auto follows the frame it sits in.

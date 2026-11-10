@@ -13,6 +13,7 @@ use egui::{Popup, PopupCloseBehavior, RichText, Ui};
 pub struct TokensUi {
     pub(super) search: String,
     pub(super) styles: super::text_styles::StylesUi,
+    pub(super) effect_styles: super::effect_styles::EffectStylesUi,
     /// Selected token ids, for the context menu's multi-token actions.
     selected: Vec<String>,
     /// The token whose fields are shown under its row.
@@ -42,6 +43,11 @@ impl TokensUi {
     /// Show this text style's fields under its row.
     pub fn open_style(&mut self, ed: &Editor, id: &str) {
         self.styles.open(ed, id);
+    }
+
+    /// Show this effect style's fields under its row.
+    pub fn open_effect_style(&mut self, ed: &Editor, id: &str) {
+        self.effect_styles.open(ed, id);
     }
 }
 
@@ -91,13 +97,15 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             }
             ui.separator();
             super::text_styles::add_entry(ui, ed, st);
+            super::effect_styles::add_entry(ui, ed, st);
         });
         let more = theme::icon_button(ui, Icon::More, 20.0, false).on_hover_text("More");
         Popup::menu(&more).show(|ui| {
             let all = ed.tokens.sorted();
             let styles: Vec<&crate::model::TextStyleDef> = ed.tokens.styles().iter().collect();
+            let effects: Vec<_> = ed.tokens.effect_styles().iter().collect();
             let sheet = |tailwind| {
-                let mut css = ed.tokens.stylesheet(&all, tailwind);
+                let mut css = ed.tokens.stylesheet_with(&all, &effects, tailwind);
                 css.push_str(&ed.tokens.style_sheet(&styles, tailwind));
                 css
             };
@@ -133,9 +141,9 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     if ed.tokens.is_blank() {
         ui.label(
             RichText::new(
-                "No tokens yet. Tokens are named colors and sizes that every page can share, \
-                 and text styles name a set of text settings. Add one with +, or use a \
-                 published design system from the menu.",
+                "No tokens yet. Tokens are named colors and sizes that every page can share. \
+                 Text styles name a set of text settings, and effect styles a set of shadows \
+                 and blurs. Add one with +, or use a published design system from the menu.",
             )
             .size(theme::SECONDARY)
             .color(p.secondary),
@@ -203,6 +211,8 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                 let system = sys.as_ref().map(|s| s.id.as_str());
                 let styles = super::text_styles::matching(ed, system, &search);
                 super::text_styles::section(ui, ed, st, &styles);
+                let effects = super::effect_styles::matching(ed, system, &search);
+                super::effect_styles::section(ui, ed, st, &effects);
             }
         });
 }
@@ -714,14 +724,43 @@ pub fn picker(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], prop: TokenProp) {
         return;
     };
     let bound = ed.bound_token(first, prop).cloned();
-    if bound.is_none() && ed.tokens.of_kind(prop.kind()).next().is_none() {
-        return;
+    // Values as the selected layer would show them.
+    let mode = (ids.first())
+        .and_then(|id| ed.tokens.mode_at(&ed.doc, *id))
+        .map(String::from);
+    match pick_token(ui, ed, prop, prop.kind(), mode.as_deref(), bound.as_ref()) {
+        Some(Pick::Token(t)) => ed.bind_token(ids, prop, &t),
+        Some(Pick::Detach) => ed.detach_token(ids, prop),
+        None => {}
     }
-    let tip = match &bound {
+}
+
+/// What the token picker was used for.
+#[derive(Debug, PartialEq)]
+pub(super) enum Pick {
+    /// Take this token, by id.
+    Token(String),
+    Detach,
+}
+
+/// The picker button and its popup, for anything that takes a token of `kind`. `bound` is the
+/// token it has now, and the list shows values in the mode named `mode`.
+pub(super) fn pick_token(
+    ui: &mut Ui,
+    ed: &Editor,
+    salt: impl egui::AsIdSalt,
+    kind: TokenKind,
+    mode: Option<&str>,
+    bound: Option<&Token>,
+) -> Option<Pick> {
+    if bound.is_none() && ed.tokens.of_kind(kind).next().is_none() {
+        return None;
+    }
+    let tip = match bound {
         Some(t) => format!("Token: {}", label(ed, t)),
         None => "Apply a token".into(),
     };
-    let button = ui.push_id(prop, |ui| {
+    let button = ui.push_id(salt, |ui| {
         theme::icon_button(ui, Icon::Token, 20.0, bound.is_some()).on_hover_text(tip)
     });
     let button = button.inner;
@@ -731,12 +770,14 @@ pub fn picker(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], prop: TokenProp) {
             d.insert_temp(search_id().with("focus"), true);
         });
     }
+    let mut pick = None;
     Popup::from_toggle_button_response(&button)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(190.0);
-            picker_list(ui, ed, ids, prop, bound.as_ref());
+            pick = picker_list(ui, ed, kind, mode, bound);
         });
+    pick
 }
 
 /// Only one picker is open at a time, so they share their search text.
@@ -746,11 +787,11 @@ fn search_id() -> egui::Id {
 
 fn picker_list(
     ui: &mut Ui,
-    ed: &mut Editor,
-    ids: &[NodeId],
-    prop: TokenProp,
+    ed: &Editor,
+    kind: TokenKind,
+    mode: Option<&str>,
     bound: Option<&Token>,
-) {
+) -> Option<Pick> {
     let p = theme::pal(ui);
     let mut search: String = ui.data_mut(|d| d.get_temp(search_id())).unwrap_or_default();
     // Before the field runs: Backspace on the last letter edits the search, it doesn't detach.
@@ -773,27 +814,20 @@ fn picker_list(
             .clicked()
             || (was_empty && ui.input(|i| i.key_pressed(egui::Key::Backspace))));
     if detach {
-        ed.detach_token(ids, prop);
         ui.close();
-        return;
+        return Some(Pick::Detach);
     }
     ui.separator();
-    // Values as the selected layer would show them.
-    let mode = (ids.first())
-        .and_then(|id| ed.tokens.mode_at(&ed.doc, *id))
-        .map(String::from);
-    let mode = mode.as_deref();
-    let list: Vec<Token> = ed
+    let list: Vec<&Token> = ed
         .tokens
-        .of_kind(prop.kind())
+        .of_kind(kind)
         .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value_in(t, mode)))
-        .cloned()
         .collect();
     if submitted && let Some(t) = list.first() {
-        ed.bind_token(ids, prop, &t.id);
         ui.close();
-        return;
+        return Some(Pick::Token(t.id.clone()));
     }
+    let mut pick = None;
     egui::ScrollArea::vertical()
         .id_salt("picker")
         .max_height(220.0)
@@ -818,7 +852,7 @@ fn picker_list(
                     ui.painter().rect_filled(dot, 3.0, c);
                 }
                 if r.clicked() {
-                    ed.bind_token(ids, prop, &t.id);
+                    pick = Some(Pick::Token(t.id.clone()));
                     ui.close();
                 }
             }
@@ -830,6 +864,7 @@ fn picker_list(
                 );
             }
         });
+    pick
 }
 
 /// Search matches the start of the value, the name, or any word in the name.
@@ -964,9 +999,12 @@ pub(super) mod tests {
         h.ed.bind_token(&[id], TokenProp::Fill, &token);
         let mut f = |ui: &mut Ui, ed: &mut Editor, _: &mut UiState| {
             let bound = ed.tokens.get(&token).cloned();
-            ui.push_id("list", |ui| {
-                picker_list(ui, ed, &[id], TokenProp::Fill, bound.as_ref())
+            let pick = ui.push_id("list", |ui| {
+                picker_list(ui, ed, TokenKind::Color, None, bound.as_ref())
             });
+            if pick.inner == Some(Pick::Detach) {
+                ed.detach_token(&[id], TokenProp::Fill);
+            }
         };
         h.step(vec![], &mut f);
         h.step(vec![typed("a")], &mut f);
