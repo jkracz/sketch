@@ -2432,9 +2432,11 @@ pub fn insert_subtrees_tx(
                 }
             }
         }
-        // Explicit page links bypass id remapping, even when they point back to this page.
+        // Explicit page links bypass id remapping, even when they point back to this page,
+        // and so do links to a design system's components.
         if let Some(l) = &mut c.instance
             && l.page.is_none()
+            && l.component.is_none()
         {
             match map.get(&l.main) {
                 Some(n) => l.main = *n,

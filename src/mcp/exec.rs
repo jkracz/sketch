@@ -1929,6 +1929,7 @@ fn use_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             p.name
         ));
     }
+    design_systems::Registry::in_store(host.store()).load_assets(&p.id);
     let ed = host.editor();
     ed.use_system(&p)?;
     ed.status = format!("Using {}.", p.name);

@@ -31,6 +31,8 @@ pub enum Command {
     Page(usize),
     Layer(NodeId),
     Library(String),
+    /// A design system component, by id.
+    Component(String),
     ToggleLibrary,
     ToggleTokens,
 }
@@ -165,6 +167,14 @@ pub fn entries(ed: &Editor, st: &UiState) -> Vec<Entry> {
             cmd: Command::Library(item.id.clone()),
         });
     }
+    for c in ed.tokens.components() {
+        let system = ed.tokens.system(&c.system).map_or("", |s| s.name.as_str());
+        out.push(Entry {
+            label: format!("Insert: {}", c.name),
+            detail: format!("{system} component"),
+            cmd: Command::Component(c.id.clone()),
+        });
+    }
     // Layers last: there can be many.
     for id in ed.doc.paint_order().into_iter().rev().take(500) {
         let n = ed.doc.get(id).unwrap();
@@ -209,6 +219,11 @@ pub fn run(ed: &mut Editor, st: &mut UiState, cmd: Command) {
                 let at = ed.camera.screen_to_world(ed.viewport * 0.5);
                 ed.insert_library_item(&item, at);
             }
+        }
+        Command::Component(id) => {
+            let (w, h) = ed.tokens.component(&id).map_or((0.0, 0.0), |c| c.size());
+            let at = ed.camera.screen_to_world(ed.viewport * 0.5) - crate::geom::v2(w, h) * 0.5;
+            ed.place_component(&id, at.round());
         }
         Command::ToggleLibrary => toggle_tab(st, SidebarTab::Library),
         Command::ToggleTokens => toggle_tab(st, SidebarTab::Tokens),

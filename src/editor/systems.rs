@@ -3,6 +3,7 @@
 //! versions come from `crate::systems`.
 
 use super::Editor;
+use crate::model::NodeId;
 use crate::systems::Published;
 use std::collections::HashSet;
 
@@ -17,6 +18,10 @@ pub struct SystemUpdate {
     pub removed: Vec<String>,
     /// Layers, on every page, that were bound to those tokens.
     pub unbound: usize,
+    /// Names of components the new version no longer has.
+    pub removed_components: Vec<String>,
+    /// Instances of those components, on every page. They act as plain frames now.
+    pub orphaned: usize,
 }
 
 impl SystemUpdate {
@@ -28,6 +33,21 @@ impl SystemUpdate {
                 crate::systems::name_list(&self.removed, 5),
                 plural(self.unbound, "layer"),
                 if self.unbound == 1 { "its" } else { "their" }
+            ));
+        }
+        if !self.removed_components.is_empty() {
+            let names: Vec<String> = (self.removed_components.iter())
+                .map(|n| format!("{n} component"))
+                .collect();
+            m.push_str(&format!(
+                " Removed {}; {} {} now.",
+                crate::systems::name_list(&names, 5),
+                plural(self.orphaned, "instance"),
+                if self.orphaned == 1 {
+                    "is a plain frame"
+                } else {
+                    "are plain frames"
+                }
             ));
         }
         m
@@ -53,8 +73,13 @@ impl Editor {
         }
         let label = format!("Use {} design system", p.name);
         self.edit_tokens(&label, None, |t| {
-            t.attach(p.link(), &p.tokens, &p.text_styles, &p.effect_styles)
-        })
+            t.attach(p.link(), &p.tokens, &p.text_styles, &p.effect_styles)?;
+            t.replace_components(&p.id, p.linked_components());
+            Ok::<_, String>(())
+        })?;
+        // Instances left from an earlier use link up again.
+        self.sync_all_instances();
+        Ok(())
     }
 
     /// Move a design system this file uses to `p`, when `p` is newer. None when the file
@@ -65,16 +90,22 @@ impl Editor {
             return None;
         }
         let label = format!("Update {} to v{}", p.name, p.release);
-        let gone = self.edit_tokens(&label, None, |t| {
-            t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles)
+        let (gone, gone_components) = self.edit_tokens(&label, None, |t| {
+            let gone = t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles);
+            (gone, t.replace_components(&p.id, p.linked_components()))
         });
+        // Every page now, so the update is saved whole and not when each page is next shown.
+        self.sync_all_instances();
         let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
+        let comp_ids: Vec<&str> = gone_components.iter().map(|c| c.id.as_str()).collect();
         Some(SystemUpdate {
             name: p.name.clone(),
             from,
             to: p.release,
             removed: gone.into_iter().map(|(_, name)| name).collect(),
             unbound: self.layers_bound_to(&ids),
+            orphaned: self.instances_of(&comp_ids),
+            removed_components: gone_components.into_iter().map(|c| c.name).collect(),
         })
     }
 
@@ -100,6 +131,22 @@ impl Editor {
             .system(id)
             .map(|s| s.name.clone())
             .ok_or_else(|| "This file doesn't use that design system.".to_string())
+    }
+
+    /// Instance roots on any page linked to these design system components.
+    fn instances_of(&self, ids: &[&str]) -> usize {
+        (0..self.pages.len())
+            .map(|i| {
+                let doc = self.page_doc(i);
+                let comp = |id: Option<NodeId>| {
+                    (id.and_then(|id| doc.get(id)?.instance.as_ref()?.component.as_deref()))
+                        .filter(|c| ids.contains(c))
+                };
+                (doc.nodes.values())
+                    .filter(|n| comp(Some(n.id)).is_some() && comp(n.parent) != comp(Some(n.id)))
+                    .count()
+            })
+            .sum()
     }
 
     /// Layers on any page using these token or style ids.

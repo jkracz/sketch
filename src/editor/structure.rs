@@ -137,12 +137,15 @@ pub(super) struct Source<'a> {
     pub doc: Option<&'a Document>,
     /// Copied into new instance links; `None` keeps links local.
     pub page: Option<&'a str>,
+    /// The design system component `doc` holds, copied into new instance links.
+    pub component: Option<&'a str>,
 }
 
 impl Source<'_> {
     pub const LOCAL: Source<'static> = Source {
         doc: None,
         page: None,
+        component: None,
     };
 
     fn get(&self, tx: &Tx, id: NodeId) -> Option<Node> {
@@ -151,7 +154,7 @@ impl Source<'_> {
 }
 
 /// Copy a subtree as a new instance subtree under `parent` (ids are fresh).
-fn instantiate(
+pub(super) fn instantiate(
     tx: &mut Tx,
     src: Source,
     main: NodeId,
@@ -168,6 +171,7 @@ fn instantiate(
     n.instance = Some(InstanceLink {
         main,
         page: src.page.map(String::from),
+        component: src.component.map(String::from),
         overrides: Vec::new(),
     });
     if let Some(r) = root_rect {
@@ -289,7 +293,9 @@ impl Editor {
                     .nodes
                     .values()
                     .filter(|n| {
-                        (n.instance.as_ref()).is_some_and(|l| l.main == *c && l.page.is_none())
+                        (n.instance.as_ref()).is_some_and(|l| {
+                            l.main == *c && l.page.is_none() && l.component.is_none()
+                        })
                     })
                     .map(|n| n.id)
                     .collect();
@@ -568,10 +574,14 @@ impl Editor {
         self.commit();
     }
 
+    /// Whether `id` is an instance whose main still exists, on a page or in a design system.
     pub fn is_instance_root(&self, id: NodeId) -> bool {
-        self.instance_main(id).is_some()
+        (self.doc.get(id).and_then(|n| n.instance.as_ref()))
+            .and_then(|l| self.main_doc(l)?.get(l.main))
+            .is_some_and(|m| m.component)
     }
 
+    /// The page and id of an instance's main, when it is on a page of this file.
     pub fn instance_main(&self, id: NodeId) -> Option<(usize, NodeId)> {
         let l = self.doc.get(id)?.instance.as_ref()?;
         let page = self.main_page(l)?;
