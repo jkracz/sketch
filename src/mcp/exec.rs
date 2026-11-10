@@ -1566,6 +1566,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
             .map(|m| crate::model::Mode {
                 id: strip(&m.id),
                 name: m.name.clone(),
+                aka: Vec::new(),
             })
             .collect(),
     }

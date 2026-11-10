@@ -66,6 +66,7 @@ impl Published {
                 .map(|m| Mode {
                     id: linked_id(&self.id, &m.id),
                     name: m.name.clone(),
+                    aka: Vec::new(),
                 })
                 .collect(),
         }

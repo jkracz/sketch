@@ -184,42 +184,6 @@ impl Editor {
         }) || self.style_is_stale(n, mode)
     }
 
-    /// Point frames that picked one mode id at another, on every page. Both ids name the same
-    /// mode, so nothing changes on screen and no undo step is needed.
-    pub(super) fn retarget_frame_modes(&mut self, moved: &[(String, String)]) {
-        if moved.is_empty() {
-            return;
-        }
-        let to = |m: &Option<String>| {
-            (moved.iter())
-                .find(|(from, _)| m.as_deref() == Some(from.as_str()))
-                .map(|(_, to)| to.clone())
-        };
-        for i in 0..self.pages.len() {
-            let ids: Vec<NodeId> = (self.page_doc(i).nodes.values())
-                .filter(|n| to(&n.mode).is_some())
-                .map(|n| n.id)
-                .collect();
-            if ids.is_empty() {
-                continue;
-            }
-            self.with_page(i, |ed| {
-                ed.commit();
-                ed.rec = Some((Recording::new("Retarget modes", &ed.doc), None));
-                {
-                    let mut tx = ed.tx();
-                    for id in &ids {
-                        if let Some(n) = tx.node_mut(*id) {
-                            n.mode = to(&n.mode);
-                        }
-                    }
-                }
-                ed.rec = None;
-            });
-            self.pages[i].saved_gen = u64::MAX;
-        }
-    }
-
     fn write_token_values(&mut self, ids: &[NodeId]) {
         self.commit();
         self.rec = Some((Recording::new("Sync tokens", &self.doc), None));
@@ -688,8 +652,9 @@ mod tests {
     }
 
     #[test]
-    fn detaching_moves_frames_to_the_local_mode_of_the_same_name() {
-        let (mut e, frame, ..) = themed();
+    fn a_frame_on_a_detached_systems_mode_keeps_it() {
+        let (mut e, frame, rect, bg) = themed();
+        e.edit("move", |tx| tx.reparent(rect, Some(frame), None));
         let link = crate::model::SystemLink {
             id: "s".into(),
             name: "S".into(),
@@ -700,15 +665,34 @@ mod tests {
             modes: vec![crate::model::Mode {
                 id: "s/c".into(),
                 name: "Contrast".into(),
+                ..Default::default()
             }],
         };
         e.edit_tokens("use", None, |t| t.attach(link, &[], &[]))
             .unwrap();
         e.set_frame_mode(&[frame], Some("s/c"));
+        assert_eq!(
+            fill(&e, rect),
+            Some(Color::WHITE),
+            "bg has no Contrast value"
+        );
         e.edit_tokens("rename", None, |t| t.rename_mode("dark", "Contrast"))
             .unwrap();
+        assert_eq!(fill(&e, rect), Some(Color::BLACK));
         e.detach_system("s").unwrap();
-        assert_eq!(e.doc.get(frame).unwrap().mode.as_deref(), Some("dark"));
+        assert_eq!(e.tokens.mode_at(&e.doc, rect), Some("Contrast"));
+        assert_eq!(fill(&e, rect), Some(Color::BLACK));
+        e.undo();
+        e.undo();
+        assert_eq!(
+            fill(&e, rect),
+            Some(Color::WHITE),
+            "back on the system's Contrast"
+        );
+        assert_eq!(
+            e.tokens.resolve(&bg),
+            Some(crate::model::TokenValue::Color(Color::WHITE))
+        );
     }
 
     #[test]

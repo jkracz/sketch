@@ -121,10 +121,14 @@ pub enum TokenValue {
 /// A theme such as Light or Dark. A file and each design system have a list of them, and a
 /// frame picks one for itself and its children (`Node::mode`). Modes match across lists by
 /// name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mode {
     pub id: String,
     pub name: String,
+    /// Ids of design system modes of the same name that this one took over when the system
+    /// was detached. Frames that picked them show this mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aka: Vec<String>,
 }
 
 impl Mode {
@@ -132,6 +136,7 @@ impl Mode {
         Mode {
             id: id.into(),
             name: name.into(),
+            aka: Vec::new(),
         }
     }
 
@@ -484,7 +489,7 @@ impl TokenSet {
             .iter()
             .chain(self.systems.iter().flat_map(|s| &s.modes));
         all.into_iter()
-            .find(|m| m.id == id)
+            .find(|m| m.id == id || m.aka.iter().any(|a| a == id))
             .map(|m| m.name.as_str())
     }
 
@@ -539,6 +544,7 @@ impl TokenSet {
         self.modes.push(Mode {
             id: id.clone(),
             name,
+            aka: Vec::new(),
         });
         id
     }
@@ -1044,8 +1050,10 @@ impl TokenSet {
             let Some(i) = self.tokens.iter().position(|t| t.id == *id) else {
                 continue;
             };
-            let names: Vec<String> = (self.modes_of(&self.tokens[i]).iter())
-                .filter(|m| self.tokens[i].modes.contains_key(&m.id))
+            let t = &self.tokens[i];
+            let fallback = self.value_in(t, None);
+            let names: Vec<String> = (self.modes_of(t).iter())
+                .filter(|m| self.value_in(t, Some(&m.name)) != fallback)
                 .map(|m| m.name.clone())
                 .collect();
             self.promote_modes(&names);
@@ -1075,17 +1083,6 @@ impl TokenSet {
                 self.modes.push(m);
             }
         }
-    }
-
-    /// System mode ids that share a name with one of this file's modes, with that mode's id.
-    /// Detaching the system drops them, so frames that picked them should move.
-    pub fn shadowed_modes(&self, system: &str) -> Vec<(String, String)> {
-        (self.system(system).into_iter().flat_map(|l| &l.modes))
-            .filter_map(|m| {
-                let local = self.modes.iter().find(|x| same_mode(&x.name, &m.name))?;
-                Some((m.id.clone(), local.id.clone()))
-            })
-            .collect()
     }
 
     /// Keep a system token's CSS name, and give each local mode the system's value for the
@@ -1562,10 +1559,18 @@ impl TokenSet {
     /// and `var()` references keep working. Its modes this file lacks become the file's, under
     /// the same ids so frames that picked them keep them.
     pub fn detach_system(&mut self, id: &str) {
-        let names: Vec<String> = (self.system(id).into_iter().flat_map(|l| &l.modes))
-            .map(|m| m.name.clone())
+        let theirs: Vec<Mode> = (self.system(id).into_iter().flat_map(|l| &l.modes))
+            .cloned()
             .collect();
+        let names: Vec<String> = theirs.iter().map(|m| m.name.clone()).collect();
         self.promote_modes(&names);
+        for m in theirs {
+            if let Some(local) =
+                (self.modes.iter_mut()).find(|x| x.id != m.id && same_mode(&x.name, &m.name))
+            {
+                local.aka.push(m.id);
+            }
+        }
         let local: Vec<Token> = self
             .tokens
             .iter()
@@ -2388,6 +2393,15 @@ mod tests {
         let new = other.paste(&s.copy(&[bg]));
         let red = TokenValue::Color(Color::rgb(255, 0, 0));
         assert_eq!(other.resolve_in(&new[0], Some("Contrast")), Some(red));
+    }
+
+    #[test]
+    fn duplicating_keeps_a_system_only_first_mode() {
+        let mut s = using_modes(&["Contrast", "Light"]);
+        let bg = s.by_css_name("--s-bg").unwrap().id.clone();
+        let copy = s.duplicate(std::slice::from_ref(&bg));
+        assert_eq!(s.resolve_in(&copy[0], Some("Contrast")), Some(WHITE));
+        assert_eq!(s.resolve_in(&bg, Some("Contrast")), Some(WHITE));
     }
 
     #[test]
