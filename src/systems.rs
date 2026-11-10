@@ -145,7 +145,7 @@ impl Registry {
     }
 
     /// Write the entry and its components' images. The images go first, so a reader never
-    /// sees an entry whose images are missing; ones it no longer uses go last.
+    /// sees an entry whose images are missing; ones it no longer uses go last, best effort.
     pub fn save(&self, p: &Published) -> std::io::Result<()> {
         let bad = || std::io::Error::other("bad design system id");
         let path = self.path(&p.id).ok_or_else(bad)?;
@@ -161,8 +161,11 @@ impl Registry {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .map(String::from);
-            if stem.is_none_or(|s| !used.contains(&s)) {
-                std::fs::remove_file(e.path())?;
+            // Housekeeping only: failing here must not fail a publish that already saved.
+            if stem.is_none_or(|s| !used.contains(&s))
+                && let Err(err) = std::fs::remove_file(e.path())
+            {
+                log::warn!("{}: {err}", e.path().display());
             }
         }
         Ok(())
