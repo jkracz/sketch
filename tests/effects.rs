@@ -695,6 +695,37 @@ fn a_shadow_color_follows_its_token_through_reorders() {
     assert!(e.doc.get(id).unwrap().tokens.is_empty());
 }
 
+#[test]
+fn a_filter_that_applies_in_part_is_still_an_instance_override() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Main", "styles": {"width": "100px", "height": "100px"}}),
+    );
+    let main = id_of(&ab["id"]);
+    h.ed.select(vec![main]);
+    h.ed.create_component();
+    let inst = h.ed.create_instance(main, v2(300.0, 0.0)).unwrap();
+    let page = ab["id"].as_str().unwrap().split(':').next().unwrap();
+    let up = call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [format!("{page}:{}", inst.0)], "styles": {
+            "filter": "blur(2px) brightness(1.2)"
+        }}]}),
+    );
+    assert_eq!(up["ignoredStyles"].as_object().unwrap().len(), 1, "{up}");
+    // The main changing must not take the blur back.
+    inspector::apply(&mut h.ed, "effects", &[main], |n| {
+        n.style.effects = vec![shadow(DropShadow, 0.0, 1.0, 2.0, 0.0, BLACK)]
+    });
+    assert_eq!(
+        h.ed.doc.get(inst).unwrap().style.effects,
+        [blur(LayerBlur, 2.0)]
+    );
+}
+
 fn host() -> exec::SessionHost {
     let dir = std::env::temp_dir().join(format!("sketch-rs-effects-{:016x}", fastrand::u64(..)));
     let mut h = exec::SessionHost::new(Store::open(dir).unwrap());
@@ -783,6 +814,22 @@ fn html_shadows_and_blurs_round_trip_through_the_mcp_tools() {
     ] {
         assert!(jsx.contains(part), "{part} not in {jsx}");
     }
+
+    // A star exports as inline SVG, where a box shadow would be the shadow of its box.
+    let star = call(
+        &mut h,
+        "create_shape",
+        json!({"type": "star", "x": 500, "y": 0, "width": 80, "height": 80, "styles": {
+            "boxShadow": "0 4px 6px #000, inset 0 1px 0 #fff", "filter": "blur(3px)"
+        }}),
+    );
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": star["id"]}));
+    let jsx = jsx.as_str().unwrap();
+    assert!(
+        jsx.contains(r#"filter: "drop-shadow(0px 4px 3px #000000) blur(3px)""#),
+        "{jsx}"
+    );
+    assert!(!jsx.contains("boxShadow"), "{jsx}");
 
     let up = call(
         &mut h,

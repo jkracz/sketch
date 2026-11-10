@@ -1100,6 +1100,16 @@ fn token_input(v: &Value) -> Result<String, String> {
     }
 }
 
+/// A shadow's color as CSS: the variable that owns it, or the color itself.
+fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
+    (n.tokens.get(&TokenProp::EffectColor(i)))
+        .and_then(|id| tokens.get(id))
+        .map_or_else(
+            || css::color_css(c),
+            |t| format!("var({})", tokens.css_name(t)),
+        )
+}
+
 /// In computed styles, show a bound property as the variable that owns it, and a text
 /// layer's style as `textStyle` with the fields it overrides.
 fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
@@ -1112,12 +1122,7 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
             st.insert("textStyleOverrides".into(), json!(keys));
         }
     }
-    let shadow_var = |i: usize| {
-        let t = tokens.get(n.tokens.get(&TokenProp::EffectColor(i))?)?;
-        Some(format!("var({})", tokens.css_name(t)))
-    };
-    if let Some(v) = css::shadows_css(n, |i, c| shadow_var(i).unwrap_or_else(|| css::color_css(c)))
-    {
+    if let Some(v) = css::shadows_css(n, |i, c| shadow_color(tokens, n, i, c)) {
         st.insert(css::shadow_key(n).into(), json!(v));
     }
     for (prop, id) in &n.tokens {
@@ -2232,6 +2237,10 @@ fn jsx_node(
                 if let Some(v) = st.get(k) {
                     pos.insert(k.into(), v.clone());
                 }
+            }
+            // A box shadow here would be the shadow of the element's box, not of the shape.
+            if let Some(f) = css::shape_filter_css(n, |i, c| shadow_color(tokens, n, i, c)) {
+                pos.insert("filter".into(), json!(f));
             }
             out.push_str(&format!(
                 "{ind}<div data-name=\"{name}\" style={}>{}</div>\n",
@@ -3798,10 +3807,11 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
+                    let effects = n.style.effects.clone();
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
                     // Like the inspector, a bindable field edited on an instance layer stops
                     // following the main component.
-                    let edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
+                    let mut edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
                         .filter(|k| !applied.ignored.iter().any(|i| i == k))
                         .filter_map(|k| match k {
                             "border" => Some(TokenProp::Stroke.field()),
@@ -3815,6 +3825,10 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         })
                         .map(crate::editor::structure::override_key)
                         .collect();
+                    // A filter can apply in part and still be reported as ignored.
+                    if n.style.effects != effects {
+                        edited.push("effects");
+                    }
                     if let Some(l) = &mut n.instance {
                         for k in edited {
                             if !l.overrides.iter().any(|o| o == k) {

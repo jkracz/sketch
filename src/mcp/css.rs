@@ -633,6 +633,22 @@ pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<S
     (!list.is_empty()).then(|| list.join(", "))
 }
 
+/// The effects of a layer that exports as inline SVG, as one `filter` for the element around
+/// it. `drop-shadow()` follows the shape, as the canvas does, and takes the Gaussian's sigma.
+/// It has no spread, and nothing in `filter` draws an inner shadow or a background blur, so
+/// those are left out.
+pub fn shape_filter_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<String> {
+    let mut parts: Vec<String> = (n.style.effects.iter().enumerate())
+        .filter(|(_, e)| e.visible && e.kind == EffectKind::DropShadow)
+        .map(|(i, e)| {
+            let (x, y, sigma) = (px(e.x), px(e.y), px(e.sigma()));
+            format!("drop-shadow({x} {y} {sigma} {})", color(i, e.color))
+        })
+        .collect();
+    parts.extend(blur_css(n, EffectKind::LayerBlur));
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 fn blur_css(n: &Node, kind: EffectKind) -> Option<String> {
     let r = blur_sigma(&n.style.effects, kind);
     (r > 0.0).then(|| format!("blur({})", px(r)))
