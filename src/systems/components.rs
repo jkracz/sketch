@@ -24,6 +24,7 @@ pub struct PublishedComponent {
     pub name: String,
     /// The main, then its layers depth first, each with its id from the source page. The
     /// main has no parent and sits at 0,0, so moving it on the canvas changes nothing here.
+    /// It keeps its own mode but not one a frame around it picks, the same as its instances.
     pub nodes: Vec<Node>,
     /// Layers of instances nested inside this component, by node id: the published
     /// component their `instance.main` is a layer of.
