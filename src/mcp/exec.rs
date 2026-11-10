@@ -10,6 +10,7 @@ use super::css::{self, Context, Styles};
 use super::html::{self, Element, Html};
 use super::tools::TOP_LEVEL;
 use super::{Out, ToolResult, tools};
+use crate::editor::structure::{Source, instantiate};
 use crate::editor::{Editor, hit};
 use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
@@ -22,7 +23,9 @@ use crate::project::{Entry, Folder, Project, Store};
 use crate::render::gpu::Headless;
 use crate::render::scene::CanvasStyle;
 use crate::session::Session;
-use crate::systems::{self as design_systems, PublishRequest, Published, Registry};
+use crate::systems::{
+    self as design_systems, PublishRequest, Published, PublishedComponent, Registry,
+};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -281,6 +284,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     | "set_text_styles"
             ) {
                 check_system_vars(host, args)?;
+            }
+            if name == "write_html" {
+                check_components(host, &a)?;
             }
             let ed = host.editor();
             ed.commit_pending();
@@ -850,6 +856,9 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     if n.instance.is_some() {
         v["instance"] = json!(true);
     }
+    if let Some(name) = instance_of(ed, Some(n)) {
+        v["instanceOf"] = json!(name);
+    }
     v["autoLayout"] = json!(n.layout.is_some());
     text(v)
 }
@@ -1185,6 +1194,7 @@ struct Types {
     kinds: Option<Vec<TokenKind>>,
     text_styles: bool,
     effect_styles: bool,
+    components: bool,
 }
 
 fn token_kinds(a: &Args) -> Result<Types, String> {
@@ -1197,9 +1207,11 @@ fn token_kinds(a: &Args) -> Result<Types, String> {
             kinds: None,
             text_styles: true,
             effect_styles: true,
+            components: true,
         });
     }
-    let style = |n: &&String| [TEXT_STYLE_TYPE, EFFECT_STYLE_TYPE].contains(&n.as_str());
+    let style =
+        |n: &&String| [TEXT_STYLE_TYPE, EFFECT_STYLE_TYPE, COMPONENT_TYPE].contains(&n.as_str());
     let kinds: Option<Vec<TokenKind>> = names
         .iter()
         .filter(|n| !style(n))
@@ -1209,11 +1221,14 @@ fn token_kinds(a: &Args) -> Result<Types, String> {
         kinds: Some(kinds.ok_or("unknown token type in `types`")?),
         text_styles: names.iter().any(|n| n == TEXT_STYLE_TYPE),
         effect_styles: names.iter().any(|n| n == EFFECT_STYLE_TYPE),
+        components: names.iter().any(|n| n == COMPONENT_TYPE),
     })
 }
 
 const TEXT_STYLE_TYPE: &str = "textStyle";
 const EFFECT_STYLE_TYPE: &str = "effectStyle";
+/// Only `get_design_system` lists components.
+pub const COMPONENT_TYPE: &str = "component";
 
 /// `tokens`' text styles, filtered by `types` and by `namePattern` against `.class`.
 fn chosen_styles<'a>(
@@ -1354,6 +1369,12 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
                     .count();
                 if effects > 0 {
                     v["effectStyles"] = json!(effects);
+                }
+                let components = (tokens.components().iter())
+                    .filter(|c| c.system == l.id)
+                    .count();
+                if components > 0 {
+                    v["components"] = json!(components);
                 }
                 v
             })
@@ -1706,8 +1727,37 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
                 aka: Vec::new(),
             })
             .collect(),
-        // MCP doesn't list a system's components yet.
-        components: Vec::new(),
+        components: (tokens.components().iter())
+            .filter(|c| c.system == l.id)
+            .map(|c| unlinked_component(c, strip))
+            .collect(),
+    }
+}
+
+/// A file's copy of a component in published form: local ids, the main first.
+fn unlinked_component(
+    c: &crate::model::LinkedComponent,
+    strip: impl Fn(&str) -> String,
+) -> PublishedComponent {
+    let ids = c.main().map(|m| c.doc.subtree(m)).unwrap_or_default();
+    let nodes = (ids.iter().filter_map(|id| c.doc.get(*id).cloned()))
+        .map(|mut n| {
+            for t in n.tokens.values_mut() {
+                *t = strip(t);
+            }
+            if let Some(r) = &mut n.text_style_ref {
+                r.id = strip(&r.id);
+            }
+            n.effect_style = n.effect_style.as_deref().map(&strip);
+            n.mode = n.mode.as_deref().map(&strip);
+            n
+        })
+        .collect();
+    PublishedComponent {
+        id: strip(&c.id),
+        name: c.name.clone(),
+        nodes,
+        nested: Default::default(),
     }
 }
 
@@ -1729,6 +1779,9 @@ fn list_design_systems(host: &mut dyn Host) -> ToolResult {
             if !p.effect_styles.is_empty() {
                 v["effectStyles"] = json!(p.effect_styles.len());
             }
+            if !p.components.is_empty() {
+                v["components"] = json!(p.components.len());
+            }
             if let Some(d) = &p.description {
                 v["description"] = json!(d);
             }
@@ -1743,21 +1796,26 @@ fn list_design_systems(host: &mut dyn Host) -> ToolResult {
         .collect();
     text(json!({
         "systems": list,
-        "hint": "get_design_system loads one system's notes and tokens. use_design_system lets \
-                 the open file bind them.",
+        "hint": "get_design_system loads one system's notes, tokens and component names. \
+                 use_design_system lets the open file bind its tokens and place its components.",
     }))
 }
 
 fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     let p = find_system(host, a.req_str("id")?)?;
+    if let Some(key) = a.str("component") {
+        return component_tree(host, &p, key, a.str("format").unwrap_or("text"));
+    }
     let used = host.canvas_open() && host.editor().tokens.system(&p.id).is_some();
     let set = p.token_set();
     let chosen = chosen_tokens(&set, a, |_| true)?;
     let styles = chosen_styles(&set, a, |_| true)?;
     let effects = chosen_effect_styles(&set, a, |_| true)?;
+    let comps = chosen_components(&p, a)?;
     let filtered = a.get("types").is_some() || a.get("namePattern").is_some();
     let total = chosen.len() + styles.len() + effects.len();
     let too_many = !filtered && total > MAX_SYSTEM_TOKENS;
+    let too_many_comps = !filtered && comps.len() > MAX_SYSTEM_COMPONENTS;
     let counts = || {
         let mut c = type_counts(chosen.iter().copied());
         if !styles.is_empty() {
@@ -1791,6 +1849,19 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
         }
         if let Some(n) = &p.notes {
             v["notes"] = json!(n);
+        }
+        if too_many_comps {
+            v["componentCount"] = json!(comps.len());
+        } else if !comps.is_empty() {
+            v["components"] = json!(
+                comps
+                    .iter()
+                    .map(|c| {
+                        let (w, h) = component_size(c);
+                        json!({"name": c.name, "width": r2(w), "height": r2(h)})
+                    })
+                    .collect::<Vec<_>>()
+            );
         }
         if too_many {
             v["tokenCounts"] = counts();
@@ -1856,6 +1927,23 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     if let Some(n) = &p.notes {
         out.push_str(&format!("\n## Usage notes\n{}\n", n.trim_end()));
     }
+    if !comps.is_empty() {
+        out.push_str(&format!(
+            "\n## Components\nPlace one with <{INSTANCE_TAG} component=\"Name\"/> in write_html. \
+             Pass `component` to load one's layers.\n"
+        ));
+        if too_many_comps {
+            out.push_str(&format!(
+                "{} components. Pass `namePattern` to list some of them.\n",
+                comps.len()
+            ));
+        } else {
+            for c in &comps {
+                out.push_str(&component_line(&p, c));
+                out.push('\n');
+            }
+        }
+    }
     out.push_str("\n## Tokens\n");
     if too_many {
         out.push_str(&format!(
@@ -1920,6 +2008,111 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     Ok(vec![Out::Text(out)])
 }
 
+/// Above this many components, `get_design_system` without filters returns the count.
+const MAX_SYSTEM_COMPONENTS: usize = 100;
+
+/// A system's components, filtered by `types` and by `namePattern` against the name.
+fn chosen_components<'a>(
+    p: &'a Published,
+    a: &Args,
+) -> Result<Vec<&'a PublishedComponent>, String> {
+    if !token_kinds(a)?.components {
+        return Ok(Vec::new());
+    }
+    let pattern = a.str("namePattern");
+    Ok((p.components.iter())
+        .filter(|c| pattern.is_none_or(|g| glob(g, &c.name)))
+        .collect())
+}
+
+/// `120x40`, to two decimals.
+fn size_short(w: f64, h: f64) -> String {
+    let r = |v: f64| (v * 100.0).round() / 100.0;
+    format!("{}x{}", r(w), r(h))
+}
+
+/// The main's size. Published components list the main first.
+fn component_size(c: &PublishedComponent) -> (f64, f64) {
+    c.nodes.first().map_or((0.0, 0.0), |m| (m.rect.w, m.rect.h))
+}
+
+/// `Name 120x40`, with the id to place it by when another component has the same name.
+fn component_line(p: &Published, c: &PublishedComponent) -> String {
+    let (w, h) = component_size(c);
+    let mut s = format!("{} {}", c.name, size_short(w, h));
+    let named = |o: &&PublishedComponent| o.name.eq_ignore_ascii_case(&c.name);
+    if p.components.iter().filter(named).count() > 1 {
+        let id = crate::model::tokens::linked_id(&p.id, &c.id);
+        s.push_str(&format!(" (id \"{id}\")"));
+    }
+    s
+}
+
+/// A component by name (ignoring case) or by id, local or linked.
+fn published_component<'a>(p: &'a Published, key: &str) -> Option<&'a PublishedComponent> {
+    let key = key.trim();
+    let id = key.strip_prefix(&format!("{}/", p.id)).unwrap_or(key);
+    (p.components.iter().find(|c| c.id == id))
+        .or_else(|| (p.components.iter()).find(|c| c.name.eq_ignore_ascii_case(key)))
+}
+
+/// One component's layers as JSX, the same as get_jsx shows an instance of it.
+fn component_tree(host: &mut dyn Host, p: &Published, key: &str, format: &str) -> ToolResult {
+    let Some(c) = published_component(p, key) else {
+        let names: Vec<&str> = p.components.iter().map(|c| c.name.as_str()).collect();
+        return Err(match names.is_empty() {
+            true => format!("{} has no components.", p.name),
+            false => format!(
+                "{} has no component `{key}`. Its components: {}.",
+                p.name,
+                names.join(", ")
+            ),
+        });
+    };
+    // Images live in the registry while the system is published, else in the file's copy.
+    let registry = Registry::in_store(host.store());
+    let assets = match registry.get(&p.id) {
+        Some(_) => {
+            registry.load_assets(&p.id);
+            registry.assets_dir(&p.id)
+        }
+        None => host
+            .project()
+            .map(|d| d.dir.join(crate::project::ASSETS_DIR)),
+    };
+    let linked = design_systems::linked(&p.id, c);
+    let main = linked.main().ok_or("The component has no layers.")?;
+    let set = p.token_set();
+    let mut jsx = String::new();
+    jsx_node(
+        &linked.doc,
+        &set,
+        main,
+        0,
+        true,
+        assets.as_deref(),
+        &mut jsx,
+    );
+    let (w, h) = component_size(c);
+    let place = format!("<{INSTANCE_TAG} component=\"{}\"/>", c.name);
+    match format {
+        "json" => text(json!({
+            "name": c.name, "system": p.name, "width": r2(w), "height": r2(h),
+            "place": place, "jsx": jsx,
+        })),
+        "text" => Ok(vec![Out::Text(format!(
+            "# {} {} ({} v{})\nPlace it with {place} in write_html.\n\n{jsx}",
+            c.name,
+            size_short(w, h),
+            p.name,
+            p.release
+        ))]),
+        f => Err(format!(
+            "a component loads as \"text\" or \"json\", not `{f}`"
+        )),
+    }
+}
+
 fn use_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     let p = find_system(host, a.req_str("id")?)?;
     if !design_systems::source_available(host.store(), &p.id) {
@@ -1933,14 +2126,23 @@ fn use_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     let ed = host.editor();
     ed.use_system(&p)?;
     ed.status = format!("Using {}.", p.name);
-    text(json!({
+    let mut v = json!({
         "name": p.name, "prefix": format!("--{}-", p.prefix), "version": p.release,
         "tokens": type_counts(p.tokens.iter()),
         "hint": format!(
             "Bind with var(--{}-…) in styles. get_design_system lists the tokens.",
             p.prefix
         ),
-    }))
+    });
+    if !p.components.is_empty() {
+        v["components"] = json!(p.components.len());
+        v["hint"] = json!(format!(
+            "Bind with var(--{}-…) in styles. Place a component with <{INSTANCE_TAG} \
+             component=\"Name\"/> in write_html. get_design_system lists both.",
+            p.prefix
+        ));
+    }
+    text(v)
 }
 
 fn remove_design_system(ed: &mut Editor, a: &Args) -> ToolResult {
@@ -2025,6 +2227,48 @@ fn check_system_vars(host: &mut dyn Host, args: &Value) -> Result<(), String> {
             return Err(format!(
                 "`{n}` is a token of the {} design system, which the open file doesn't use. \
                  Call use_design_system({{\"id\": \"{}\"}}), then retry.",
+                p.name, p.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Instances in `write_html` must name a component of a system the file uses. Point an agent
+/// that names another system's component at use_design_system.
+fn check_components(host: &mut dyn Host, a: &Args) -> Result<(), String> {
+    fn names(nodes: &[Html], out: &mut Vec<String>) {
+        for n in nodes {
+            if let Html::Element(el) = n {
+                match el.attr("component") {
+                    Some(c) if el.tag == INSTANCE_TAG => out.push(c.trim().to_string()),
+                    _ => names(&el.children, out),
+                }
+            }
+        }
+    }
+    let mut wanted = Vec::new();
+    names(&html::parse(a.str("html").unwrap_or("")), &mut wanted);
+    let tokens = &host.editor().tokens;
+    wanted.retain(|c| tokens.find_component(c).is_none());
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let used: HashSet<String> = tokens.systems().iter().map(|s| s.id.clone()).collect();
+    for p in design_systems::available(host.store()) {
+        let owns = |c: &String| {
+            let name = match c.rsplit_once('/') {
+                Some((sys, name)) if p.name.eq_ignore_ascii_case(sys.trim()) => name,
+                _ => c.as_str(),
+            };
+            published_component(&p, name).is_some()
+        };
+        if let Some(c) = wanted.iter().find(|c| owns(c))
+            && !used.contains(&p.id)
+        {
+            return Err(format!(
+                "`{c}` is a component of the {} design system, which the open file doesn't \
+                 use. Call use_design_system({{\"id\": \"{}\"}}), then retry.",
                 p.name, p.id
             ));
         }
@@ -2950,6 +3194,8 @@ struct Builder<'t, 'a> {
     page_id: String,
     ignored: BTreeSet<String>,
     warnings: Vec<String>,
+    /// Design system component instances placed, in order.
+    instances: Vec<NodeId>,
 }
 
 impl Builder<'_, '_> {
@@ -3113,6 +3359,7 @@ impl Builder<'_, '_> {
             "x-sketch-clone" | "x-paper-clone" | "paper-clone" => {
                 self.clone_el(el, &own, parent, index)
             }
+            INSTANCE_TAG => self.instance_el(el, &own, parent, index),
             "hr" => {
                 let mut st: Styles = vec![
                     ("height".into(), "1px".into()),
@@ -3494,6 +3741,57 @@ impl Builder<'_, '_> {
     }
 }
 
+impl Builder<'_, '_> {
+    /// An instance of a design system component the file uses, at the component's size
+    /// unless `own` sets one. Styles count as overrides, so syncs from the main keep them.
+    fn instance_el(
+        &mut self,
+        el: &Element,
+        own: &Styles,
+        parent: &Parent,
+        index: &mut Option<usize>,
+    ) -> Option<NodeId> {
+        let key = el.attr("component").unwrap_or("");
+        let found = self.tokens.find_component(key);
+        let Some((c, main)) = found.and_then(|c| Some((c, c.main()?))) else {
+            self.warnings.push(format!(
+                "{INSTANCE_TAG}: no component `{key}` in the design systems this file uses. \
+                 get_design_system lists a system's components."
+            ));
+            return None;
+        };
+        let src = Source {
+            doc: Some(&c.doc),
+            page: None,
+            component: Some(&c.id),
+        };
+        let id = instantiate(self.tx, src, main, parent.id, *index, None);
+        if let Some(i) = index {
+            *i += 1;
+        }
+        let before = self.tx.doc().get(id).unwrap().clone();
+        let mut n = before.clone();
+        if parent.layout.is_some() {
+            n.layout_child.absolute = false;
+        }
+        let a = css::apply(&mut n, own, &parent.ctx());
+        for k in edited_overrides(own, &a, &before, &n) {
+            mark_override(&mut n, k);
+        }
+        if let Some(name) = Self::layer_name(el) {
+            n.name = name;
+        }
+        *self.tx.node_mut(id).unwrap() = n;
+        self.note(&a);
+        self.place(id, &a, parent);
+        self.instances.push(id);
+        Some(id)
+    }
+}
+
+/// The `write_html` element that places a design system component by name.
+const INSTANCE_TAG: &str = "x-sketch-instance";
+
 /// Deep-copy a subtree under `parent` (keeping its world position plus `offset`). Returns the
 /// new root and the (old → new) id pairs.
 fn clone_subtree(
@@ -3647,7 +3945,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     let page_id = ed.pages[page].id.clone();
     let tokens = ed.tokens.clone();
     let canvas = CanvasStyle::of(ed.canvas_dark).background;
-    let (created, ignored, warnings) = ed.with_page(page, |ed| {
+    let (created, ignored, warnings, instances) = ed.with_page(page, |ed| {
         ed.edit("Write HTML", |tx| {
             // Where the new content goes.
             let (parent_id, mut index, old) = match (replace, target) {
@@ -3679,6 +3977,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
                 page_id: page_id.clone(),
                 ignored: BTreeSet::new(),
                 warnings: Vec::new(),
+                instances: Vec::new(),
             };
             let flex = parent.layout.is_some();
             let made = b.nodes(&tree, &inherited, &parent, &mut index, flex);
@@ -3705,7 +4004,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             }
             relayout(b.tx, parent_id.or(made.first().copied()));
             let (ig, w) = (b.ignored, b.warnings);
-            (made, ig, w)
+            (made, ig, w, b.instances)
         })
     });
     if created.is_empty() && !warnings.is_empty() {
@@ -3728,7 +4027,44 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
+    if !instances.is_empty() {
+        v["instances"] = json!(
+            instances
+                .iter()
+                .map(|id| instance_json(ed, page, *id))
+                .collect::<Vec<_>>()
+        );
+    }
     text(v)
+}
+
+/// A placed instance with its text layers, so a label can change with set_text_content.
+fn instance_json(ed: &Editor, page: usize, id: NodeId) -> Value {
+    let doc = ed.page_doc(page);
+    let texts: Vec<Value> = (doc.subtree(id).into_iter())
+        .filter_map(|t| {
+            let n = doc.get(t)?;
+            let s = n.kind.text()?;
+            Some(json!({"id": node_key(ed, page, t), "name": n.name, "text": s}))
+        })
+        .collect();
+    let mut v = json!({"id": node_key(ed, page, id)});
+    if let Some(name) = instance_of(ed, doc.get(id)) {
+        v["component"] = json!(name);
+    }
+    if !texts.is_empty() {
+        v["textLayers"] = json!(texts);
+    }
+    v
+}
+
+/// `<system>/<component>` for an instance of a design system component this file has.
+fn instance_of(ed: &Editor, n: Option<&Node>) -> Option<String> {
+    let c = ed
+        .tokens
+        .component(n?.instance.as_ref()?.component.as_deref()?)?;
+    let system = ed.tokens.system(&c.system)?;
+    Some(format!("{}/{}", system.name, c.name))
 }
 
 /// The page without one root node (for placing that node in free space).
@@ -3965,32 +4301,10 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
-                    let effects = (n.style.effects.clone(), n.effect_style.clone());
+                    let before = n.clone();
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
-                    // Like the inspector, a bindable field edited on an instance layer stops
-                    // following the main component.
-                    let mut edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
-                        .filter(|k| !applied.ignored.iter().any(|i| i == k))
-                        .filter_map(|k| match k {
-                            "border" => Some(TokenProp::Stroke.field()),
-                            "boxShadow" | "textShadow" | "filter" | "effectStyle" => {
-                                Some("effects")
-                            }
-                            k if css::is_backdrop_filter(k) => Some("effects"),
-                            k => TokenProp::from_css_key(k, &n).map(TokenProp::field),
-                        })
-                        .map(crate::editor::structure::override_key)
-                        .collect();
-                    // A filter can apply in part and still be reported as ignored.
-                    if (&n.style.effects, &n.effect_style) != (&effects.0, &effects.1) {
-                        edited.push("effects");
-                    }
-                    if let Some(l) = &mut n.instance {
-                        for k in edited {
-                            if !l.overrides.iter().any(|o| o == k) {
-                                l.overrides.push(k.into());
-                            }
-                        }
+                    for k in edited_overrides(&raw, &applied, &before, &n) {
+                        mark_override(&mut n, k);
                     }
                     if mode.is_some() && !frame {
                         applied.ignored.push("mode".into());
@@ -4123,6 +4437,49 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
         },
     )?;
     text(json!({"updated": n}))
+}
+
+/// The override keys a style edit sets on an instance layer, like the inspector's, so the
+/// next sync from the main keeps the edit. `raw` is the styles as given, `before` and `after`
+/// the layer around `css::apply`.
+fn edited_overrides(
+    raw: &Styles,
+    applied: &css::Applied,
+    before: &Node,
+    after: &Node,
+) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = (raw.iter().map(|(k, _)| k.as_str()))
+        .filter(|k| !applied.ignored.iter().any(|i| i == k))
+        .filter_map(|k| match k {
+            "border" => Some(TokenProp::Stroke.field()),
+            "boxShadow" | "textShadow" | "filter" | "effectStyle" => Some("effects"),
+            k if css::is_backdrop_filter(k) => Some("effects"),
+            k => TokenProp::from_css_key(k, after).map(TokenProp::field),
+        })
+        .map(crate::editor::structure::override_key)
+        .collect();
+    // A filter can apply in part and still be reported as ignored.
+    if (&after.style.effects, &after.effect_style) != (&before.style.effects, &before.effect_style)
+    {
+        out.push("effects");
+    }
+    // Only a size style counts, since a font change can also resize text.
+    let sized = (raw.iter()).any(|(k, _)| {
+        matches!(
+            k.as_str(),
+            "width" | "height" | "minWidth" | "maxWidth" | "minHeight" | "maxHeight"
+        )
+    });
+    if sized && (before.rect.w, before.rect.h) != (after.rect.w, after.rect.h) {
+        out.push("size");
+    }
+    if (before.rect.x, before.rect.y) != (after.rect.x, after.rect.y) {
+        out.push("position");
+    }
+    if (before.layout, before.layout_child) != (after.layout, after.layout_child) {
+        out.push("layout");
+    }
+    out
 }
 
 fn mark_override(n: &mut Node, key: &str) {

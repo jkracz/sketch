@@ -320,3 +320,167 @@ fn system_css_starts_with_the_systems_first_mode() {
     let root = css.as_str().unwrap().split("}").next().unwrap();
     assert!(root.contains("--acme-bg: #000000;"), "{css}");
 }
+
+/// "Acme" with a Button main component (120x40, filled with `--acme-primary`, labeled
+/// "Label") and a Card, published.
+fn with_components(store: &Store) -> exec::SessionHost {
+    let mut h = published(store);
+    for html in [
+        r#"<div layer-name="Button" style="width:120px; height:40px; display:flex; align-items:center; justify-content:center; background-color:var(--primary)"><span style="color:#ffffff">Label</span></div>"#,
+        r#"<div layer-name="Card" style="width:320px; height:200px; background-color:#ffffff"></div>"#,
+    ] {
+        let r = call(
+            &mut h,
+            "write_html",
+            json!({"targetNodeId": "root", "mode": "insert-children", "html": html}),
+        );
+        h.ed.selection = vec![node(&r["createdNodeIds"][0])];
+        h.ed.create_component();
+    }
+    let r = call(&mut h, "publish_design_system", json!({}));
+    assert_eq!(r["version"], 2);
+    h
+}
+
+#[test]
+fn agents_see_components_in_short_and_load_a_tree_only_when_asked() {
+    let store = store();
+    with_components(&store);
+    let mut h = consumer(&store);
+
+    let list = call(&mut h, "list_design_systems", json!({}));
+    assert_eq!(list["systems"][0]["components"], 2);
+
+    let full = call(&mut h, "get_design_system", json!({"id": "acme"}));
+    let full = full.as_str().unwrap();
+    assert!(full.contains("## Components"), "{full}");
+    assert!(full.contains("\nButton 120x40\nCard 320x200\n"), "{full}");
+    assert!(
+        !full.contains("Label"),
+        "no layers in the short form: {full}"
+    );
+
+    let json = call(
+        &mut h,
+        "get_design_system",
+        json!({"id": "acme", "format": "json", "namePattern": "but*"}),
+    );
+    assert_eq!(
+        json["components"],
+        json!([{"name": "Button", "width": 120.0, "height": 40.0}])
+    );
+    let colors = call(
+        &mut h,
+        "get_design_system",
+        json!({"id": "acme", "types": ["color"]}),
+    );
+    assert!(!colors.as_str().unwrap().contains("Components"), "{colors}");
+
+    let tree = call(
+        &mut h,
+        "get_design_system",
+        json!({"id": "acme", "component": "button"}),
+    );
+    let tree = tree.as_str().unwrap();
+    assert!(tree.starts_with("# Button 120x40 (Acme v2)"), "{tree}");
+    assert!(tree.contains(">Label</span>"), "{tree}");
+    assert!(tree.contains("var(--acme-primary)"), "{tree}");
+    let err = try_call(
+        &mut h,
+        "get_design_system",
+        json!({"id": "acme", "component": "Modal"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("Button, Card"), "{err}");
+}
+
+#[test]
+fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
+    let store = store();
+    with_components(&store);
+    let mut h = consumer(&store);
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Page", "styles": {"width": "600px", "height": "400px"}}),
+    );
+    let html = json!({
+        "targetNodeId": ab["id"], "mode": "insert-children",
+        "html": r#"<div style="display:flex; gap:8px"><x-sketch-instance component="Button"/><x-sketch-instance component="Acme/Button" layer-name="Wide" style="width:200px"/></div>"#,
+    });
+    let err = try_call(&mut h, "write_html", html.clone()).unwrap_err();
+    assert!(err.contains("use_design_system"), "{err}");
+
+    let used = call(&mut h, "use_design_system", json!({"id": "acme"}));
+    assert_eq!(used["components"], 2);
+    let r = call(&mut h, "write_html", html);
+    let inst = &r["instances"];
+    assert_eq!(inst.as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(inst[0]["component"], "Acme/Button");
+    assert_eq!(inst[0]["textLayers"][0]["text"], "Label");
+    let (plain, wide) = (node(&inst[0]["id"]), node(&inst[1]["id"]));
+    let rect = |h: &exec::SessionHost, id| h.ed.doc.get(id).unwrap().rect;
+    assert_eq!((rect(&h, plain).w, rect(&h, plain).h), (120.0, 40.0));
+    assert_eq!(rect(&h, wide).w, 200.0);
+    assert_eq!(h.ed.doc.get(wide).unwrap().name, "Wide");
+    let blue = Color::rgb(0x2f, 0x6b, 0xff);
+    assert_eq!(h.ed.doc.get(plain).unwrap().style.fill(), Some(blue));
+
+    let info = call(&mut h, "get_node_info", json!({"nodeId": inst[0]["id"]}));
+    assert_eq!(info["instanceOf"], "Acme/Button");
+
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": inst[0]["textLayers"][0]["id"], "textContent": "Sign up"}]}),
+    );
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [inst[0]["id"]], "styles": {"width": "150px"}}]}),
+    );
+    // Every tool call syncs instances from their components first.
+    call(&mut h, "get_basic_info", json!({}));
+    let label = h.ed.doc.get(plain).unwrap().children[0];
+    assert_eq!(
+        h.ed.doc.get(label).unwrap().kind.text().map(String::as_str),
+        Some("Sign up")
+    );
+    assert_eq!((rect(&h, plain).w, rect(&h, wide).w), (150.0, 200.0));
+
+    let err = try_call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+               "html": r#"<x-sketch-instance component="Modal"/>"#}),
+    )
+    .unwrap_err();
+    assert!(err.contains("no component `Modal`"), "{err}");
+}
+
+#[test]
+fn a_component_from_a_system_no_longer_published_still_lists_from_the_files_copy() {
+    let store = store();
+    let src = with_components(&store);
+    let mut h = consumer(&store);
+    call(&mut h, "use_design_system", json!({"id": "acme"}));
+    let id = src.ed.published.as_ref().unwrap().id.clone();
+    sketch_rs::systems::Registry::in_store(&store)
+        .remove(&id)
+        .unwrap();
+
+    let full = call(&mut h, "get_design_system", json!({"id": "acme"}));
+    assert!(
+        full.as_str().unwrap().contains("\nButton 120x40\n"),
+        "{full}"
+    );
+    let tree = call(
+        &mut h,
+        "get_design_system",
+        json!({"id": "acme", "component": "Button"}),
+    );
+    assert!(
+        tree.as_str().unwrap().contains("var(--acme-primary)"),
+        "{tree}"
+    );
+}

@@ -132,7 +132,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Source<'a> {
+pub(crate) struct Source<'a> {
     /// The main's page document, or `None` for the document being edited.
     pub doc: Option<&'a Document>,
     /// Copied into new instance links; `None` keeps links local.
@@ -154,7 +154,7 @@ impl Source<'_> {
 }
 
 /// Copy a subtree as a new instance subtree under `parent` (ids are fresh).
-pub(super) fn instantiate(
+pub(crate) fn instantiate(
     tx: &mut Tx,
     src: Source,
     main: NodeId,

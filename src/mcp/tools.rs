@@ -38,11 +38,13 @@ update_styles; create_text_styles and set_text_styles manage them.
 - Effect styles name a list of shadows and blurs, like Elevation/2. get_tokens lists them as \
 CSS variables. Apply one with box-shadow: var(--elevation-2) in write_html or \
 {\"effectStyle\": \"elevation-2\"} in update_styles.
-- Design systems are token sets other projects publish. list_design_systems gives a short \
-summary of each; get_design_system loads one system's usage notes and tokens (filter by types or \
-namePattern to load less); use_design_system lets the open file bind them as \
-var(--prefix-name), its text styles as prefix-name classes and its effect styles as \
-var(--prefix-name). publish_design_system publishes the open file's own tokens and styles.
+- Design systems are token sets and components other projects publish. list_design_systems \
+gives a short summary of each; get_design_system loads one system's usage notes, tokens and \
+component names (filter by types or namePattern to load less); use_design_system lets the open \
+file bind them as var(--prefix-name), its text styles as prefix-name classes and its effect \
+styles as var(--prefix-name), and place its components with \
+<x-sketch-instance component=\"Name\"/> in write_html. publish_design_system publishes the \
+open file's own tokens, styles and main components.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
@@ -65,6 +67,19 @@ fn types_filter() -> Value {
     let mut kinds: Vec<&str> = TokenKind::ALL.iter().map(|k| k.key()).collect();
     kinds.extend(["textStyle", "effectStyle"]);
     json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles and \"effectStyle\" for effect styles. Omit for all."})
+}
+
+/// `types_filter` plus `component`.
+fn design_system_types() -> Value {
+    let mut v = types_filter();
+    v["items"]["enum"]
+        .as_array_mut()
+        .expect("types_filter lists an enum")
+        .push(json!(crate::mcp::exec::COMPONENT_TYPE));
+    v["description"] = json!(
+        "Only these token types; \"textStyle\" for text styles, \"effectStyle\" for effect styles and \"component\" for components. Omit for all."
+    );
+    v
 }
 
 fn style_props(extra: &[(&str, Value)]) -> Value {
@@ -493,6 +508,10 @@ pub fn definitions() -> Vec<Value> {
              <svg> markup is imported as vector layers.\n\
              - layer-name=\"...\" names layers; <x-sketch-clone node-id=\"ID\" style=\"...\"/> \
              clones an existing node.\n\
+             - <x-sketch-instance component=\"Button\" style=\"...\"/> places an instance of \
+             a component from a design system the file uses (see get_design_system), at its own \
+             size unless style sets one. \"System/Name\" picks between systems. The result \
+             lists each instance's text layers for set_text_content.\n\
              - class=\"heading-l\" applies that text style (see get_tokens); inline styles \
              after it override single fields. Text inside the element inherits it.\n\
              - box-shadow: var(--elevation-2) applies that effect style (see get_tokens), with \
@@ -749,23 +768,25 @@ pub fn definitions() -> Vec<Value> {
         // ----------------------------------------------------------------- design systems
         tool(
             "list_design_systems",
-            "Lists published design systems: token sets other projects can use. Returns a \
-             short summary of each (name, CSS prefix, version, description, token counts by \
-             type), not the tokens. Load one with get_design_system.",
+            "Lists published design systems: tokens and components other projects can use. \
+             Returns a short summary of each (name, CSS prefix, version, description, token \
+             counts by type, component count), not the tokens. Load one with get_design_system.",
             json!({}),
             &[],
             true,
         ),
         tool(
             "get_design_system",
-            "Loads one design system: its usage notes and tokens, one compact line per token. \
-             Pass `types` or `namePattern` to load only what the task needs. Works without an \
-             open project.",
+            "Loads one design system: its usage notes, tokens (one compact line each) and \
+             components (name and size). Pass `types` or `namePattern` to load only what the \
+             task needs, and `component` to load one component's layers. Works without an open \
+             project.",
             json!({
                 "id": {"type": "string", "description": "The system's id, name or prefix, from list_design_systems."},
-                "types": types_filter(),
-                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case, e.g. \"--brand-color-*\". Text styles match as \".class\"."},
-                "format": {"type": "string", "enum": ["text", "json", "css", "tailwind"], "description": "\"text\" (default): notes and `--name: value;` lines. \"json\": structured. \"css\" or \"tailwind\": a stylesheet without notes."},
+                "types": design_system_types(),
+                "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case, e.g. \"--brand-color-*\". Text styles match as \".class\", components by name (\"Button*\")."},
+                "component": {"type": "string", "description": "A component's name: returns its layers as JSX instead of the system."},
+                "format": {"type": "string", "enum": ["text", "json", "css", "tailwind"], "description": "\"text\" (default): notes and `--name: value;` lines. \"json\": structured. \"css\" or \"tailwind\": a stylesheet without notes or components."},
             }),
             &["id"],
             true,
@@ -893,8 +914,16 @@ styles are read-only classes with the same prefix (brand-heading-l), and its eff
 read-only variables (--brand-elevation-2). To customize a token, alias
 it from a local token (create_tokens with value var(--brand-primary)). get_tokens lists the
 file's own tokens and one line per system; pass system to see a system's tokens.
-publish_design_system publishes the open file's own tokens and styles; write notes that say
-which token or style to use where.
+publish_design_system publishes the open file's own tokens, styles and main components; write
+notes that say which token, style or component to use where.
+
+Design system components: get_design_system lists each as `Name WxH`; pass component: \"Name\"
+to read one's layers as JSX before using it. After use_design_system, place one with
+<x-sketch-instance component=\"Button\"/> in write_html, inside any frame and flex layout.
+It keeps the component's size unless style sets width or height. write_html returns each
+instance's text layers; change a label with set_text_content. Edits to an instance's layers
+override the component, and everything else updates when the system publishes a new version.
+get_node_info shows instanceOf for an instance. Don't rebuild a component the system has.
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 
@@ -905,7 +934,8 @@ Elements: div/section/header/footer/nav/main/article/aside/ul/ol/li/button/form 
 p/h1–h6/span/label/a/strong/em/code/pre (elements holding only text) → text layers (with a
 frame around them when they have a background, border, padding or box-shadow); img → image
 rectangle;
-svg → vector layers; br → line break; x-sketch-clone node-id=ID → copy of an existing layer.
+svg → vector layers; br → line break; x-sketch-clone node-id=ID → copy of an existing layer;
+x-sketch-instance component=Name → instance of a design system component (see get_design_system).
 
 Default sizes (like CSS): h1 32px bold, h2 24px bold, h3 20px bold, h4–h6 16px bold, p 16px,
 small 13px, code/pre 14px; color is inherited, default black.
