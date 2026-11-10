@@ -205,6 +205,18 @@ impl Editor {
         self.rec = None;
     }
 
+    /// Write current token values into layers on this page that show old ones. Requires an
+    /// open transaction.
+    pub(super) fn write_stale_values(&mut self) {
+        let stale: Vec<NodeId> = (self.doc.nodes.values())
+            .filter(|n| self.is_stale(&self.doc, n))
+            .map(|n| n.id)
+            .collect();
+        if !stale.is_empty() {
+            self.write_values(&stale);
+        }
+    }
+
     /// Requires an open transaction.
     fn write_values(&mut self, ids: &[NodeId]) {
         let tokens = self.tokens.clone();

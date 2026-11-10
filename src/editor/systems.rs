@@ -100,6 +100,9 @@ impl Editor {
             // This page's instances in the same step, so undo brings back layers the update
             // removed with their overrides.
             |ed| {
+                // New token values first, or the commit would count bound layers that still
+                // show old ones as edited by hand and unbind them.
+                ed.write_stale_values();
                 let roots = ed.linked_roots(&ed.doc);
                 ed.sync_instances(&roots);
             },

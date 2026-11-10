@@ -364,3 +364,32 @@ fn undoing_an_update_brings_back_a_removed_layer_with_its_override() {
     assert_eq!(n.style.fill(), Some(GREEN));
     assert_eq!(n.instance.as_ref().unwrap().overrides, ["fills"]);
 }
+
+#[test]
+fn an_update_keeps_a_token_an_instance_layer_binds_itself() {
+    let store = temp_store();
+    let (s, mut src) = source(&store);
+    let (_, _, plain) = component(&mut src, "Button", 0.0);
+    let sys = publish_open(&s, &mut src, &PublishRequest::default()).system;
+    let (mut c, mut app) = consumer(&store, "App", &sys);
+    let inst = place(&mut app, "Button", 0.0);
+    let layer = kids(&app, 0, inst)[1];
+    let brand = app.tokens.by_css_name("--brand-brand").unwrap().id.clone();
+    app.bind_token(&[layer], TokenProp::Fill, &brand);
+    let dir = close(&mut c, &mut app);
+
+    let token = src.tokens.by_css_name("--brand").unwrap().id.clone();
+    src.edit_tokens("edit", None, |t| {
+        t.update(&token, None, Some("#0000ff"), None)
+    })
+    .unwrap();
+    src.edit("name", |tx| {
+        tx.node_mut(plain).unwrap().name = "Renamed".into()
+    });
+    publish_open(&s, &mut src, &PublishRequest::default());
+    let (_c, app) = reopen(&store, &dir);
+    let n = app.doc.get(layer).unwrap();
+    assert_eq!(n.name, "Renamed");
+    assert_eq!(n.tokens.get(&TokenProp::Fill), Some(&brand));
+    assert_eq!(n.style.fill(), Some(BLUE));
+}
