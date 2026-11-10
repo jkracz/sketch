@@ -726,6 +726,22 @@ impl Editor {
     /// Align the selection: to its bounds, or a single layer to its parent frame.
     /// `axis` 0 = x, 1 = y; `to` 0 = start, 0.5 = center, 1 = end.
     pub fn align(&mut self, axis: usize, to: f64) {
+        let moves = self.align_moves(axis, to);
+        self.translate("Align", moves);
+    }
+
+    /// Move layers by the given offsets as one edit.
+    pub fn translate(&mut self, label: &str, moves: Vec<(NodeId, V2)>) {
+        self.edit(label, |tx| {
+            for (id, d) in moves {
+                let n = tx.node_mut(id).unwrap();
+                n.rect = n.rect.translate(d);
+            }
+        });
+    }
+
+    /// How far [`Editor::align`] would move each selected layer.
+    pub fn align_moves(&self, axis: usize, to: f64) -> Vec<(NodeId, V2)> {
         let ids: Vec<NodeId> = self
             .top_selection()
             .into_iter()
@@ -734,14 +750,15 @@ impl Editor {
         let target = if ids.len() == 1 {
             match self.doc.get(ids[0]).and_then(|n| n.parent) {
                 Some(p) => self.doc.world_rect(p),
-                None => return,
+                None => return Vec::new(),
             }
         } else {
             self.selection_bounds()
         };
-        let Some(t) = target else { return };
-        let moves: Vec<(NodeId, V2)> = ids
-            .iter()
+        let Some(t) = target else {
+            return Vec::new();
+        };
+        ids.iter()
             .filter_map(|id| {
                 let r = self.doc.world_rect(*id)?;
                 let d = if axis == 0 {
@@ -751,13 +768,7 @@ impl Editor {
                 };
                 Some((*id, d))
             })
-            .collect();
-        self.edit("Align", |tx| {
-            for (id, d) in moves {
-                let n = tx.node_mut(id).unwrap();
-                n.rect = n.rect.translate(d);
-            }
-        });
+            .collect()
     }
 
     /// Equalize the gaps between 3+ selected layers along an axis.

@@ -33,7 +33,8 @@ padding, align-items, justify-content) is the layout model; no margin, grid or t
 - Text defaults to Inter. Use px for font sizes. Find Google Fonts with search_fonts, by name \
 or category, then set font-family and font-weight.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
-delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape; change an arrow later \
+delete_nodes. Layer commands: lock_nodes, group_nodes, ungroup_nodes, flip_nodes, align_nodes, \
+distribute_nodes. Whiteboard shapes, sticky notes and arrows: create_shape; change an arrow later \
 with update_arrows. Pencil strokes: create_stroke. Hand-drawn style: update_styles with \
 {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
 - Vectors: boolean_nodes (union, subtract, intersect, exclude), flatten_nodes, and \
@@ -617,8 +618,18 @@ fn core_definitions() -> Vec<Value> {
              detaches the style. textStyle: \"none\" or effectStyle: \"none\" detaches the \
              layer from its style and keeps what it shows. mode: \"Dark\" makes frames and \
              their children show tokens in that mode (\"inherit\" clears it). Hand-drawn keys: sketch, \
-             roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
-             ignoredStyles.",
+             roughness, fillStyle, strokeStyle, seed.\n\
+             Layer keys: horizontalConstraint (left, right, left-right, center, scale) and \
+             verticalConstraint (top, bottom, top-bottom, center, scale) set how a layer follows \
+             its parent frame's resizes, when the frame has no auto layout or the layer is \
+             position: absolute; autoLayout: false removes a frame's auto layout and keeps \
+             its children where they are; strokeAlign (inside, center, outside; border sets \
+             inside), strokeLinecap (butt, round, square), strokeLinejoin (miter, round, bevel); \
+             sides for polygons and star points; innerRadius for stars (0.01 to 1, or a percent). \
+             A radial gradient takes a size and center: \
+             radial-gradient(ellipse 30% 60% at 25% 50%, ...), circle 80px, closest-side and the \
+             other size keywords; without a size it is 50% 50%.\n\
+             Styles with no effect are returned under ignoredStyles.",
             json!({"updates": {"type": "array", "description": "Each item applies styles to nodeIds.", "items": {
                 "type": "object",
                 "properties": {
@@ -889,6 +900,7 @@ fn core_definitions() -> Vec<Value> {
     ];
     all.extend(components::definitions());
     all.extend(super::styles::definitions());
+    all.extend(super::layers::definitions());
     all
 }
 
@@ -1048,6 +1060,21 @@ instance's text layers; change a label with set_text_content. Edits to an instan
 override the component, and everything else updates when the system publishes a new version.
 get_node_info shows instanceOf for an instance. Don't rebuild a component the system has.
 
+Layers: lock_nodes locks layers so the user can't select or drag them by accident (pass
+locked: false to unlock). group_nodes groups layers that share a parent and ungroup_nodes
+undoes it, for frames too. flip_nodes mirrors, align_nodes lines layers up with each other or
+centers one in its parent frame, and distribute_nodes evens out the gaps between three or more.
+Each is one undo step.
+Free frames (no auto layout): children sit at left/top, and horizontalConstraint /
+verticalConstraint in update_styles say how they follow when the frame resizes (in an auto
+layout frame, only position:absolute children use them), e.g. a footer
+with verticalConstraint: \"bottom\" and horizontalConstraint: \"left-right\". To turn a flex
+frame into a free one, update_styles {autoLayout: false}. get_computed_styles shows constraints
+that aren't left/top.
+Strokes: border is inside like CSS; strokeAlign moves it to center or outside, and
+strokeLinecap / strokeLinejoin set caps and joins. Polygons and stars change with sides and
+innerRadius.
+
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
 
 pub const GUIDE_HTML: &str = "\
@@ -1070,6 +1097,10 @@ justify-content, align-items, align-self, flex-grow, overflow, background, backg
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
 font-family, font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
+radial-gradient() takes a size and center: ellipse 30% 60% at 25% 50%, circle 80px, or
+closest-side, farthest-side, closest-corner, farthest-corner; without a size it is 50% 50%.
+Sketch keys (see update_styles): horizontal-constraint, vertical-constraint, auto-layout
+(false makes a free frame), stroke-align, stroke-linecap, stroke-linejoin, sides, inner-radius.
 
 Effects: box-shadow with lists, inset and spread, text-shadow on text, filter: blur(),
 backdrop-filter: blur(). A shadow whose color is var(--token) stays bound to that color token.
@@ -1081,7 +1112,8 @@ pub const GUIDE_WHITEBOARD: &str = "\
 # Whiteboard elements
 
 create_shape({type, x, y, width, height, styles}) for rectangle, ellipse, diamond, triangle,
-polygon (sides), star (sides = points), sticky (text, background color), text (text).
+polygon (sides), star (sides = points, styles.innerRadius = inner ratio), sticky (text,
+background color), text (text). Change sides and innerRadius later with update_styles.
 Lines and arrows: create_shape({type: \"arrow\", points: [[x1,y1],[x2,y2]],
 startNodeId, endNodeId, route: \"elbow\", endHead: \"triangle\"}). With start/end nodes the
 points can be omitted: the arrow is routed between the shapes and follows them when they move.
