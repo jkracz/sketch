@@ -4431,7 +4431,13 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 s.end = s.end.min(len);
             }
             node.text_style.spans.retain(|s| s.end > s.start);
+            let size = (node.rect.w, node.rect.h);
             fit_text(tx, id, false);
+            // The new text's size, or the next sync from the main puts back the old one.
+            let node = tx.node_mut(id).unwrap();
+            if (node.rect.w, node.rect.h) != size {
+                mark_override(node, "size");
+            }
             relayout(tx, Some(id));
             Ok(())
         },

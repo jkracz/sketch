@@ -447,6 +447,11 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
         Some("Sign up")
     );
     assert_eq!((rect(&h, plain).w, rect(&h, wide).w), (150.0, 200.0));
+    let other = h.ed.doc.get(wide).unwrap().children[0];
+    assert!(
+        rect(&h, label).w > rect(&h, other).w,
+        "the longer label keeps its own width"
+    );
 
     let err = try_call(
         &mut h,
