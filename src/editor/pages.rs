@@ -80,7 +80,6 @@ impl Editor {
             .collect();
         self.active_page = active_i;
         self.meta_dirty = false;
-        self.sync_page_instances(active_i);
     }
 
     pub fn active_page_id(&self) -> &str {

@@ -162,6 +162,35 @@ impl Document {
         Rect::union_all(&rects)
     }
 
+    /// Mend the tree after undo or redo replayed snapshots over changes made outside the
+    /// history (instances synced from another page): drop references to missing nodes and
+    /// nodes no longer reachable, and keep `next_id` above every id in use.
+    pub fn prune(&mut self) {
+        let nodes = &self.nodes;
+        self.root.retain(|id| nodes.contains_key(id));
+        let missing: Vec<NodeId> = (self.nodes.values())
+            .filter(|n| n.children.iter().any(|c| !self.nodes.contains_key(c)))
+            .map(|n| n.id)
+            .collect();
+        for id in missing {
+            let n = self.nodes.get(&id).unwrap();
+            let kept = (n.children.iter().copied())
+                .filter(|c| self.nodes.contains_key(c))
+                .collect();
+            self.nodes.get_mut(&id).unwrap().children = kept;
+        }
+        let mut reached = std::collections::HashSet::new();
+        let mut stack = self.root.clone();
+        while let Some(id) = stack.pop() {
+            if reached.insert(id) {
+                stack.extend(self.nodes[&id].children.iter().copied());
+            }
+        }
+        self.nodes.retain(|id, _| reached.contains(id));
+        let top = self.nodes.keys().map(|id| id.0 + 1).max().unwrap_or(1);
+        self.next_id = self.next_id.max(top);
+    }
+
     /// Structural invariants, used by tests and after loading files.
     pub fn validate(&self) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();

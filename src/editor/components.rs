@@ -122,15 +122,10 @@ impl Editor {
         let changed = self.with_page(i, |ed| {
             ed.rec = Some((Recording::new("Sync components", &ed.doc), None));
             ed.sync_instances(&roots);
-            let changed = ed
-                .rec
-                .as_ref()
-                .is_some_and(|(r, _)| !r.touched().is_empty());
-            if changed {
-                ed.fixup();
-            }
-            ed.rec = None;
-            changed
+            ed.fixup();
+            // Layers can end where they began: a mode the instance overrides is written back.
+            let (rec, _) = ed.rec.take().unwrap();
+            (rec.touched().iter()).any(|id| rec.before(*id) != Some(&ed.doc.get(*id).cloned()))
         });
         if changed {
             self.pages[i].saved_gen = u64::MAX;
@@ -423,6 +418,46 @@ mod tests {
         assert_eq!(inner_fill(&e, 1, inst), Some(RED));
         e.sync_all_instances();
         assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
+    }
+
+    #[test]
+    fn undo_after_a_structural_sync_keeps_the_page_whole() {
+        let (mut e, main, _) = two_pages();
+        copy(&mut e, &[main]);
+        let inst = paste_on(&mut e, 1);
+        e.add_node(
+            Node::new(NodeId(0), NodeKind::Rect, Rect::new(0.0, 0.0, 9.0, 9.0)),
+            None,
+        );
+        e.switch_page(0);
+        let extra = Node::new(NodeId(0), NodeKind::Rect, Rect::new(50.0, 10.0, 5.0, 5.0));
+        let extra = e.add_node(extra, Some(main));
+        e.switch_page(1);
+        assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
+        // An unrelated undo rewinds `next_id`; new layers must not take the synced child's id.
+        e.undo();
+        e.doc.validate().unwrap();
+        let n = Node::new(NodeId(0), NodeKind::Rect, Rect::new(0.0, 0.0, 9.0, 9.0));
+        e.add_node(n, None);
+        e.doc.validate().unwrap();
+        assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
+        // Undoing the paste leaves nothing of the instance behind.
+        e.undo();
+        e.undo();
+        e.doc.validate().unwrap();
+        assert!(e.doc.nodes.is_empty(), "{:?}", e.doc.nodes.keys());
+        // Removing the child from the main, then undoing on the instance page.
+        e.redo();
+        e.switch_page(0);
+        e.edit("delete", |tx| tx.remove(extra));
+        e.switch_page(1);
+        e.edit("move", |tx| tx.node_mut(inst).unwrap().rect.x = 300.0);
+        e.switch_page(0);
+        e.undo();
+        e.switch_page(1);
+        e.undo();
+        e.doc.validate().unwrap();
+        assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
     }
 
     #[test]

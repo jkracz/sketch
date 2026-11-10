@@ -443,6 +443,8 @@ impl Editor {
     }
 
     fn after_history(&mut self) {
+        // Instances synced from other pages changed outside the history.
+        self.doc.prune();
         self.revision += 1;
         self.doc_stamp = next_stamp();
         self.selection.retain(|id| self.doc.nodes.contains_key(id));
