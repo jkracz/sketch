@@ -2264,6 +2264,21 @@ impl Editor {
         offset: V2,
         from: Option<&str>,
     ) -> Vec<NodeId> {
+        self.insert_subtrees_with(label, nodes, roots, world, offset, from, |_, _| {})
+    }
+
+    /// [`Editor::insert_subtrees`], then `after` runs on the new roots in the same undo step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_subtrees_with(
+        &mut self,
+        label: &str,
+        nodes: &[Node],
+        roots: &[NodeId],
+        world: &[Rect],
+        offset: V2,
+        from: Option<&str>,
+        after: impl FnOnce(&mut Tx, &[NodeId]),
+    ) -> Vec<NodeId> {
         let here = self.pages[self.current_page()].id.clone();
         let same_page = from == Some(here.as_str());
         let nodes = self.relink_for_paste(nodes, roots, from);
@@ -2280,6 +2295,7 @@ impl Editor {
                     l.page = None;
                 }
             }
+            after(tx, &ids);
             ids
         });
         // Instances of mains elsewhere show the main as it is now, not as it was copied.

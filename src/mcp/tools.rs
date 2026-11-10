@@ -20,6 +20,10 @@ project's location. To put a project in a folder the user names, pass the folder
 parentId to create_file or move_resources. If it isn't listed, call create_folder first, which \
 returns the existing folder when the name is taken. parentId \"root\" is the top level. Two \
 folders can hold projects with the same name, so prefer ids or Folder/Project keys.
+- duplicate_file copies a project. trash_resources moves projects and folders to the trash; \
+list_trash and restore_resources bring them back. Only the user can delete forever.
+- Pages: create_page, rename_pages, duplicate_page, arrange_pages (reorder), delete_pages. \
+move_to_page moves or copies layers to another page.
 - For details read get_guide({ topic: \"sketch-rs-mcp-instructions\" }) once per session.
 - pageId defaults to the page the user is viewing; pass it to work on another page without \
 switching the user's view. Node ids are opaque strings; never show them to the user.
@@ -51,6 +55,8 @@ file bind them as var(--prefix-name), its text styles as prefix-name classes and
 styles as var(--prefix-name), and place its components with \
 <x-sketch-instance component=\"Name\"/> in write_html. publish_design_system publishes the \
 open file's own tokens, styles and main components.
+- export writes PNG, SVG or PDF files; the key \"root\" exports the whole page and \
+transparent: true drops the white background.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
@@ -161,7 +167,13 @@ pub const MAX_FONT_RESULTS: usize = 100;
 /// The `parentId` for projects in no folder.
 pub const TOP_LEVEL: &str = "root";
 
-fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
+pub(super) fn tool(
+    name: &str,
+    desc: &str,
+    props: Value,
+    required: &[&str],
+    read_only: bool,
+) -> Value {
     let mut props = props;
     if let Some(m) = props.as_object_mut()
         && !m.contains_key("fileId")
@@ -203,6 +215,13 @@ fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool
 
 /// Every tool, as MCP `Tool` JSON objects.
 pub fn definitions() -> Vec<Value> {
+    let mut v = core_definitions();
+    v.extend(super::pages::definitions());
+    v.extend(super::projects::definitions());
+    v
+}
+
+fn core_definitions() -> Vec<Value> {
     let node_id = |d: &str| json!({"type": "string", "description": d});
     let ids = |d: &str| json!({"type": "array", "items": {"type": "string"}, "description": d});
     let mut all = vec![
@@ -447,14 +466,17 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "export",
             "Export nodes to files. `nodes` maps node ids to export settings \
-             ([{format: png|svg|pdf, scale: \"2x\" | \"512w\" | \"512h\" | \"720p\"}]; [] = 2x PNG). \
-             Files go to `directory` (default: the Downloads folder). Returns the paths written.",
+             ([{format: png|svg|pdf, scale: \"2x\" | \"512w\" | \"512h\" | \"720p\", \
+             transparent?}]; [] = 2x PNG). The key \"root\" exports the whole page. Exports have a \
+             white background unless transparent is true. Files go to `directory` (default: the \
+             Downloads folder). Returns the paths written.",
             json!({
                 "nodes": {"type": "object", "additionalProperties": {"type": "array", "items": {
                     "type": "object",
                     "properties": {
                         "format": {"type": "string", "enum": ["png", "svg", "pdf"]},
                         "scale": {"type": "string"},
+                        "transparent": {"type": "boolean", "description": "Leave the background transparent instead of white. Default false."},
                     },
                     "required": ["format"],
                 }}},
@@ -471,6 +493,7 @@ pub fn definitions() -> Vec<Value> {
             json!({
                 "nodeIds": ids("Nodes to put on the pages."),
                 "path": {"type": "string", "description": "Output file (default: Downloads/<project>.pdf)."},
+                "transparent": {"type": "boolean", "description": "Leave page backgrounds transparent instead of white. Default false."},
             }),
             &["nodeIds"],
             false,
@@ -881,7 +904,19 @@ shows all folders plus each project's `location`, so answer \"where is X?\" from
 - Folder not listed: create_folder if the user asked for a new one. If it looks like a typo of
   a listed folder, use that folder or ask.
 Both move_resources and rename_resource work on the open project. Report the returned name,
-which can differ from the old one after a name clash. Deleting folders is left to the user.
+which can differ from the old one after a name clash.
+- \"Delete X\": trash_resources moves projects and folders to the trash, where the user can
+  still get them back. Say that it's in the trash. Deleting forever and emptying the trash
+  are left to the user. The open project can't be trashed; open another one first.
+- \"Bring X back\": list_trash, then restore_resources with its id. A folder's id or name
+  restores every project trashed from it.
+- \"Make a copy of X\": duplicate_file, then open_file with the returned fileId.
+
+Pages: each page is its own canvas with its own undo history. create_page, duplicate_page,
+rename_pages and arrange_pages never switch the user's page. delete_pages can't be undone, so
+delete only pages the user asked to remove. move_to_page moves layers to another page (copy:
+true copies them), keeping their place on the canvas. Their ids change; use the returned
+idMap. Moving main components keeps their instances linked.
 
 Whiteboard: create_shape makes rectangles, ellipses, diamonds, stickies, text and arrows that
 bind to shapes (they re-route when shapes move). Turn on the hand-drawn look with
@@ -929,7 +964,8 @@ read-only variables (--brand-elevation-2). To customize a token, alias
 it from a local token (create_tokens with value var(--brand-primary)). get_tokens lists the
 file's own tokens and one line per system; pass system to see a system's tokens.
 publish_design_system publishes the open file's own tokens, styles and main components; write
-notes that say which token, style or component to use where.
+notes that say which token, style or component to use where. unpublish_design_system takes it
+off the list; files that use it keep their copy, and publishing again brings it back.
 
 Components: build one as a frame with write_html, then create_component({nodeIds: [frame],
 name: \"Button/Primary\"}). Several layers, or a non-frame, are wrapped in a new frame. Place

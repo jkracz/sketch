@@ -123,32 +123,32 @@ impl Host for SessionHost {
 
 // ------------------------------------------------------------------------------ arguments
 
-struct Args<'a>(&'a Map<String, Value>);
+pub(super) struct Args<'a>(pub(super) &'a Map<String, Value>);
 
 impl<'a> Args<'a> {
-    fn get(&self, k: &str) -> Option<&'a Value> {
+    pub(super) fn get(&self, k: &str) -> Option<&'a Value> {
         self.0.get(k).filter(|v| !v.is_null())
     }
-    fn str(&self, k: &str) -> Option<&'a str> {
+    pub(super) fn str(&self, k: &str) -> Option<&'a str> {
         self.get(k).and_then(Value::as_str).map(str::trim)
     }
-    fn req_str(&self, k: &str) -> Result<&'a str, String> {
+    pub(super) fn req_str(&self, k: &str) -> Result<&'a str, String> {
         self.str(k)
             .ok_or_else(|| format!("missing required string argument `{k}`"))
     }
-    fn num(&self, k: &str) -> Option<f64> {
+    pub(super) fn num(&self, k: &str) -> Option<f64> {
         self.get(k).and_then(|v| match v {
             Value::Number(n) => n.as_f64(),
             Value::String(s) => s.trim().trim_end_matches("px").parse().ok(),
             _ => None,
         })
     }
-    fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
+    pub(super) fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
         self.get(k)
             .and_then(Value::as_array)
             .ok_or_else(|| format!("missing required array argument `{k}`"))
     }
-    fn strs(&self, k: &str) -> Result<Vec<String>, String> {
+    pub(super) fn strs(&self, k: &str) -> Result<Vec<String>, String> {
         Ok(self
             .arr(k)?
             .iter()
@@ -161,7 +161,7 @@ impl<'a> Args<'a> {
     }
 }
 
-fn text(v: Value) -> ToolResult {
+pub(super) fn text(v: Value) -> ToolResult {
     Ok(vec![Out::Text(
         serde_json::to_string_pretty(&v).unwrap_or_default(),
     )])
@@ -173,7 +173,7 @@ fn r2(v: f64) -> Value {
 
 // ------------------------------------------------------------------------------ ids
 
-const ROOT: &str = "root";
+pub(super) const ROOT: &str = "root";
 
 fn page_prefix(ed: &Editor, page: usize) -> &str {
     let id = &ed.pages[page].id;
@@ -184,7 +184,7 @@ pub fn node_key(ed: &Editor, page: usize, id: NodeId) -> String {
     format!("{}:{}", page_prefix(ed, page), id.0)
 }
 
-fn find_page(ed: &Editor, key: &str) -> Result<usize, String> {
+pub(super) fn find_page(ed: &Editor, key: &str) -> Result<usize, String> {
     let key = key.trim();
     ed.pages
         .iter()
@@ -211,7 +211,7 @@ fn find_page(ed: &Editor, key: &str) -> Result<usize, String> {
         })
 }
 
-fn page_arg(ed: &Editor, a: &Args) -> Result<usize, String> {
+pub(super) fn page_arg(ed: &Editor, a: &Args) -> Result<usize, String> {
     match a.str("pageId") {
         Some(p) if !p.is_empty() => find_page(ed, p),
         _ => Ok(ed.active_page),
@@ -219,7 +219,11 @@ fn page_arg(ed: &Editor, a: &Args) -> Result<usize, String> {
 }
 
 /// Resolve a node id string to (page index, node id).
-fn resolve(ed: &Editor, key: &str, default_page: usize) -> Result<(usize, NodeId), String> {
+pub(super) fn resolve(
+    ed: &Editor,
+    key: &str,
+    default_page: usize,
+) -> Result<(usize, NodeId), String> {
     let key = key.trim().trim_start_matches('#');
     let (page, num) = match key.split_once(':') {
         Some((p, n)) => (find_page(ed, p)?, n),
@@ -272,6 +276,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
         "get_guide" => guide(&a),
         "list_design_systems" => list_design_systems(host),
         "get_design_system" => get_design_system(host, &a),
+        n if super::projects::NAMES.contains(&n) => super::projects::call(host, n, &a),
         _ => {
             check_file(host, &a)?;
             if matches!(
@@ -337,6 +342,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
                 }
+                n if super::pages::NAMES.contains(&n) => super::pages::call(ed, n, &a),
                 _ => Err(format!("unknown tool `{name}`")),
             };
             let ed = host.editor();
@@ -351,7 +357,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
 }
 
 /// Where a project sits, as "Folder/Project". Also accepted as a project key.
-fn location(e: &Entry) -> String {
+pub(super) fn location(e: &Entry) -> String {
     match &e.folder {
         Some(f) => format!("{}/{}", f.name, e.manifest.name),
         None => e.manifest.name.clone(),
@@ -385,7 +391,7 @@ fn pick<'a>(
 
 /// Projects match by manifest id, absolute path, name or "Folder/Project". Two folders can each
 /// hold a project with the same name, so a bare name can be ambiguous, and that's an error.
-fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
+pub(super) fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
     match lookup_project(store, key)? {
         Some(dir) => Ok(dir),
         None => Err(format!("project `{key}` not found (see list_resources)")),
@@ -394,7 +400,7 @@ fn find_project(store: &Store, key: &str) -> Result<PathBuf, String> {
 
 /// `find_project`, telling "no such project" (None) apart from "several match" (an error), so
 /// callers only try a folder when no project was meant.
-fn lookup_project(store: &Store, key: &str) -> Result<Option<PathBuf>, String> {
+pub(super) fn lookup_project(store: &Store, key: &str) -> Result<Option<PathBuf>, String> {
     let key = key.trim().trim_start_matches("/file/");
     let p = Path::new(key);
     if p.is_absolute() && p.join(crate::project::MANIFEST).is_file() {
@@ -418,7 +424,7 @@ fn lookup_project(store: &Store, key: &str) -> Result<Option<PathBuf>, String> {
 
 /// Folders match by id, name (ignoring case) or absolute path. A miss lists the folders that
 /// exist, so an agent can correct a typo instead of creating a near-duplicate.
-fn find_folder(store: &Store, key: &str) -> Result<Folder, String> {
+pub(super) fn find_folder(store: &Store, key: &str) -> Result<Folder, String> {
     let key = key.trim();
     let folders = store.folders();
     folders
@@ -451,7 +457,7 @@ fn parent_arg(store: &Store, key: &str) -> Result<Option<Folder>, String> {
     find_folder(store, key).map(Some)
 }
 
-fn check_file(host: &mut dyn Host, a: &Args) -> Result<(), String> {
+pub(super) fn check_file(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     if !host.canvas_open() {
         return Err(
             "No project is open in Sketch (the home screen is showing). Call list_resources \
@@ -481,7 +487,7 @@ fn check_file(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     }
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
     a == b || a.canonicalize().ok() == b.canonicalize().ok()
 }
 
@@ -2715,11 +2721,18 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut written = Vec::new();
     for (key, settings) in nodes {
-        let (page, id) = resolve(ed, key, def)?;
+        // "root" is the whole page, as the app's Page scope exports it.
+        let (page, roots, name) = if key.trim() == ROOT {
+            let doc = ed.page_doc(def);
+            (def, doc.root.clone(), ed.pages[def].name.clone())
+        } else {
+            let (page, id) = resolve(ed, key, def)?;
+            let name = ed.page_doc(page).get(id).unwrap().name.clone();
+            (page, vec![id], name)
+        };
         let doc = ed.page_doc(page);
-        let plain = crate::io::svg::export_bounds(doc, &[id]).ok_or("nothing to export")?;
-        let drawn = crate::io::svg::effect_bounds(doc, &[id]).unwrap_or(plain);
-        let name = doc.get(id).unwrap().name.clone();
+        let plain = crate::io::svg::export_bounds(doc, &roots).ok_or("nothing to export")?;
+        let drawn = crate::io::svg::effect_bounds(doc, &roots).unwrap_or(plain);
         let list: Vec<Value> = match settings.as_array() {
             Some(v) if !v.is_empty() => v.clone(),
             _ => vec![json!({"format": "png", "scale": "2x"})],
@@ -2747,12 +2760,12 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
                 format,
                 scope: Scope::Selection,
                 scale,
-                transparent: false,
+                transparent: s.get("transparent").and_then(Value::as_bool) == Some(true),
             };
             let item = Item {
                 name: name.clone(),
                 doc,
-                roots: vec![id],
+                roots: roots.clone(),
             };
             written.extend(crate::io::export::write(
                 &spec,
@@ -2796,7 +2809,7 @@ fn export_pdf(host: &mut dyn Host, a: &Args) -> ToolResult {
         format: Format::Pdf,
         scope: Scope::Selection,
         scale: 1.0,
-        transparent: false,
+        transparent: a.get("transparent").and_then(Value::as_bool) == Some(true),
     };
     let files = crate::io::export::write(&spec, &items, &path, None)?;
     text(json!({"file": files.first(), "pages": items.len()}))
@@ -2857,7 +2870,7 @@ fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
 
 /// Lay out the outermost auto-layout frame around `id` until it settles (hug sizes depend on
 /// wrapped text heights, which depend on fill widths).
-fn relayout(tx: &mut Tx, id: Option<NodeId>) {
+pub(super) fn relayout(tx: &mut Tx, id: Option<NodeId>) {
     let Some(mut top) = id.filter(|i| tx.doc().get(*i).is_some()) else {
         return;
     };
@@ -4619,7 +4632,7 @@ fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             Some(p) => {
                 let (pp, pid) = resolve(ed, p, page)?;
                 if pp != page {
-                    return Err("duplicating to another page isn't supported".into());
+                    return Err("to copy to another page, use move_to_page with copy: true".into());
                 }
                 if !ed.page_doc(pp).get(pid).unwrap().is_container() {
                     return Err("parentId must be a frame or group".into());
@@ -4683,10 +4696,7 @@ fn move_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
                 Some(s) => {
                     let (p, sid) = resolve(ed, s, page)?;
                     if p != page {
-                        return Err(
-                            "moving between pages isn't supported; duplicate and delete instead"
-                                .into(),
-                        );
+                        return Err("to move to another page, use move_to_page".into());
                     }
                     Ok(Some(sid))
                 }
@@ -4699,9 +4709,7 @@ fn move_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             Some(p) => {
                 let (pp, pid) = resolve(ed, p, page)?;
                 if pp != page {
-                    return Err(
-                        "moving between pages isn't supported; duplicate and delete instead".into(),
-                    );
+                    return Err("to move to another page, use move_to_page".into());
                 }
                 Some(Some(pid))
             }

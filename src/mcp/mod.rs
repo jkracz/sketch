@@ -9,10 +9,14 @@
 //! * [`exec`]: runs one tool call against a [`exec::Host`] (the app, or a headless session).
 //! * [`tools`]: tool names, descriptions and schemas; [`css`] and [`html`]: the style and
 //!   markup mapping used by `write_html` / `update_styles`.
+//! * [`pages`] and [`projects`]: page, project, trash and unpublish tools, each module with
+//!   its own definitions and handlers.
 
 pub mod css;
 pub mod exec;
 pub mod html;
+pub mod pages;
+pub mod projects;
 pub mod server;
 pub mod tools;
 
