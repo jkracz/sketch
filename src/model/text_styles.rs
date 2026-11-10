@@ -1004,7 +1004,7 @@ mod tests {
     fn using(src: &TokenSet, id: &str) -> TokenSet {
         let mut s = TokenSet::default();
         let l = link(id, src.modes());
-        s.attach(l, &src.publishable(), &src.publishable_styles())
+        s.attach(l, &src.publishable(), &src.publishable_styles(), &[])
             .unwrap();
         s
     }
@@ -1013,7 +1013,7 @@ mod tests {
     fn publishing_keeps_each_modes_value_of_another_systems_token() {
         let (src, _, _) = moded();
         let mut mid = TokenSet::default();
-        mid.attach(link("a", src.modes()), &src.publishable(), &[])
+        mid.attach(link("a", src.modes()), &src.publishable(), &[], &[])
             .unwrap();
         let id = mid
             .create_style("Body", &input(&[(StyleField::Size, "var(--a-size)")]), None)
@@ -1026,7 +1026,7 @@ mod tests {
     fn removing_a_system_keeps_each_modes_value() {
         let (src, _, _) = moded();
         let mut s = TokenSet::default();
-        s.attach(link("a", src.modes()), &src.publishable(), &[])
+        s.attach(link("a", src.modes()), &src.publishable(), &[], &[])
             .unwrap();
         let id = s
             .create_style("Body", &input(&[(StyleField::Size, "var(--a-size)")]), None)
