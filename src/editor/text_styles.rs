@@ -70,7 +70,7 @@ impl Editor {
     }
 
     /// Run after `drop_broken_bindings` so only surviving token bindings become overrides.
-    /// Like there, a value the style has in any mode is the style's.
+    /// Keep values from any mode until `resync_modes` applies the layer's current mode.
     pub(super) fn check_text_style_refs(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut changes: Vec<(NodeId, Option<TextStyleRef>)> = Vec::new();

@@ -266,8 +266,7 @@ impl Editor {
                 }
             }
         }
-        // 3. Token bindings: drop hand-edited ones, then write values in each layer's mode,
-        // before layout so spacing and font size tokens lay out.
+        // 3. Sync token values before layout, since spacing and font size affect bounds.
         self.drop_broken_bindings();
         self.check_text_style_refs();
         let resynced = self.resync_modes();

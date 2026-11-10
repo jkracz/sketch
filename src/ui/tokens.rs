@@ -17,7 +17,6 @@ pub struct TokensUi {
     selected: Vec<String>,
     /// The token whose fields are shown under its row.
     open: Option<Draft>,
-    /// The mode whose name is being edited, and the text so far.
     renaming: Option<(String, String)>,
 }
 
@@ -217,7 +216,6 @@ fn label(ed: &Editor, t: &Token) -> String {
     }
 }
 
-/// Where each mode's column goes in a row, right-aligned. Rows and the mode header share it.
 fn columns(r: egui::Rect, n: usize) -> Vec<egui::Rect> {
     let w = (r.width() * 0.55 / n as f32).min(84.0);
     (0..n)
@@ -231,8 +229,6 @@ fn columns(r: egui::Rect, n: usize) -> Vec<egui::Rect> {
         .collect()
 }
 
-/// Mode names over their columns, once a group's tokens have more than one mode. This
-/// file's can be renamed and removed from their menu.
 fn mode_header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, sys: Option<&SystemLink>) {
     let modes: Vec<Mode> = match sys {
         Some(l) => l.modes.clone(),
@@ -373,8 +369,6 @@ fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token, visible: &[Str
     row_end(ui, ed, st, t, visible, &resp);
 }
 
-/// Each mode's value in its column: a swatch for colors, then the CSS. A mode that follows
-/// the first shows dimmed.
 fn mode_cells(ui: &Ui, ed: &Editor, t: &Token, r: egui::Rect, modes: &[Mode]) {
     let p = theme::pal(ui);
     for (i, (m, col)) in modes.iter().zip(columns(r, modes.len())).enumerate() {

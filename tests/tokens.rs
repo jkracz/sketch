@@ -618,8 +618,6 @@ fn modes_reach_layers_stylesheets_and_agents() {
         "unbound var() takes the mode too"
     );
     assert!(n.tokens.contains_key(&TokenProp::Fill));
-    let jsx = call(&mut h, "get_jsx", json!({"nodeId": r["createdNodeIds"][0]}));
-    assert!(jsx.to_string().contains("data-theme=\\\"dark\\\""), "{jsx}");
 
     let set_mode = |h: &mut exec::SessionHost, mode: &str| {
         call(
@@ -645,6 +643,20 @@ fn modes_reach_layers_stylesheets_and_agents() {
         n.tokens.contains_key(&TokenProp::Fill),
         "switching modes keeps bindings"
     );
+    let dir = h.session.project.as_ref().unwrap().dir.clone();
+    h.session.save(&mut h.ed).unwrap();
+    let mut reopened = exec::SessionHost::new(h.session.store.clone());
+    reopened.session.open(&mut reopened.ed, &dir).unwrap();
+    h = reopened;
+    let bg = h.ed.tokens.by_css_name("--bg").unwrap();
+    assert_eq!(
+        h.ed.tokens.resolve_in(&bg.id, Some("Dark")),
+        Some(sketch_rs::model::TokenValue::Color(Color::rgb(
+            0x22, 0x22, 0x22
+        )))
+    );
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": r["createdNodeIds"][0]}));
+    assert!(jsx.to_string().contains("data-theme=\\\"dark\\\""), "{jsx}");
     call(
         &mut h,
         "set_tokens",
@@ -653,26 +665,5 @@ fn modes_reach_layers_stylesheets_and_agents() {
     assert_eq!(
         h.ed.doc.get(child).unwrap().style.fill(),
         Some(Color::WHITE)
-    );
-}
-
-#[test]
-fn modes_survive_closing_the_project() {
-    let mut h = host();
-    call(
-        &mut h,
-        "create_tokens",
-        json!({"tokens": [{"type": "color", "name": "--bg", "value": "#ffffff", "modes": {"Dark": "#111111"}}]}),
-    );
-    let dir = h.session.project.as_ref().unwrap().dir.clone();
-    h.session.save(&mut h.ed).unwrap();
-    let mut again = exec::SessionHost::new(h.session.store.clone());
-    again.session.open(&mut again.ed, &dir).unwrap();
-    let bg = again.ed.tokens.by_css_name("--bg").unwrap().id.clone();
-    assert_eq!(
-        again.ed.tokens.resolve_in(&bg, Some("Dark")),
-        Some(sketch_rs::model::TokenValue::Color(Color::rgb(
-            0x11, 0x11, 0x11
-        )))
     );
 }

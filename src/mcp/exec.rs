@@ -1021,7 +1021,6 @@ fn fill_image(ed: &mut Editor, a: &Args) -> ToolResult {
 
 // ------------------------------------------------------------------ design tokens
 
-/// A token for agents. `modes` lists its values in other modes, only where it has its own.
 fn token_json(tokens: &TokenSet, t: &Token) -> Value {
     let mut v = json!({
         "name": tokens.css_name(t),
@@ -1038,14 +1037,12 @@ fn token_json(tokens: &TokenSet, t: &Token) -> Value {
     v
 }
 
-/// The modes a frame can pick, as "Light, Dark".
 fn mode_list(tokens: &TokenSet) -> String {
     let names: Vec<&str> = tokens.choices().iter().map(|m| m.name.as_str()).collect();
     names.join(", ")
 }
 
-/// Per-mode values from a `modes` argument ({"Dark": "#000"}), as (mode id, input or None to
-/// clear). Only this file's modes after the first take values.
+/// Map mode names to local ids. None clears an override; the first mode uses `value`.
 fn mode_inputs(tokens: &TokenSet, e: &Args) -> Result<Vec<(String, Option<String>)>, String> {
     let Some(m) = e.get("modes") else {
         return Ok(Vec::new());
@@ -1352,7 +1349,6 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let value = e.get("value").map(token_input).transpose()?;
                     let modes = mode_inputs(tokens, &e)?;
-                    // All or nothing, like `update` on its own.
                     let before = tokens.clone();
                     let done = tokens
                         .update(
@@ -2131,7 +2127,7 @@ fn jsx_node(
         }
     }
     let name = n.name.replace('"', "'");
-    // The root carries the mode it shows, so its `var()`s resolve the same outside.
+    // Preserve inherited modes when exporting a subtree on its own.
     let mode = match root {
         true => tokens.mode_at(doc, id),
         false => n.mode.as_deref().and_then(|m| tokens.mode_name(m)),
@@ -2858,7 +2854,6 @@ impl Builder<'_, '_> {
         out
     }
 
-    /// `data-theme="dark"` on a frame picks its mode, like the stylesheet `get_tokens` writes.
     fn element(
         &mut self,
         el: &Element,
@@ -3708,7 +3703,6 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
     text(v)
 }
 
-/// The `mode` style: a mode for a frame by name, or None for `inherit` or an empty string.
 fn mode_style(tokens: &TokenSet, v: &str) -> Result<Option<String>, String> {
     match v.trim() {
         "" | "inherit" | "none" => Ok(None),

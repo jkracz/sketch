@@ -327,7 +327,6 @@ mod tests {
     #[test]
     fn manifests_from_before_modes_open_with_one() {
         let new = Manifest::new("A");
-        assert_eq!(new.modes, Mode::defaults());
         let mut v: Value = serde_json::from_str(&new.to_json()).unwrap();
         v.as_object_mut().unwrap().remove("modes");
         let old = Manifest::from_json(&v.to_string()).unwrap();

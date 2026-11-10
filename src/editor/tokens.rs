@@ -89,9 +89,8 @@ impl Editor {
     /// by hand, so it is now a plain value. Runs for every edit path. Bindings to tokens that
     /// don't exist (deleted, or pasted from another project) go too.
     ///
-    /// A value the token has in any mode counts as its own: a layer moved into a frame with
-    /// another mode, or synced from a main component in one, still holds the old mode's
-    /// value until [`Editor::resync_modes`] writes the new one.
+    /// Accept values from any mode until [`Editor::resync_modes`] updates moved layers
+    /// and synced instances to their current mode.
     pub(super) fn drop_broken_bindings(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut broken: Vec<(NodeId, TokenProp)> = Vec::new();
@@ -140,7 +139,6 @@ impl Editor {
         }
     }
 
-    /// Whether a bound field or text style field of `n` doesn't show its value in `n`'s mode.
     fn is_stale(&self, doc: &crate::model::Document, n: &Node) -> bool {
         if n.tokens.is_empty() && n.text_style_ref.is_none() {
             return false;
@@ -159,8 +157,7 @@ impl Editor {
         self.rec = None;
     }
 
-    /// Write bound fields and text style fields of `ids` in each layer's mode, in the open
-    /// transaction.
+    /// Requires an open transaction.
     fn write_values(&mut self, ids: &[NodeId]) {
         let tokens = self.tokens.clone();
         let modes: Vec<Option<String>> = (ids.iter())
@@ -184,8 +181,8 @@ impl Editor {
         }
     }
 
-    /// Inside a transaction: layers whose mode may have changed (touched ones and everything
-    /// under them) take their tokens' values in their mode now. Returns the layers it wrote.
+    /// Sync touched layers and their descendants within the open transaction.
+    /// Returns the layers whose values changed.
     pub(super) fn resync_modes(&mut self) -> Vec<NodeId> {
         let Some((rec, _)) = &self.rec else {
             return Vec::new();
@@ -210,8 +207,8 @@ impl Editor {
         stale
     }
 
-    /// Show these frames, and what they hold, in a mode (a `TokenSet::choices` id), or in
-    /// their parent's with None. Other layers are skipped.
+    /// Set frames' modes by `TokenSet::choices` id. None inherits the parent's mode.
+    /// Skip other layers.
     pub fn set_frame_mode(&mut self, ids: &[NodeId], mode: Option<&str>) {
         let frames: Vec<NodeId> = (ids.iter().copied())
             .filter(|id| {
@@ -542,8 +539,6 @@ mod tests {
         assert!(e.doc.get(id).unwrap().tokens.is_empty());
     }
 
-    /// A frame in Dark mode, and a rect at the root, both bound to `bg` (white, black in
-    /// Dark).
     fn themed() -> (Editor, NodeId, NodeId, String) {
         let (mut e, rect, _) = editor_with_rect();
         let dark = vec![("dark".to_string(), "#000000".to_string())];
