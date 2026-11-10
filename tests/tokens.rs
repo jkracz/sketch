@@ -734,4 +734,14 @@ fn shapes_and_instances_keep_their_frames_mode() {
         json!({"updates": [{"nodeIds": [key(main)], "styles": {"opacity": 0.5}}]}),
     );
     assert_eq!(h.ed.doc.get(inst).unwrap().mode.as_deref(), Some("dark"));
+    assert_eq!(h.ed.doc.get(inst).unwrap().style.fill(), Some(dark));
+    // The main shows white in Light; setting white by hand still detaches.
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(inst)], "styles": {"backgroundColor": "#ffffff"}}]}),
+    );
+    let n = h.ed.doc.get(inst).unwrap();
+    assert_eq!(n.style.fill(), Some(Color::WHITE));
+    assert!(n.tokens.is_empty());
 }

@@ -3767,6 +3767,19 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
+                    // Like the inspector, an edited bindable field on an instance layer stops
+                    // following the main component.
+                    let edited: Vec<&str> = (raw.iter())
+                        .filter_map(|(k, _)| TokenProp::from_css_key(k, &n))
+                        .map(|p| crate::editor::structure::override_key(p.field()))
+                        .collect();
+                    if let Some(l) = &mut n.instance {
+                        for k in edited {
+                            if !l.overrides.iter().any(|o| o == k) {
+                                l.overrides.push(k.into());
+                            }
+                        }
+                    }
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
                     if mode.is_some() && !frame {
                         applied.ignored.push("mode".into());
