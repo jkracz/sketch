@@ -688,6 +688,12 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     }
     let is_text = n.kind.text().is_some();
     let fs = n.kind.font_size().unwrap_or(16.0);
+    // A stroke color gives a zero width 1px, unless a token owns the width.
+    let width_bound = n.tokens.contains_key(&TokenProp::StrokeWidth)
+        || styles.iter().any(|(k, _)| {
+            k.strip_prefix(TOKEN_MARKER)
+                .is_some_and(|k| matches!(k, "borderWidth" | "strokeWidth"))
+        });
     for (k, v) in styles {
         let v = v.trim();
         if k == STYLE_MARKER {
@@ -1036,7 +1042,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             "borderColor" | "stroke" => match color(v) {
                 Some(c) => {
                     n.style.stroke = (c.a > 0).then_some(c);
-                    if n.style.stroke_width <= 0.0 {
+                    if n.style.stroke_width <= 0.0 && !width_bound {
                         n.style.stroke_width = 1.0;
                     }
                     true
@@ -1427,8 +1433,9 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             }
         }
     }
+    // A bound zero still shows, so readers can see the token that owns it.
     if let Some(s) = n.style.stroke
-        && n.style.stroke_width > 0.0
+        && (n.style.stroke_width > 0.0 || n.tokens.contains_key(&TokenProp::StrokeWidth))
     {
         let kind = if n.style.dash.is_empty() {
             "solid"

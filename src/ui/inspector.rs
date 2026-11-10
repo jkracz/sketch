@@ -1259,6 +1259,7 @@ fn stroke(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         if let Some(v) = num_field(ui, ed, "W ", s.stroke_width, 0.1, 0.0..=500.0, 64.0) {
             apply(ed, "stroke width", ids, |n| n.style.stroke_width = v);
         }
+        picker(ui, ed, ids, TokenProp::StrokeWidth);
         let al = [
             (StrokeAlign::Inside, "Inside"),
             (StrokeAlign::Center, "Center"),

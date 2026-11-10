@@ -297,6 +297,113 @@ fn update_styles_with_a_plain_value_detaches() {
 }
 
 #[test]
+fn border_width_tokens_bind_the_stroke_width() {
+    let mut h = host();
+    seed(&mut h);
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [
+            {"type": "borderWidth", "name": "--border-thick", "value": "2px"},
+            {"type": "borderWidth", "name": "--border-none", "value": 0},
+        ]}),
+    );
+    let ab = artboard(&mut h);
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": ab, "mode": "insert-children",
+            "html": "<div style=\"width: 40px; height: 40px; border-style: solid; \
+                     border-color: var(--color-brand); border-width: var(--border-thick)\"></div>",
+        }),
+    );
+    let key = r["createdNodeIds"][0].clone();
+    let id = node(&key);
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.stroke_width, 2.0);
+    assert!(
+        n.tokens.contains_key(&TokenProp::StrokeWidth),
+        "{:?}",
+        n.tokens
+    );
+
+    let border = |h: &mut exec::SessionHost| {
+        let styles = call(h, "get_computed_styles", json!({"nodeIds": [key]}));
+        let s = styles.as_object().unwrap().values().next().unwrap();
+        s["border"].as_str().unwrap().to_string()
+    };
+    assert_eq!(
+        border(&mut h),
+        "var(--border-thick) solid var(--color-brand)"
+    );
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": key}));
+    assert!(
+        jsx.as_str()
+            .unwrap()
+            .contains("var(--border-thick) solid var(--color-brand)"),
+        "{jsx}"
+    );
+
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--border-thick", "value": "4px"}]}),
+    );
+    assert_eq!(h.ed.doc.get(id).unwrap().style.stroke_width, 4.0);
+    let css = call(&mut h, "get_tokens", json!({"format": "css"}));
+    assert!(
+        css.as_str().unwrap().contains("--border-thick: 4px;"),
+        "{css}"
+    );
+
+    let set = |h: &mut exec::SessionHost, styles: Value| {
+        call(
+            h,
+            "update_styles",
+            json!({"updates": [{"nodeIds": [key], "styles": styles}]}),
+        );
+    };
+    let bound = |h: &exec::SessionHost| {
+        let n = h.ed.doc.get(id).unwrap();
+        n.tokens.get(&TokenProp::StrokeWidth).cloned()
+    };
+    let thick = bound(&h);
+    set(&mut h, json!({"borderWidth": "3px"}));
+    assert_eq!(bound(&h), None, "a plain value detaches");
+    assert_eq!(border(&mut h), "3px solid var(--color-brand)");
+
+    set(&mut h, json!({"strokeWidth": "var(--border-thick)"}));
+    assert_eq!(bound(&h), thick);
+    assert_eq!(h.ed.doc.get(id).unwrap().style.stroke_width, 4.0);
+
+    set(
+        &mut h,
+        json!({"borderColor": "rgba(0, 0, 0, 0.5)", "borderWidth": "var(--border-none)"}),
+    );
+    assert_eq!(h.ed.doc.get(id).unwrap().style.stroke_width, 0.0);
+    assert_eq!(
+        border(&mut h),
+        "var(--border-none) solid rgba(0, 0, 0, 0.502)"
+    );
+
+    set(&mut h, json!({"borderColor": "#ff0000"}));
+    assert_eq!(border(&mut h), "var(--border-none) solid #ff0000");
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": ab, "mode": "insert-children",
+            "html": "<div style=\"width: 40px; height: 40px; \
+                     border-width: var(--border-none); border-color: #ff0000\"></div>",
+        }),
+    );
+    let n = h.ed.doc.get(node(&r["createdNodeIds"][0])).unwrap();
+    assert_eq!(n.style.stroke_width, 0.0);
+    assert!(n.tokens.contains_key(&TokenProp::StrokeWidth));
+}
+
+#[test]
 fn deleting_keeps_values_and_flattens_aliases() {
     let mut h = host();
     seed(&mut h);

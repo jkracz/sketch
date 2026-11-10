@@ -844,7 +844,8 @@ Design tokens: get_tokens first, and reuse what's there. create_tokens adds proj
 variables; set_tokens renames, changes or deletes them. A style whose whole value is
 var(--token) in create_artboard, write_html, update_styles or create_shape binds that property,
 so changing the token updates it on every page. Bindable: background and text color, border
-color, border radius, opacity, gap, padding, font size, weight, line height and letter spacing.
+color, border width (borderWidth tokens), border radius, opacity, gap, padding, font size,
+weight, line height and letter spacing.
 Inside a longer value (1px solid var(--line)) or on an inline span, the token's value is used
 without a binding. Setting a plain value on a bound property detaches it. get_computed_styles
 and get_jsx show bound properties as var(--token). Letter spacing in em, plain or from a token,
