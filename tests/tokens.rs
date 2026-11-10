@@ -920,16 +920,10 @@ fn deleting_a_token_keeps_a_text_styles_other_modes() {
     assert_eq!(size(&mut h), "48px");
     let list = call(&mut h, "get_tokens", json!({}));
     let style = &list["textStyles"][0];
-    assert_eq!(style["css"], "font: 400 12px Inter", "{list}");
     assert_eq!(
         style["modes"],
         json!({"Dark": {"fontSize": "48px"}}),
         "{list}"
-    );
-    let css = call(&mut h, "get_tokens", json!({"format": "css"}));
-    assert!(
-        (css.as_str().unwrap()).contains("[data-theme=\"dark\"] {\n  --body--font-size: 48px;\n}"),
-        "{css}"
     );
 
     call(

@@ -25,8 +25,7 @@ struct Draft {
     id: String,
     name: String,
     values: [String; 5],
-    /// Fields typed in since their last commit. Committing one that has other modes' values
-    /// sets every mode, even when the text matches the default.
+    /// Retyping the default value must clear per-mode values too.
     typed: [bool; 5],
     description: String,
     error: Option<String>,
@@ -322,7 +321,6 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
             d.error = res.err();
         }
         responses.push(r);
-        // Values kept from a flattened token. Typing a value sets every mode.
         let others: Vec<String> = (by_mode.iter())
             .filter_map(|(m, fields)| {
                 let (_, v) = fields.iter().find(|(x, _)| *x == f)?;
@@ -522,7 +520,6 @@ mod tests {
             h.step(vec![key(egui::Key::Tab)], &mut f);
             h.step(vec![], &mut f);
         }
-        // Leaving the field untouched keeps the Dark value.
         h.step(vec![key(egui::Key::Tab)], &mut f);
         h.step(vec![], &mut f);
         assert!(!h.ed.tokens.style(&id).unwrap().modes.is_empty());

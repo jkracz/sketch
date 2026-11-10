@@ -200,7 +200,6 @@ mod tests {
         let r = e.doc.get(t).unwrap().text_style_ref.clone().unwrap();
         assert!(r.overrides.is_empty(), "{:?}", r.overrides);
 
-        // Deleting the token keeps the style's Dark value, so the layer doesn't shrink.
         let token = e.tokens.by_css_name("--size").unwrap().id.clone();
         e.edit_tokens("delete", None, |s| s.delete(&[token]));
         assert_eq!(size(&e, t), Some(48.0));

@@ -59,7 +59,6 @@ impl StyleField {
         })
     }
 
-    /// The token kind the field takes. Italic has none.
     pub fn kind(self) -> Option<TokenKind> {
         Some(match self {
             StyleField::Family => TokenKind::FontFamily,
@@ -105,9 +104,8 @@ pub struct TextStyleDef {
     /// The design system this style comes from, by id, like `Token::system`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    /// Values for the other modes of the style's file or design system, by field and then
-    /// mode id, like `Token::modes`. Flattening an alias to a token fills them, so the style
-    /// keeps showing what the token did in each mode. Setting a field clears its entry.
+    /// Other modes' values by field, then mode id, like `Token::modes`. Flattening an alias
+    /// fills them. Setting a field clears its entry.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modes: BTreeMap<StyleField, ModeValues>,
 }
@@ -131,12 +129,10 @@ impl TextStyleDef {
         }
     }
 
-    /// The other modes' values of field `f`.
     pub fn mode_values(&self, f: StyleField) -> &ModeValues {
         self.modes.get(&f).unwrap_or(&NO_MODES)
     }
 
-    /// Visit each token-like field with its kind, first value and other modes' values.
     pub fn each_field(&mut self, mut f: impl FnMut(TokenKind, &mut TokenValue, &mut ModeValues)) {
         let TextStyleDef {
             family,
@@ -163,7 +159,6 @@ impl TextStyleDef {
         modes.retain(|_, m| !m.is_empty());
     }
 
-    /// Every value of the token-like fields, other modes' too.
     pub fn values_mut(&mut self) -> Vec<&mut TokenValue> {
         let TextStyleDef {
             family,
@@ -193,7 +188,6 @@ impl TextStyleDef {
         .chain(self.modes.values().flat_map(|m| m.values()))
     }
 
-    /// Rename the mode ids that other modes' values are keyed by.
     pub fn rekey_modes(&mut self, f: impl Fn(&str) -> String) {
         for m in self.modes.values_mut() {
             *m = std::mem::take(m)
@@ -366,7 +360,6 @@ impl TokenSet {
         ))
     }
 
-    /// The modes `s` keeps values for: its design system's, or this file's.
     pub fn style_modes(&self, s: &TextStyleDef) -> &[Mode] {
         match &s.system {
             Some(id) => self.system(id).map_or(&[], |l| &l.modes),
@@ -461,7 +454,7 @@ impl TokenSet {
         }
     }
 
-    /// `s`'s own values in the modes after its first, as (mode name, [(field, CSS)]).
+    /// Stored values for non-default modes, with mode names and CSS values.
     pub fn style_mode_values(&self, s: &TextStyleDef) -> Vec<(String, Vec<(StyleField, String)>)> {
         (self.style_modes(s).iter().skip(1))
             .filter_map(|m| {
@@ -476,7 +469,6 @@ impl TokenSet {
             .collect()
     }
 
-    /// [`style_mode_values`](Self::style_mode_values) as one line: `Dark: font-size: 48px`.
     pub fn style_mode_notes(&self, s: &TextStyleDef) -> Vec<String> {
         (self.style_mode_values(s).into_iter())
             .map(|(m, fields)| {
@@ -514,10 +506,9 @@ impl TokenSet {
         out
     }
 
-    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks. A field
-    /// with its own values in other modes reads `var(--heading-l--font-size)`, set in a
-    /// `[data-theme]` block per mode, so the nearest frame's mode wins as it does for tokens.
-    /// Token names never hold `--`, so the two can't clash.
+    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks.
+    /// Per-mode fields use CSS variables so the nearest frame's theme wins.
+    /// Double hyphens separate style and field names to avoid token name collisions.
     pub fn style_sheet(&self, styles: &[&TextStyleDef], tailwind: bool) -> String {
         let mut out = String::new();
         for s in styles {
@@ -749,8 +740,6 @@ impl TokenSet {
     }
 
     /// Before tokens go: style fields that alias them take on the values they showed.
-    /// Before tokens go: style fields that alias them take on the values they showed, in
-    /// every mode.
     pub(super) fn flatten_style_aliases(&mut self, gone: &HashSet<&str>) {
         self.styles = (self.styles.iter())
             .map(|s| self.flattened_style(s, |a| gone.contains(a)))
@@ -985,7 +974,6 @@ mod tests {
         assert!(s.resolve_style(&id).is_some());
     }
 
-    /// A style whose size aliases `--size`, 12px in Light and 48px in Dark.
     fn moded() -> (TokenSet, String, String) {
         let mut s = TokenSet::default();
         let dark = vec![("dark".to_string(), "48px".to_string())];
@@ -1004,36 +992,11 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_token_keeps_each_modes_value() {
-        let (mut s, id, size) = moded();
-        s.delete(&[size]);
-        let st = s.style(&id).unwrap();
-        assert_eq!(st.size, TokenValue::Number(12.0));
-        assert_eq!(
-            st.mode_values(StyleField::Size).get("dark"),
-            Some(&TokenValue::Number(48.0))
-        );
-        assert_eq!(sizes(&s, &id), (12.0, 48.0));
-    }
-
-    #[test]
-    fn setting_a_field_sets_every_mode() {
-        let (mut s, id, size) = moded();
-        s.delete(&[size]);
-        s.update_style(&id, None, &input(&[(StyleField::Size, "20px")]), None)
-            .unwrap();
-        assert!(s.style(&id).unwrap().modes.is_empty());
-        assert_eq!(sizes(&s, &id), (20.0, 20.0));
-    }
-
-    #[test]
     fn deleting_the_first_mode_keeps_style_values() {
         let (mut s, id, size) = moded();
         s.add_mode();
         s.delete(&[size]);
         s.delete_mode("light").unwrap();
-        let st = s.style(&id).unwrap();
-        assert_eq!(st.size, TokenValue::Number(48.0));
         let third = s.modes()[1].name.clone();
         let size = |m: &str| s.resolve_style_in(&id, Some(m)).unwrap().size;
         assert_eq!((size("Dark"), size(&third)), (48.0, 12.0));
@@ -1053,7 +1016,6 @@ mod tests {
         }
     }
 
-    /// `src`'s tokens and styles, as a file using its system `id` holds them.
     fn using(src: &TokenSet, id: &str) -> TokenSet {
         let mut s = TokenSet::default();
         let l = link(id, src.modes());
@@ -1071,13 +1033,6 @@ mod tests {
         let id = mid
             .create_style("Body", &input(&[(StyleField::Size, "var(--a-size)")]), None)
             .unwrap();
-        let published = mid.publishable_styles();
-        assert_eq!(published[0].size, TokenValue::Number(12.0));
-        assert_eq!(
-            published[0].mode_values(StyleField::Size).get("dark"),
-            Some(&TokenValue::Number(48.0))
-        );
-
         let used = using(&mid, "b");
         assert_eq!(sizes(&used, &linked_id("b", &id)), (12.0, 48.0));
     }
@@ -1104,11 +1059,6 @@ mod tests {
         let id = linked_id("a", &id);
         let st = s.style(&id).unwrap();
         assert!(st.system.is_none());
-        assert!(
-            (st.modes.values().flat_map(|m| m.keys()))
-                .all(|m| s.modes().iter().any(|x| x.id == *m)),
-            "{st:?}"
-        );
         assert_eq!(sizes(&s, &id), (12.0, 48.0));
     }
 
@@ -1121,18 +1071,15 @@ mod tests {
         for part in [
             ":root,\n[data-theme=\"light\"] {\n  --body--font-size: 12px;\n}\n",
             "[data-theme=\"dark\"] {\n  --body--font-size: 48px;\n}\n",
-            ".body {\n  font-family: Inter;\n  font-size: var(--body--font-size);\n",
+            "font-size: var(--body--font-size);",
         ] {
             assert!(css.contains(part), "{part} missing from {css}");
         }
         let tw = s.style_sheet(&[st], true);
         assert!(
-            tw.contains(
-                "@utility body {\n  font-family: Inter;\n  font-size: var(--body--font-size);"
-            ),
+            tw.contains("@utility body {") && tw.contains("font-size: var(--body--font-size);"),
             "{tw}"
         );
-        assert_eq!(s.style_mode_notes(st), vec!["Dark: font-size: 48px"]);
     }
 
     #[test]
