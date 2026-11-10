@@ -2432,9 +2432,10 @@ pub fn insert_subtrees_tx(
                 }
             }
         }
-        // Explicit page links bypass id remapping, even when they point back to this page.
+        // Page and system links keep source ids, even when pasted back onto the source page.
         if let Some(l) = &mut c.instance
             && l.page.is_none()
+            && l.component.is_none()
         {
             match map.get(&l.main) {
                 Some(n) => l.main = *n,

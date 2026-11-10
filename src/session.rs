@@ -53,6 +53,7 @@ impl Session {
             .with_systems(p.manifest.systems.clone())
             .with_styles(p.manifest.text_styles.clone())
             .with_effect_styles(p.manifest.effect_styles.clone())
+            .with_components(p.manifest.components.clone())
             .with_modes(p.manifest.modes.clone());
         ed.published = p.manifest.published.clone();
         // Freshly loaded pages are saved by definition.
@@ -156,6 +157,11 @@ impl Session {
                 p.delete_page_file(&old.id);
             }
         }
+        if ed.meta_dirty {
+            // Keep images available after the system is unpublished.
+            let used = (ed.tokens.components().iter()).flat_map(|c| crate::assets::used_by(&c.doc));
+            crate::assets::save_to_dir(&p.dir.join(crate::project::ASSETS_DIR), used)?;
+        }
         let wrote = !dirty.is_empty() || ed.meta_dirty;
         p.manifest.pages = pages;
         p.manifest.active_page = Some(ed.active_page_id().to_string());
@@ -163,6 +169,7 @@ impl Session {
         p.manifest.systems = ed.tokens.systems().to_vec();
         p.manifest.text_styles = ed.tokens.styles().to_vec();
         p.manifest.effect_styles = ed.tokens.effect_styles().to_vec();
+        p.manifest.components = ed.tokens.components().to_vec();
         p.manifest.modes = ed.tokens.modes().to_vec();
         p.manifest.published = ed.published.clone();
         if wrote {

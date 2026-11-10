@@ -1230,3 +1230,47 @@ fn a_layer_inside_a_clipping_frame_exports_on_its_own() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn text_and_name_edits_on_an_instance_survive_a_sync_from_its_main() {
+    let mut h = host();
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": "root", "mode": "insert-children",
+               "html": "<div style=\"padding:8px\"><p>Main</p></div>"}),
+    );
+    let main = num(&r["createdNodeIds"][0]);
+    h.ed.selection = vec![main];
+    h.ed.create_component();
+    let inst =
+        h.ed.create_instance(main, sketch_rs::geom::v2(0.0, 200.0))
+            .unwrap();
+    let label = h.ed.doc.get(inst).unwrap().children[0];
+    let key = exec::node_key(&h.ed, 0, label);
+    call(
+        &mut h,
+        "set_text_content",
+        json!({"updates": [{"nodeId": key, "textContent": "Mine"}]}),
+    );
+    call(
+        &mut h,
+        "rename_nodes",
+        json!({"updates": [{"nodeId": key, "name": "Custom"}]}),
+    );
+    let main_label = h.ed.doc.get(main).unwrap().children[0];
+    let blue = Color::rgb(0, 0, 255);
+    h.ed.edit("fill", |tx| {
+        tx.node_mut(main_label).unwrap().style.set_fill(Some(blue))
+    });
+    let n = h.ed.doc.get(label).unwrap();
+    assert_eq!(
+        (n.kind.text().unwrap().as_str(), n.name.as_str()),
+        ("Mine", "Custom")
+    );
+    assert_eq!(
+        n.style.fill(),
+        Some(blue),
+        "other properties still follow the main"
+    );
+}

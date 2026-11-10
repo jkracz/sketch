@@ -1706,7 +1706,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
                 aka: Vec::new(),
             })
             .collect(),
-        // Files don't keep copies of a system's components yet.
+        // MCP doesn't list a system's components yet.
         components: Vec::new(),
     }
 }
@@ -1929,6 +1929,7 @@ fn use_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             p.name
         ));
     }
+    design_systems::Registry::in_store(host.store()).load_assets(&p.id);
     let ed = host.editor();
     ed.use_system(&p)?;
     ed.status = format!("Using {}.", p.name);
@@ -4106,6 +4107,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 )
             })?;
             *node.kind.text_mut().unwrap() = t.clone();
+            mark_override(node, "text");
             let len = t.chars().count();
             for s in &mut node.text_style.spans {
                 if s.start == 0 && s.end >= old_len {
@@ -4123,6 +4125,14 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"updated": n}))
 }
 
+fn mark_override(n: &mut Node, key: &str) {
+    if let Some(l) = &mut n.instance
+        && !l.overrides.iter().any(|o| o == key)
+    {
+        l.overrides.push(key.into());
+    }
+}
+
 fn rename_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
     let n = batch(
         ed,
@@ -4131,7 +4141,9 @@ fn rename_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         "Rename",
         |u| Ok(u.req_str("name")?.chars().take(50).collect::<String>()),
         |tx, id, name| {
-            tx.node_mut(id).unwrap().name = name.clone();
+            let n = tx.node_mut(id).unwrap();
+            n.name = name.clone();
+            mark_override(n, "name");
             Ok(())
         },
     )?;

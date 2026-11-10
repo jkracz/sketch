@@ -6,6 +6,7 @@
 //! honest: a bound field always holds its token's value. The editor rewrites fields when a
 //! token changes, and drops a binding when a field stops matching (see `editor/tokens.rs`).
 
+use super::components::LinkedComponent;
 use super::document::Document;
 use super::effect_styles::EffectStyleDef;
 use super::node::{Color, Node, NodeId, NodeKind};
@@ -337,6 +338,7 @@ pub enum TokenEdit {
     System(Edit<SystemLink>),
     Style(Box<Edit<TextStyleDef>>),
     EffectStyle(Edit<EffectStyleDef>),
+    Component(Edit<LinkedComponent>),
 }
 
 impl TokenEdit {
@@ -347,6 +349,7 @@ impl TokenEdit {
             TokenEdit::System(e) => e.changes(),
             TokenEdit::Style(e) => e.changes(),
             TokenEdit::EffectStyle(e) => e.changes(),
+            TokenEdit::Component(e) => e.changes(),
         }
     }
 
@@ -370,6 +373,10 @@ impl TokenEdit {
                 true
             }
             (TokenEdit::EffectStyle(a), TokenEdit::EffectStyle(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            (TokenEdit::Component(a), TokenEdit::Component(b)) if a.id == b.id => {
                 a.after = b.after.clone();
                 true
             }
@@ -429,6 +436,7 @@ pub struct TokenSet {
     pub(super) systems: Vec<SystemLink>,
     pub(super) styles: Vec<TextStyleDef>,
     pub(super) effect_styles: Vec<EffectStyleDef>,
+    pub(super) components: Vec<LinkedComponent>,
 }
 
 impl Default for TokenSet {
@@ -439,6 +447,7 @@ impl Default for TokenSet {
             systems: Vec::new(),
             styles: Vec::new(),
             effect_styles: Vec::new(),
+            components: Vec::new(),
         }
     }
 }
@@ -1533,6 +1542,7 @@ impl TokenSet {
         let tokens = diff_list(&before.tokens, &self.tokens);
         let styles = diff_list(&before.styles, &self.styles);
         let effects = diff_list(&before.effect_styles, &self.effect_styles);
+        let components = diff_list(&before.components, &self.components);
         systems
             .into_iter()
             .map(TokenEdit::System)
@@ -1540,6 +1550,7 @@ impl TokenSet {
             .chain(tokens.into_iter().map(TokenEdit::Token))
             .chain(styles.into_iter().map(|e| TokenEdit::Style(Box::new(e))))
             .chain(effects.into_iter().map(TokenEdit::EffectStyle))
+            .chain(components.into_iter().map(TokenEdit::Component))
             .collect()
     }
 
@@ -1571,6 +1582,11 @@ impl TokenSet {
             _ => None,
         });
         apply_list(&mut self.effect_styles, effects, forward);
+        let components = edits.iter().filter_map(|e| match e {
+            TokenEdit::Component(e) => Some(e),
+            _ => None,
+        });
+        apply_list(&mut self.components, components, forward);
     }
 
     // ------------------------------------------------------------------ design systems
@@ -1718,6 +1734,7 @@ impl TokenSet {
             .collect();
         let mut styles = self.replace_linked_styles(id, Vec::new());
         styles.extend(self.replace_linked_effect_styles(id, Vec::new()));
+        self.replace_components(id, Vec::new());
         self.remove(&ids);
         self.systems.retain(|s| s.id != id);
         ids.extend(styles.into_iter().map(|(id, _)| id));
@@ -1756,6 +1773,8 @@ impl TokenSet {
         }
         self.detach_styles(id);
         self.detach_effect_styles(id);
+        // Removing the copies makes their instances act as plain frames.
+        self.replace_components(id, Vec::new());
         self.systems.retain(|s| s.id != id);
     }
 }

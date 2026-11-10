@@ -7,7 +7,8 @@
 
 use crate::geom::Camera;
 use crate::model::{
-    Document, EffectStyleDef, Mode, Node, NodeId, SystemLink, TextStyleDef, TokenSet,
+    Document, EffectStyleDef, LinkedComponent, Mode, Node, NodeId, SystemLink, TextStyleDef,
+    TokenSet,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -93,6 +94,9 @@ pub struct Manifest {
     /// Effect styles, local ones and those of the design systems it uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effect_styles: Vec<EffectStyleDef>,
+    /// Hidden copies of the components of the design systems it uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<LinkedComponent>,
     /// Token modes. A file saved before modes existed opens with one.
     #[serde(default = "Mode::single")]
     pub modes: Vec<Mode>,
@@ -122,6 +126,7 @@ impl Manifest {
             systems: Vec::new(),
             text_styles: Vec::new(),
             effect_styles: Vec::new(),
+            components: Vec::new(),
             modes: Mode::defaults(),
             published: None,
         }

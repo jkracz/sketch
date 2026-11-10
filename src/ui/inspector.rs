@@ -572,11 +572,20 @@ fn header(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         first.kind.type_name()
     };
     ui.label(title_text(format!("{kind} · {}", first.name)));
-    if let Some((page, _)) = ed.instance_main(first.id)
-        && page != ed.active_page
-    {
+    let from = if let Some((page, _)) = ed.instance_main(first.id) {
+        (page != ed.active_page).then(|| format!("Main component on {}", ed.pages[page].name))
+    } else {
+        (first.instance.as_ref().and_then(|l| l.component.as_deref()))
+            .filter(|_| ed.is_instance_root(first.id))
+            .and_then(|c| ed.tokens.component(c))
+            .map(|c| {
+                let system = ed.tokens.system(&c.system).map_or("", |s| s.name.as_str());
+                format!("{} from the {system} design system", c.name)
+            })
+    };
+    if let Some(from) = from {
         ui.label(
-            RichText::new(format!("Main component on {}", ed.pages[page].name))
+            RichText::new(from)
                 .size(theme::SECONDARY)
                 .color(theme::pal(ui).secondary),
         );
@@ -587,7 +596,8 @@ fn header(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
                 ed.instance_of_selection();
             }
         } else if ed.is_instance_root(first.id) {
-            if ui.small_button("Go to main").clicked() {
+            // A design system's main is a hidden copy, so there is nothing to go to.
+            if ed.instance_main(first.id).is_some() && ui.small_button("Go to main").clicked() {
                 ed.go_to_main();
             }
             if ui.small_button("Detach").clicked() {

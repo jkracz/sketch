@@ -198,6 +198,9 @@ pub fn menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                 None => r,
             };
             if r.clicked() {
+                if let Some(store) = &st.systems.store {
+                    systems::Registry::in_store(store).load_assets(&p.id);
+                }
                 ed.status = match ed.use_system(p) {
                     Ok(()) => format!("Using {}.", p.name),
                     Err(e) => e,

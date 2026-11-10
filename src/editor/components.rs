@@ -1,16 +1,21 @@
-//! Components across pages: an instance's main may be on another page ([`InstanceLink::page`]).
-//! Same-page instances sync in the main's undo step. Instances on other pages sync when
+//! Components across pages and design systems: an instance's main may be on another page
+//! ([`InstanceLink::page`]) or in a design system the file uses ([`InstanceLink::component`]).
+//! Same-page instances sync in the main's undo step. Instances of mains elsewhere sync when
 //! shown, saved or exported, without adding to their page's undo history.
 
 use super::Editor;
-use super::structure::{Source, sync_node};
+use super::structure::{Source, instantiate, sync_node};
+use crate::geom::{Rect, V2};
 use crate::history::{Recording, Tx};
-use crate::model::{Document, InstanceLink, Node, NodeId};
+use crate::model::{Document, InstanceLink, LinkedComponent, Node, NodeId};
 use std::collections::HashSet;
 
 impl Editor {
-    /// Resolve the main's page relative to the page currently held in `doc`.
+    /// `None` for design system components, which have no page in this file.
     pub fn main_page(&self, link: &InstanceLink) -> Option<usize> {
+        if link.component.is_some() {
+            return None;
+        }
         match &link.page {
             None => Some(self.current_page()),
             Some(id) => self.pages.iter().position(|p| p.id == *id),
@@ -18,17 +23,51 @@ impl Editor {
     }
 
     pub fn main_doc(&self, link: &InstanceLink) -> Option<&Document> {
-        self.main_page(link).map(|i| self.page_doc(i))
+        match &link.component {
+            Some(c) => self.tokens.component(c).map(|c| &*c.doc),
+            None => self.main_page(link).map(|i| self.page_doc(i)),
+        }
     }
 
-    /// Sync these instance roots from their mains, on any page, in the open transaction.
+    /// Place an instance of design system component `id` (see `TokenSet::components`) with
+    /// its top-left at world position `at`, and select it.
+    pub fn place_component(&mut self, id: &str, at: V2) -> Option<NodeId> {
+        let c = self.tokens.component(id)?.clone();
+        let main = c.doc.get(c.main()?)?;
+        let rect = Rect::new(at.x, at.y, main.rect.w, main.rect.h);
+        let src = Source {
+            doc: Some(&c.doc),
+            page: None,
+            component: Some(&c.id),
+        };
+        let label = format!("Insert {}", c.name);
+        let id = self.edit(&label, |tx| {
+            instantiate(tx, src, main.id, None, None, Some(rect))
+        });
+        self.selection = vec![id];
+        Some(id)
+    }
+
+    /// Sync these instance roots from their mains, on any page or in a design system, in
+    /// the open transaction.
     pub(super) fn sync_instances(&mut self, roots: &[NodeId]) {
+        enum From {
+            Here,
+            Page(usize),
+            System(LinkedComponent),
+        }
         let cur = self.current_page();
-        let srcs: Vec<(NodeId, Option<usize>)> = (roots.iter())
+        let srcs: Vec<(NodeId, From)> = (roots.iter())
             .filter_map(|r| {
                 let l = self.doc.get(*r)?.instance.as_ref()?;
-                let page = self.main_page(l)?;
-                Some((*r, (page != cur).then_some(page)))
+                let from = match &l.component {
+                    Some(c) => From::System(self.tokens.component(c)?.clone()),
+                    None => match self.main_page(l)? {
+                        p if p == cur => From::Here,
+                        p => From::Page(p),
+                    },
+                };
+                Some((*r, from))
             })
             .collect();
         if srcs.is_empty() {
@@ -40,19 +79,40 @@ impl Editor {
             .rec
             .get_or_insert_with(|| (Recording::new("Edit", &self.doc), None));
         let mut tx = Tx::new(&mut self.doc, rec);
-        for (r, page) in srcs {
+        for (r, from) in &srcs {
             // Every page but the current one is parked, so its slot holds its document.
-            let src = match page {
-                None => Source::LOCAL,
-                Some(p) => Source {
-                    doc: self.pages[p].stash.as_ref().map(|s| &s.doc),
-                    page: Some(&self.pages[p].id),
+            let src = match from {
+                From::Here => Source::LOCAL,
+                From::Page(p) => match self.pages[*p].stash.as_ref() {
+                    Some(s) => Source {
+                        doc: Some(&s.doc),
+                        page: Some(&self.pages[*p].id),
+                        component: None,
+                    },
+                    None => continue,
+                },
+                From::System(c) => Source {
+                    doc: Some(&c.doc),
+                    page: None,
+                    component: Some(&c.id),
                 },
             };
-            if page.is_none() || src.doc.is_some() {
-                sync_node(&mut tx, src, r, true);
-            }
+            sync_node(&mut tx, src, *r, true);
         }
+    }
+
+    /// Outermost layers linked to design system components this file has.
+    pub(super) fn linked_roots(&self, doc: &Document) -> Vec<NodeId> {
+        let comp = |id: Option<NodeId>| {
+            id.and_then(|id| doc.get(id)?.instance.as_ref()?.component.as_deref())
+        };
+        (doc.nodes.values())
+            .filter(|n| {
+                let c = comp(Some(n.id));
+                c.is_some_and(|c| self.tokens.component(c).is_some()) && comp(n.parent) != c
+            })
+            .map(|n| n.id)
+            .collect()
     }
 
     /// Sync source pages first, without adding undo steps. Mark changed pages for saving.
@@ -82,9 +142,10 @@ impl Editor {
             return;
         }
         let own = &self.pages[i].id;
+        let doc = self.page_doc(i);
         let mut sources: Vec<usize> = Vec::new();
-        let mut roots: Vec<NodeId> = Vec::new();
-        for n in self.page_doc(i).nodes.values() {
+        let mut roots = self.linked_roots(doc);
+        for n in doc.nodes.values() {
             let Some(page) = n.instance.as_ref().and_then(|l| l.page.as_ref()) else {
                 continue;
             };
@@ -98,7 +159,7 @@ impl Editor {
                 sources.push(j);
             }
             // Instance roots: the outermost layer linked to that page.
-            let parent = n.parent.and_then(|p| self.page_doc(i).get(p));
+            let parent = n.parent.and_then(|p| doc.get(p));
             if parent
                 .is_none_or(|p| p.instance.as_ref().and_then(|l| l.page.as_ref()) != Some(page))
             {
@@ -157,6 +218,7 @@ impl Editor {
                     n.instance = Some(InstanceLink {
                         main: n.id,
                         page: Some(f.to_string()),
+                        component: None,
                         overrides: Vec::new(),
                     });
                 }
@@ -165,6 +227,12 @@ impl Editor {
         let copied: HashSet<NodeId> = nodes.iter().map(|n| n.id).collect();
         for n in &mut out {
             let Some(l) = &mut n.instance else { continue };
+            if let Some(c) = &l.component {
+                if self.tokens.component(c).is_none() {
+                    n.instance = None;
+                }
+                continue;
+            }
             if l.page.is_none() && !copied.contains(&l.main) {
                 // A local main left behind: it is on the source page.
                 l.page = from.map(String::from);

@@ -7,7 +7,9 @@
 //! they last saw (see `TokenSet::attach`) and move to a newer one when they open.
 
 mod components;
-pub use components::{PublishedComponent, component_id};
+#[cfg(test)]
+mod using_tests;
+pub use components::{PublishedComponent, component_id, linked};
 
 use crate::editor::Editor;
 use crate::model::{
@@ -87,6 +89,12 @@ impl Published {
         format!("--{}-{}", self.prefix, css_slug(&t.name))
     }
 
+    pub fn linked_components(&self) -> Vec<crate::model::LinkedComponent> {
+        (self.components.iter())
+            .map(|c| components::linked(&self.id, c))
+            .collect()
+    }
+
     /// The tokens as a set that resolves aliases and names them with the prefix, for
     /// listing a system without using it.
     pub fn token_set(&self) -> TokenSet {
@@ -129,6 +137,12 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<Published> {
         read(&self.path(id)?)
+    }
+
+    pub fn load_assets(&self, id: &str) {
+        if let Some(dir) = self.assets_dir(id) {
+            crate::assets::load_dir(&dir);
+        }
     }
 
     /// Every published system, by name.
@@ -602,6 +616,9 @@ pub fn unpublish(store: &Store, ed: &Editor) -> Result<String, String> {
 pub fn update_all(store: &Store, ed: &mut Editor) -> Vec<String> {
     let reg = Registry::in_store(store);
     let ids: Vec<String> = ed.tokens.systems().iter().map(|s| s.id.clone()).collect();
+    for id in &ids {
+        reg.load_assets(id);
+    }
     ids.iter()
         .filter_map(|id| reg.get(id))
         .filter_map(|p| ed.update_system(&p))

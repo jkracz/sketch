@@ -676,6 +676,9 @@ pub struct InstanceLink {
     /// The main's project page. `None` means this node's page, including in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+    /// `<system>/<component>` of the hidden copy. `main` is a layer in it; `page` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
     /// Properties overridden on this node (not synced from the main component).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,

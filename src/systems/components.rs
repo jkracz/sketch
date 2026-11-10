@@ -11,7 +11,7 @@
 //! aliases are flattened.
 
 use crate::editor::Editor;
-use crate::model::{Document, Node, NodeId, TokenSet};
+use crate::model::{Document, LinkedComponent, Node, NodeId, TokenSet, tokens::linked_id};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -78,6 +78,9 @@ fn publish_one(ed: &Editor, doc: &Document, page: &str, main: NodeId) -> Publish
             n.component = false;
         }
         flatten_bindings(&mut n, &ed.tokens);
+        if n.instance.as_ref().is_some_and(|l| l.component.is_some()) {
+            n.instance = None;
+        }
         if let Some(l) = &n.instance {
             // Its main can be on another page.
             let (mdoc, mpage) = match l.page.as_deref() {
@@ -100,6 +103,25 @@ fn publish_one(ed: &Editor, doc: &Document, page: &str, main: NodeId) -> Publish
         nodes,
         nested,
     }
+}
+
+/// Use linked binding ids. Flatten nested instances so they sync through this copy alone.
+pub fn linked(system: &str, c: &PublishedComponent) -> LinkedComponent {
+    let nodes = (c.nodes.iter().cloned())
+        .map(|mut n| {
+            for t in n.tokens.values_mut() {
+                *t = linked_id(system, t);
+            }
+            if let Some(r) = &mut n.text_style_ref {
+                r.id = linked_id(system, &r.id);
+            }
+            n.effect_style = n.effect_style.map(|s| linked_id(system, &s));
+            n.mode = n.mode.map(|m| linked_id(system, &m));
+            n.instance = None;
+            n
+        })
+        .collect();
+    LinkedComponent::new(linked_id(system, &c.id), system, c.name.clone(), nodes)
 }
 
 /// The main component that `id` is a layer of: itself or its nearest main ancestor.

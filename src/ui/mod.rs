@@ -501,11 +501,13 @@ pub fn drop_layer(ed: &mut Editor, id: NodeId, d: LayerDrop) {
     ed.selection = vec![id];
 }
 
-fn node_icon(n: &crate::model::Node) -> Icon {
+fn node_icon(ed: &Editor, n: &crate::model::Node) -> Icon {
     if n.component {
         return Icon::Component;
     }
-    if n.instance.is_some() && n.parent.is_none_or(|_| n.is_frame()) && n.is_frame() {
+    let live = (n.instance.as_ref())
+        .is_some_and(|l| ed.main_doc(l).is_some_and(|d| d.get(l.main).is_some()));
+    if live && n.is_frame() {
         return Icon::Instance;
     }
     if n.style
@@ -606,7 +608,7 @@ fn layer_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, id: NodeId, depth: 
     theme::paint_icon(
         ui.painter(),
         sq(x, 14.0),
-        node_icon(&n),
+        node_icon(ed, &n),
         if selected {
             Color32::WHITE
         } else {
