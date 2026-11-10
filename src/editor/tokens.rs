@@ -596,6 +596,49 @@ mod tests {
     }
 
     #[test]
+    fn groups_fit_text_that_a_mode_change_resizes() {
+        let mut e = Editor::default();
+        let dark = vec![("dark".to_string(), "48px".to_string())];
+        let size = e
+            .edit_tokens("add", None, |t| {
+                t.create_in_modes(TokenKind::FontSize, "body", "12px", &dark, None)
+            })
+            .unwrap();
+        let (frame, group, text) = e.edit("add", |tx| {
+            let f = tx.alloc_id();
+            let r = Rect::new(0.0, 0.0, 400.0, 400.0);
+            tx.insert(Node::new(f, NodeKind::Frame { clip: false }, r), None, None);
+            let g = tx.alloc_id();
+            tx.insert(
+                Node::new(g, NodeKind::Group, Rect::new(0.0, 0.0, 1.0, 1.0)),
+                Some(f),
+                None,
+            );
+            let t = tx.alloc_id();
+            let kind = NodeKind::Text {
+                text: "Hello".into(),
+                font_size: 12.0,
+                auto_width: true,
+                align: Default::default(),
+            };
+            tx.insert(
+                Node::new(t, kind, Rect::new(0.0, 0.0, 10.0, 10.0)),
+                Some(g),
+                None,
+            );
+            (f, g, t)
+        });
+        e.bind_token(&[text], TokenProp::FontSize, &size);
+        e.set_frame_mode(&[frame], Some("dark"));
+        let (g, t) = (
+            e.doc.get(group).unwrap().rect,
+            e.doc.get(text).unwrap().rect,
+        );
+        assert_eq!(e.doc.get(text).unwrap().kind.font_size(), Some(48.0));
+        assert_eq!((g.w, g.h), (t.w, t.h), "the group fits the bigger text");
+    }
+
+    #[test]
     fn copied_tokens_survive_a_project_switch() {
         let (mut e, _, t) = editor_with_rect();
         e.copy_tokens(std::slice::from_ref(&t));

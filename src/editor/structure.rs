@@ -270,7 +270,20 @@ impl Editor {
         // before layout so spacing and font size tokens lay out.
         self.drop_broken_bindings();
         self.check_text_style_refs();
-        for id in self.resync_modes() {
+        let resynced = self.resync_modes();
+        let groups: HashSet<NodeId> = (resynced.iter())
+            .flat_map(|id| self.doc.ancestors(*id))
+            .filter(|a| self.doc.get(*a).is_some_and(|n| n.is_group()))
+            .collect();
+        let mut groups: Vec<NodeId> = groups.into_iter().collect();
+        groups.sort_by_key(|g| std::cmp::Reverse(depth(self, *g)));
+        if !groups.is_empty() {
+            let mut tx = self.tx();
+            for g in &groups {
+                layout::normalize_group(&mut tx, *g);
+            }
+        }
+        for id in resynced {
             cands.insert(id);
             cands.extend(self.doc.ancestors(id));
         }

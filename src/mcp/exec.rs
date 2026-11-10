@@ -2164,7 +2164,7 @@ fn jsx_node(
                 _ => String::new(),
             };
             out.push_str(&format!(
-                "{ind}<span{class} style={}>{}</span>\n",
+                "{ind}<span{class}{theme} style={}>{}</span>\n",
                 style_obj(&st),
                 jsx_text(text)
             ));
@@ -2187,17 +2187,17 @@ fn jsx_node(
                     st.remove("background");
                     st.insert("objectFit".into(), json!("cover"));
                     out.push_str(&format!(
-                        "{ind}<img src=\"{src}\" alt=\"{name}\" style={} />\n",
+                        "{ind}<img src=\"{src}\" alt=\"{name}\"{theme} style={} />\n",
                         style_obj(&st)
                     ));
                 }
-                None => out.push_str(&format!("{ind}<div style={} />\n", style_obj(&st))),
+                None => out.push_str(&format!("{ind}<div{theme} style={} />\n", style_obj(&st))),
             }
         }
         NodeKind::Sticky { text, .. } => {
             st.insert("padding".into(), json!("16px"));
             out.push_str(&format!(
-                "{ind}<div style={}>{}</div>\n",
+                "{ind}<div{theme} style={}>{}</div>\n",
                 style_obj(&st),
                 jsx_text(text)
             ));

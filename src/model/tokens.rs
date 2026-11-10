@@ -952,7 +952,8 @@ impl TokenSet {
             return self.update(id, None, Some(raw), None);
         }
         let value = raw.map(|r| self.parse_value(t.kind, r)).transpose()?;
-        if let Some(TokenValue::Alias(target)) = &value
+        // Clearing falls back to the first value, which may be an alias too.
+        if let TokenValue::Alias(target) = value.as_ref().unwrap_or(&t.value)
             && self.would_cycle(id, target, Some(&self.modes[at].name))
         {
             return Err(format!(
@@ -2236,6 +2237,17 @@ mod tests {
         assert!(err.contains("Circular"), "{err}");
         // Light --bg aliasing --line is fine: Dark keeps its own value.
         s.update(&bg, None, Some("var(--line)"), None).unwrap();
+    }
+
+    #[test]
+    fn clearing_a_mode_value_cannot_make_a_cycle() {
+        let (mut s, bg, _, line) = themed();
+        s.update(&line, None, Some("var(--bg)"), None).unwrap();
+        s.update_in_mode(&line, "dark", Some("#000000")).unwrap();
+        s.update_in_mode(&bg, "dark", Some("var(--line)")).unwrap();
+        // Dark --line would follow its first value, --bg, which aliases --line in Dark.
+        assert!(s.update_in_mode(&line, "dark", None).is_err());
+        assert_eq!(s.resolve_in(&line, Some("Dark")), Some(BLACK));
     }
 
     #[test]
