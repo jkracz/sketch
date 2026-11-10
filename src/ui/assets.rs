@@ -118,6 +118,7 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     let a = &mut st.assets;
     ui.add(
         egui::TextEdit::singleline(&mut a.query)
+            .id(egui::Id::new("asset-search"))
             .hint_text("Search components")
             .desired_width(f32::INFINITY),
     );
@@ -271,6 +272,12 @@ pub fn drag(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState, canvas: egui
         a.dragging = None;
         ed.hover = None;
         if let Some(w) = world {
+            // Like a click on the canvas, so shortcuts such as undo act on the drop.
+            ctx.memory_mut(|m| {
+                if let Some(f) = m.focused() {
+                    m.surrender_focus(f)
+                }
+            });
             ed.end_text_edit();
             ed.drop_component(&id, w);
         }
@@ -414,6 +421,12 @@ mod tests {
             ),
             None,
         );
+        // Search first, so the field has focus.
+        h.st.assets.query = "butt".into();
+        h.ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("asset-search")));
+        h.frame(vec![]);
+        assert!(h.ctx.memory(|m| m.has_focus(egui::Id::new("asset-search"))));
         let from = h.tile("brand/button").center();
         let to = h.screen(200.0, 150.0);
         assert!(h.canvas.contains(to));
@@ -433,6 +446,7 @@ mod tests {
         let r = h.ed.doc.world_rect(placed[0].id).unwrap();
         assert!((r.center().x - 200.0).abs() < 1.0 && (r.center().y - 150.0).abs() < 1.0);
         assert_eq!(h.ed.selection, [placed[0].id]);
+        assert_eq!(h.ctx.memory(|m| m.focused()), None);
     }
 
     #[test]
