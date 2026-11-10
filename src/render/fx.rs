@@ -34,8 +34,7 @@ pub struct FxParams {
     pub rect: [f32; 4],
     /// The uv range that holds valid texels, as min then max.
     pub clamp: [f32; 4],
-    /// Composite: premultiplied color, or for content its opacity in every channel.
-    /// Blur: uv step per tap, sigma in taps, tap radius.
+    /// Composite: premultiplied color. Blur: uv step per tap, sigma in taps, tap radius.
     pub color: [f32; 4],
     /// Composite without a mask: the target px rect to cover. Blur: px origin of the output.
     pub quad: [f32; 4],
@@ -219,7 +218,7 @@ fn fs_paint(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = clamp((p.xy - fx.rect.xy) * fx.rect.zw, fx.clamp.xy, fx.clamp.zw);
     let t = textureSampleLevel(tex, samp, uv, 0.0);
     if (fx.params.x < 0.5) {
-        return t * fx.color.a;
+        return t;
     }
     if (fx.params.x < 1.5) {
         return fx.color * t.a;
@@ -536,13 +535,28 @@ pub struct FxPipelines {
     pub shadow: wgpu::RenderPipeline,
     /// A blurred texture painted over a px rect.
     pub quad: wgpu::RenderPipeline,
-    /// The same through world geometry: blended over, or replacing what is there.
+    /// The same through world geometry: blended over, or mixed with what is there by the
+    /// pass's blend constant, which at 1 replaces it.
     pub mask: [wgpu::RenderPipeline; 2],
     pub blur: wgpu::RenderPipeline,
 }
 
 /// Premultiplied source over.
 pub const OVER: wgpu::BlendState = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
+
+/// The source and what is there, mixed by the blend constant. Unlike source over, this
+/// leaves alpha alone where both are the same, so it is right on a transparent canvas too.
+const MIX: wgpu::BlendState = {
+    let mix = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Constant,
+        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        operation: wgpu::BlendOperation::Add,
+    };
+    wgpu::BlendState {
+        color: mix,
+        alpha: mix,
+    }
+};
 
 impl FxPipelines {
     pub fn new(
@@ -676,7 +690,7 @@ impl FxPipelines {
                     MSAA,
                     Some(OVER),
                 ),
-                fx("fx replace", "vs_mask", "fs_paint", true, list, MSAA, None),
+                fx("fx mix", "vs_mask", "fs_paint", true, list, MSAA, Some(MIX)),
             ],
             blur: fx("fx blur", "vs_full", "fs_blur", false, strip, 1, None),
         }

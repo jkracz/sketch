@@ -189,8 +189,9 @@ struct Shapes {
     pieces: Arc<Vec<Piece>>,
     /// The filled shape, for effects that work inside it. Empty unless an effect needs it.
     mask: Arc<Vec<Piece>>,
-    /// By effect index, the shape a shadow with spread is cast from.
-    spread: Vec<(usize, Arc<Vec<Piece>>)>,
+    /// By effect index, what a shadow with spread is cast from and how opaque the layer
+    /// paints it.
+    spread: Vec<(usize, Arc<Vec<Piece>>, f64)>,
 }
 
 /// Per-node tessellation cache. A node is re-tessellated only when it (or its world position,
@@ -308,13 +309,15 @@ impl SceneCache {
                 .filter(|_| draw::box_shape(n, wr).is_none());
             let spread = spreads
                 .filter_map(|(i, e)| {
-                    // A drop shadow grows by its spread and an inner one shrinks.
-                    let d = match e.kind {
-                        EffectKind::InnerShadow => -e.spread,
-                        _ => e.spread,
+                    // An inner shadow is cast from the shape, shrunk by the spread. A drop
+                    // shadow is cast from what the layer paints, grown by it.
+                    let (ops, alpha) = match e.kind {
+                        EffectKind::InnerShadow => {
+                            (vec![draw::spread_op(n, wr, -e.spread, tess.tol)?], 1.0)
+                        }
+                        _ => draw::cast_ops(n, wr, e.spread, tess.tol)?,
                     };
-                    let op = draw::spread_op(n, wr, d, tess.tol)?;
-                    Some((i, Arc::new(tess.ops(&[op]))))
+                    Some((i, Arc::new(tess.ops(&ops)), alpha))
                 })
                 .collect();
             self.entries.insert(
@@ -472,26 +475,28 @@ impl<'a> Effects<'a> {
         (self.n.style.effects.iter().enumerate()).filter(move |(_, e)| e.visible && e.kind == kind)
     }
 
-    /// The shape the shadow at `i` is cast from when it has a spread, as blur content.
-    fn spread(&self, i: usize) -> Option<Vec<Op>> {
-        let (_, pieces) = self.shapes.spread.iter().find(|(at, _)| *at == i)?;
+    /// What the shadow at `i` is cast from when it has a spread, as blur content, and how
+    /// opaque the layer paints it.
+    fn spread(&self, i: usize) -> Option<(Vec<Op>, f64)> {
+        let (_, pieces, alpha) = self.shapes.spread.iter().find(|(at, ..)| *at == i)?;
         let item = Item {
             id: self.n.id,
             pieces: pieces.clone(),
             clip: None,
             blend: BlendMode::Normal,
         };
-        Some(if pieces.is_empty() {
+        let content = if pieces.is_empty() {
             Vec::new()
         } else {
             vec![Op::Item(item)]
-        })
+        };
+        Some((content, *alpha))
     }
 
     /// A box casts its shadow from the box and leaves it out from under itself, as CSS does.
     /// Any other shape casts it from `cast`, what it paints, like `filter: drop-shadow()`,
-    /// so the shadow shows through a translucent fill. With a spread it casts from its
-    /// outline, grown. Text, lines and groups have no outline to grow and ignore the spread.
+    /// so the shadow shows through a translucent fill. With a spread it casts from the area
+    /// it paints, grown. A group paints nothing itself and ignores the spread.
     fn drop_shadow(
         &self,
         i: usize,
@@ -512,8 +517,12 @@ impl<'a> Effects<'a> {
             }));
         }
         let (content, bounds, opacity) = match self.spread(i) {
-            // The grown outline is opaque, so the layer's opacity goes on the color.
-            Some(grown) => (grown, self.wr.inflate(e.spread.max(0.0)), self.opacity),
+            // The grown area is opaque, so the layer's opacity goes on the color.
+            Some((grown, alpha)) => (
+                grown,
+                draw::draw_bounds(self.n, self.wr).inflate(e.spread.max(0.0)),
+                self.opacity * alpha,
+            ),
             // What the layer paints already carries its opacity.
             None => (cast.to_vec(), cast_bounds?, 1.0),
         };
@@ -562,7 +571,7 @@ impl<'a> Effects<'a> {
         // Room for the shape where it is, where the shadow moves it, and how far it grows.
         let grown = self.wr.inflate((-e.spread).max(0.0));
         Some(Op::Blur(Blur {
-            content: self.spread(i).unwrap_or_else(whole),
+            content: self.spread(i).map_or_else(whole, |(shrunk, _)| shrunk),
             bounds: grown.union(&self.wr.translate(-offset)),
             sigma: e.sigma(),
             offset,

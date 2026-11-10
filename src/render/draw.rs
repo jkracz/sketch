@@ -584,8 +584,8 @@ pub fn mask_op(n: &Node, wr: Rect) -> Option<DrawOp> {
 }
 
 /// The node's filled shape grown by `d` on every side, or shrunk when `d` is negative, as one
-/// opaque op. This is what a shadow with spread is cast from. An ellipse stays an ellipse, as
-/// in CSS, and other outlines grow with round corners. None for layers without an area.
+/// opaque op. An ellipse stays an ellipse, as in CSS, and other outlines grow with round
+/// corners. None for layers without an area.
 pub fn spread_op(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<DrawOp> {
     let DrawOp::Fill { path, even_odd, .. } = mask_op(n, wr)? else {
         return None;
@@ -596,9 +596,61 @@ pub fn spread_op(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<DrawOp> {
         NodeKind::Ellipse => VPath::new(),
         _ => vector::offset(&path, even_odd, d, tol),
     };
-    Some(DrawOp::Fill {
+    Some(solid(path))
+}
+
+fn solid(path: VPath) -> DrawOp {
+    DrawOp::Fill {
         path,
         paint: PaintSpec::Solid([1.0; 4]),
         even_odd: false,
-    })
+    }
+}
+
+/// What a drop shadow with spread is cast from: the area the node paints, grown by `d` or
+/// shrunk when `d` is negative, as opaque ops, and how opaque the node paints it. A filled
+/// shape grows from its outline, a hollow one from its stroke, and text from its glyphs.
+/// None for groups, which paint nothing themselves.
+pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f64)> {
+    let alpha = |c: Color| c.a as f64 / 255.0;
+    let fill_alpha = (n.style.fills.iter())
+        .map(|p| match p {
+            Paint::Solid { color } => alpha(*color),
+            Paint::Image { opacity, .. } => *opacity,
+            _ => 1.0,
+        })
+        .fold(0.0, f64::max);
+    if matches!(n.kind, NodeKind::Text { .. }) {
+        let l = text::layout_node(n)?;
+        let o = wr.min() + text::text_offset(n);
+        let mut glyphs = VPath::new();
+        for g in &l.glyphs {
+            glyphs.append(&text::glyph_path(
+                g.face,
+                g.gid,
+                o + v2(g.x, g.baseline),
+                g.size,
+            ));
+        }
+        let grown = vector::offset(&glyphs, false, d, tol);
+        return Some((vec![solid(grown)], fill_alpha));
+    }
+    let ink = matches!(n.kind, NodeKind::Stroke { .. });
+    if is_area(n) && (ink || !n.style.fills.is_empty()) {
+        // A stroke outside the outline is part of what the layer paints.
+        let op = spread_op(n, wr, stroke_reach(n).0 + d, tol)?;
+        return Some((vec![op], if ink { 1.0 } else { fill_alpha }));
+    }
+    let color = n.style.stroke?;
+    let width = n.style.stroke_width + 2.0 * d;
+    let line = matches!(n.kind, NodeKind::Line { .. } | NodeKind::Connector { .. });
+    let ops = (width > 0.0).then(|| DrawOp::Stroke {
+        path: stroke_path(n, wr).unwrap_or_default(),
+        color: [1.0; 4],
+        width,
+        cap: if line { Cap::Round } else { n.style.cap },
+        join: n.style.join,
+        dash: n.style.dash.clone(),
+    });
+    Some((ops.into_iter().collect(), alpha(color)))
 }

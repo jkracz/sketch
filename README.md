@@ -400,11 +400,12 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 * **Effects.** The canvas, PNG export and thumbnails draw shadows and blurs. SVG and PDF
   leave them out. A rectangle, frame or circle casts its shadow from its box, as CSS
   `box-shadow` does. Any other shape casts it from what it paints, so the shadow shows
-  through a translucent fill. Text, lines and groups ignore the spread. The order of the
-  list sets which shadow is on top, and a blur works the same wherever it sits. Sketch
-  doesn't draw a background blur on a layer inside one that has a layer blur. Box shadows cost no extra render pass. Shape shadows
-  and layer blurs share atlas pages at three passes a page, and each background blur in view
-  adds about four. `tests/perf.rs` measures all of these.
+  through a translucent fill, and its spread grows what it paints. Groups ignore the spread.
+  The order of the list sets which shadow is on top, and a blur works the same wherever it
+  sits. Sketch doesn't draw a background blur on a layer inside one that has a layer blur.
+  Box shadows cost no extra render pass. Shape shadows and layer blurs share atlas pages at
+  three passes a page, and each background blur in view adds about four. `tests/perf.rs`
+  measures all of these.
 * **PDF**: text is outlined (not selectable); gradient stop transparency uses the first
   stop's alpha; tiled image fills are drawn as repeated images.
 * **Import**: Excalidraw rotation is baked into paths (text rotation is dropped), bound text

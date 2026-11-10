@@ -471,7 +471,8 @@ enum Cmd {
         fx: u32,
         scissor: Scissor,
         mask: Option<Range<u32>>,
-        replace: bool,
+        /// Mix with what is there by this much, in place of blending over it.
+        mix: Option<f64>,
         globals: u32,
     },
     /// Blur what the pass has painted so far. Ends the pass.
@@ -1225,7 +1226,7 @@ impl CanvasRenderer {
                 let job = &jobs[*j];
                 let plan = &world.blurs[job.plan];
                 let (mode, color, mask) = match &plan.paint {
-                    PlanPaint::Content => (MODE_CONTENT, [1.0; 4], None),
+                    PlanPaint::Content => (MODE_CONTENT, [0.0; 4], None),
                     PlanPaint::Tint(c) => (MODE_TINT, premultiplied(*c), None),
                     PlanPaint::Inside { color, mask } => {
                         (MODE_INSIDE, premultiplied(*color), Some(mask.clone()))
@@ -1250,7 +1251,7 @@ impl CanvasRenderer {
                         fx,
                         scissor,
                         mask,
-                        replace: false,
+                        mix: None,
                         globals: tgt.globals,
                     };
                     painted.insert(job.plan, paint);
@@ -1320,7 +1321,7 @@ impl CanvasRenderer {
         let fx = self.slots.push(&FxParams {
             rect: [x0, y0, size[0] as f64 / (w * aw), size[1] as f64 / (h * ah)].map(|v| v as f32),
             clamp: result.valid_uv(),
-            color: [plan.opacity as f32; 4],
+            color: [0.0; 4],
             quad: [0.0; 4],
             params: [MODE_CONTENT, tw as f32, th as f32, 0.0],
         });
@@ -1329,8 +1330,8 @@ impl CanvasRenderer {
             fx,
             scissor: tgt.scissor(shown).unwrap_or([0, 0, 1, 1]),
             mask: Some(plan.mask.clone()),
-            // A see-through layer mixes the blur with what is there.
-            replace: plan.opacity >= 1.0,
+            // A see-through layer shows that much of the blur.
+            mix: Some(plan.opacity.clamp(0.0, 1.0)),
             globals: tgt.globals,
         }
     }
@@ -1486,16 +1487,24 @@ impl CanvasRenderer {
                     fx,
                     scissor,
                     mask,
-                    replace,
+                    mix,
                     globals,
                 } => {
                     let kind = match mask {
-                        Some(_) => Bound::Mask(*replace),
+                        Some(_) => Bound::Mask(mix.is_some()),
                         None => Bound::Quad,
                     };
+                    if let Some(m) = *mix {
+                        pass.set_blend_constant(wgpu::Color {
+                            r: m,
+                            g: m,
+                            b: m,
+                            a: m,
+                        });
+                    }
                     if bound != kind {
                         pass.set_pipeline(match kind {
-                            Bound::Mask(replace) => &self.fx.mask[replace as usize],
+                            Bound::Mask(mix) => &self.fx.mask[mix as usize],
                             _ => &self.fx.quad,
                         });
                         bound = kind;
@@ -1617,14 +1626,14 @@ fn emit(
                         fx,
                         scissor,
                         mask,
-                        replace,
+                        mix,
                         globals,
                     }) => out.push(Cmd::Paint {
                         tex: *tex,
                         fx: *fx,
                         scissor: *scissor,
                         mask: mask.clone(),
-                        replace: *replace,
+                        mix: *mix,
                         globals: *globals,
                     }),
                     _ if matches!(blur_mode(*i, plan, tgt), BlurMode::Inline) => {

@@ -384,6 +384,71 @@ fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
 }
 
 #[test]
+fn spread_follows_what_the_layer_paints() {
+    let Some(g) = gpu() else { return };
+    let spread = |s| vec![shadow(DropShadow, 0.0, 150.0, 0.0, s, BLACK)];
+    // A ring: an ellipse with a stroke and no fill, and its shadow 150px below.
+    let oval = Rect::new(300.0, 100.0, 200.0, 100.0);
+    let mut ring = node(NodeKind::Ellipse, oval, WHITE, spread(0.0));
+    ring.style.fills.clear();
+    ring.style.stroke = Some(BLUE);
+    ring.style.stroke_width = 10.0;
+    let (mut e, id) = scene(ring);
+    let look = |e: &Editor| {
+        let img = render_canvas(g, e);
+        // The shadow's middle, its right rim, and just outside the rim.
+        [400.0, 500.0, 512.0].map(|x| is_dark(px(&img, v2(x, 300.0))))
+    };
+    assert_eq!(look(&e), [false, true, false]);
+    // Grown by 10, the ring is still a ring.
+    e.edit("spread", |tx| {
+        tx.node_mut(id).unwrap().style.effects = spread(10.0)
+    });
+    assert_eq!(look(&e), [false, true, true]);
+
+    // A line has no area, and its shadow grows from its stroke.
+    let mut line = Node::new(
+        NodeId(0),
+        NodeKind::Line {
+            a: v2(0.0, 0.0),
+            b: v2(200.0, 0.0),
+        },
+        Rect::new(300.0, 100.0, 200.0, 0.0),
+    );
+    line.style.stroke_width = 4.0;
+    line.style.effects = spread(8.0);
+    let (e, _) = scene(line);
+    let img = render_canvas(g, &e);
+    assert!(is_dark(px(&img, v2(400.0, 258.0))), "8px above its middle");
+    assert!(close(px(&img, v2(400.0, 236.0)), WHITE, 2));
+
+    // Text grows from its glyphs.
+    let text = |s| {
+        node(
+            NodeKind::Text {
+                text: "IIII".into(),
+                font_size: 120.0,
+                auto_width: true,
+                align: TextAlign::Left,
+            },
+            Rect::new(100.0, 60.0, 300.0, 140.0),
+            RED,
+            spread(s),
+        )
+    };
+    let dark = |n: Node| {
+        let (e, _) = scene(n);
+        let img = render_canvas(g, &e);
+        count(&img, Rect::new(80.0, 190.0, 340.0, 180.0), is_dark)
+    };
+    let (thin, thick) = (dark(text(0.0)), dark(text(4.0)));
+    assert!(
+        thin > 2000 && thick as f64 > thin as f64 * 1.3,
+        "{thin} {thick}"
+    );
+}
+
+#[test]
 fn a_background_blur_fades_with_the_layer_and_survives_its_layer_blur() {
     let Some(g) = gpu() else { return };
     let mut e = editor(800.0, 500.0);
@@ -424,6 +489,25 @@ fn a_background_blur_fades_with_the_layer_and_survives_its_layer_blur() {
         (stripe - 64).abs() < 20 && (gap - 191).abs() < 20,
         "{stripe} {gap}"
     );
+
+    // On a see-through canvas, mixing leaves a flat backdrop as it was, alpha included.
+    let mut flat = editor(800.0, 500.0);
+    let under = Color::rgba(230, 40, 40, 128);
+    let square = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let base = flat.add_node(node(NodeKind::Rect, square, under, vec![]), None);
+    let mut pane = node(
+        NodeKind::Rect,
+        Rect::new(100.0, 100.0, 200.0, 200.0),
+        WHITE,
+        vec![blur(BackgroundBlur, 12.0)],
+    );
+    pane.style.fills.clear();
+    pane.style.opacity = 0.5;
+    let pane = flat.add_node(pane, None);
+    let img = png::render(g, &flat.doc, Some(&[base, pane]), 1.0, None).unwrap();
+    let (outside, inside) = (img.get_pixel(20, 20).0, img.get_pixel(200, 200).0);
+    assert_eq!(outside[3], 128);
+    assert!((inside[3] as i32 - 128).abs() <= 1, "{inside:?}");
 
     // With a layer blur as well, the layer still blurs what is behind it.
     set_opacity(&mut e, 1.0);
@@ -497,18 +581,22 @@ fn png_export_makes_room_for_shadows() {
     );
     assert_eq!(img.get_pixel(0, 0).0[3], 0);
 
-    // A group's shadow comes from its children, and needs room too.
+    // A group casts its shadow from its children and their shadows, and needs room for it.
     let a = e.add_node(card(vec![]), Some(e.doc.root[0]));
     e.select(vec![id, a]);
     key(&mut e, Key::Char('g'), Modifiers::cmd());
     let group = e.selection[0];
-    inspector::apply(&mut e, "effects", &[id], |n| n.style.effects.clear());
+    let right = |x| vec![shadow(DropShadow, x, 0.0, 0.0, 0.0, BLACK)];
+    inspector::apply(&mut e, "effects", &[id], |n| n.style.effects = right(200.0));
     inspector::apply(&mut e, "effects", &[group], |n| {
-        n.style.effects = vec![shadow(DropShadow, 100.0, 0.0, 0.0, 0.0, BLACK)];
+        n.style.effects = right(200.0)
     });
     let img = png::render(g, &e.doc, Some(&[group]), 1.0, None).unwrap();
-    assert_eq!(img.dimensions(), (300, 100));
-    assert_eq!(img.get_pixel(250, 50).0, [0, 0, 0, 255]);
+    // The cards, the child's shadow, then the group's shadow of that shadow.
+    assert_eq!(img.dimensions(), (600, 100));
+    assert_eq!(img.get_pixel(300, 50).0, [0, 0, 0, 255]);
+    assert_eq!(img.get_pixel(500, 50).0, [0, 0, 0, 255]);
+    inspector::apply(&mut e, "effects", &[group], |n| n.style.effects.clear());
 
     // The project thumbnail draws them too.
     let thumb = sketch_rs::session::render_thumbnail(g, &e.doc)
