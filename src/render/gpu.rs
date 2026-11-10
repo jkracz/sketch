@@ -1622,6 +1622,7 @@ fn emit(
 }
 
 /// A device without a window, for tests, screenshots and PNG export.
+#[derive(Clone)]
 pub struct Headless {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,

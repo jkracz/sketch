@@ -1,6 +1,7 @@
 //! egui chrome: menu bar, layers panel, design (properties) panel, floating toolbar, and the
 //! projects home screen.
 
+pub mod assets;
 pub mod effect_styles;
 pub mod fonts;
 pub mod home;
@@ -40,6 +41,7 @@ pub struct UiState {
     pub save_state: String,
     pub pages: pages::PagesUi,
     pub library: library::LibraryUi,
+    pub assets: assets::AssetsUi,
     pub tokens: tokens::TokensUi,
     pub systems: systems::SystemsUi,
     /// What the lower part of the left sidebar shows.
@@ -60,6 +62,7 @@ pub enum SidebarTab {
     #[default]
     Layers,
     Library,
+    Assets,
     Tokens,
 }
 
@@ -205,6 +208,7 @@ pub fn draw(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) -> egui::Rect {
     toolbar(ui.ctx(), ed, canvas);
     status(ui.ctx(), ed, canvas);
     palette::draw(ui.ctx(), ed, st, canvas);
+    assets::drag(ui.ctx(), ed, st, canvas);
     if st.show_help {
         help(ui.ctx(), st, canvas);
     }
@@ -342,6 +346,7 @@ fn layers(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
         for (tab, label) in [
             (SidebarTab::Layers, "Layers"),
             (SidebarTab::Library, "Library"),
+            (SidebarTab::Assets, "Assets"),
             (SidebarTab::Tokens, "Tokens"),
         ] {
             let on = st.sidebar == tab;
@@ -382,6 +387,7 @@ fn layers(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     ui.add_space(2.0);
     match st.sidebar {
         SidebarTab::Library => return library::panel(ui, ed, st),
+        SidebarTab::Assets => return assets::panel(ui, ed, st),
         SidebarTab::Tokens => return tokens::panel(ui, ed, st),
         SidebarTab::Layers => {}
     }
