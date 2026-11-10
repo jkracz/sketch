@@ -377,7 +377,6 @@ fn border_width_tokens_bind_the_stroke_width() {
     assert_eq!(bound(&h), thick);
     assert_eq!(h.ed.doc.get(id).unwrap().style.stroke_width, 4.0);
 
-    // A translucent color has spaces of its own, and a bound zero still shows.
     set(
         &mut h,
         json!({"borderColor": "rgba(0, 0, 0, 0.5)", "borderWidth": "var(--border-none)"}),
@@ -388,7 +387,6 @@ fn border_width_tokens_bind_the_stroke_width() {
         "var(--border-none) solid rgba(0, 0, 0, 0.502)"
     );
 
-    // A new color leaves a bound zero width alone, in a later call or after it in one.
     set(&mut h, json!({"borderColor": "#ff0000"}));
     assert_eq!(border(&mut h), "var(--border-none) solid #ff0000");
     let r = call(

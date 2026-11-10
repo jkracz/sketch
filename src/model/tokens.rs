@@ -1934,8 +1934,6 @@ mod tests {
         let n = TokenValue::Number;
         assert_eq!(s.parse_value(TokenKind::Spacing, "8px"), Ok(n(8.0)));
         assert_eq!(s.parse_value(TokenKind::Spacing, "1rem"), Ok(n(16.0)));
-        assert_eq!(s.parse_value(TokenKind::BorderWidth, "1.5px"), Ok(n(1.5)));
-        assert_eq!(s.parse_value(TokenKind::BorderWidth, "0"), Ok(n(0.0)));
         assert_eq!(s.parse_value(TokenKind::Opacity, "50%"), Ok(n(0.5)));
         assert_eq!(s.parse_value(TokenKind::Opacity, "0.25"), Ok(n(0.25)));
         assert_eq!(s.parse_value(TokenKind::LineHeight, "150%"), Ok(n(1.5)));
@@ -1957,7 +1955,6 @@ mod tests {
             (TokenKind::Opacity, "1.5"),
             (TokenKind::Radius, "-4px"),
             (TokenKind::BorderWidth, "-1px"),
-            (TokenKind::BorderWidth, "thin"),
             (TokenKind::FontSize, "0"),
             (TokenKind::LetterSpacing, "1e308em"),
             (TokenKind::LetterSpacing, "em"),

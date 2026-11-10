@@ -1120,7 +1120,8 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
             st.insert(key.into(), json!(var));
             continue;
         }
-        // Computed styles write the stroke as `border: <width> <style> <color>`.
+        // `border` is `<width> <style> <color>`. Split only twice so rgba() colors keep
+        // their spaces.
         let part = match prop {
             TokenProp::StrokeWidth => 0,
             TokenProp::Stroke => 2,
