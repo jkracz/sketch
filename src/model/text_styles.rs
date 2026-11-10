@@ -390,7 +390,7 @@ impl TokenSet {
         for s in styles {
             let class = self.style_class(s);
             // Tailwind utility names must start with a letter.
-            if tailwind && !class.starts_with(|c: char| c.is_ascii_digit()) {
+            if tailwind && class.starts_with(|c: char| c.is_ascii_lowercase()) {
                 out.push_str(&format!("@utility {class} {{\n"));
             } else {
                 out.push_str(&format!(".{} {{\n", selector_escape(&class)));
@@ -740,6 +740,11 @@ mod tests {
                     .starts_with(".\\32 4px-semibold {")
             );
         }
+        let id = s
+            .create_style("_body", &StyleInput::default(), None)
+            .unwrap();
+        let st = s.style(&id).unwrap();
+        assert!(s.style_sheet(&[st], true).starts_with("._body {"));
     }
 
     fn input(pairs: &[(StyleField, &str)]) -> StyleInput {
