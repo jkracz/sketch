@@ -27,7 +27,11 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context, a: &mut A
     for (k, v) in styles.iter().filter(|(k, _)| owns(k)) {
         let v = v.trim().to_ascii_lowercase();
         let ok = match k.as_str() {
-            "horizontalConstraint" | "verticalConstraint" if ctx.parent_size.is_some() => {
+            // Constraints place free children of frames, and absolute ones in auto layout.
+            "horizontalConstraint" | "verticalConstraint"
+                if ctx.parent_is_frame
+                    && (ctx.parent_layout.is_none() || n.layout_child.absolute) =>
+            {
                 let h = k == "horizontalConstraint";
                 match constraint(&v, h) {
                     Some(c) if h => {
@@ -42,7 +46,8 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context, a: &mut A
                 }
             }
             "autoLayout" if n.is_frame() && matches!(v.as_str(), "false" | "none") => {
-                // Like the inspector's remove button; children keep where layout put them.
+                // Children keep where layout put them. Hug needs a layout; Fill is about the
+                // parent's, so it stays.
                 n.layout = None;
                 for s in &mut n.layout_child.sizing {
                     if *s == Sizing::Hug {
@@ -153,13 +158,10 @@ pub fn computed(n: &Node, is_root: bool, stroked: bool, m: &mut Map<String, Valu
     }
     if stroked {
         // `border` is inside, like CSS.
-        let align = match n.style.stroke_align {
-            StrokeAlign::Inside => None,
-            StrokeAlign::Center => Some("center"),
-            StrokeAlign::Outside => Some("outside"),
-        };
-        if let Some(al) = align {
-            put("strokeAlign", al.into());
+        match n.style.stroke_align {
+            StrokeAlign::Inside => {}
+            StrokeAlign::Center => put("strokeAlign", "center".into()),
+            StrokeAlign::Outside => put("strokeAlign", "outside".into()),
         }
         match n.style.cap {
             Cap::Butt => {}

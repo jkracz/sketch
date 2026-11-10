@@ -621,7 +621,8 @@ fn core_definitions() -> Vec<Value> {
              roughness, fillStyle, strokeStyle, seed.\n\
              Layer keys: horizontalConstraint (left, right, left-right, center, scale) and \
              verticalConstraint (top, bottom, top-bottom, center, scale) set how a layer follows \
-             its parent frame's resizes; autoLayout: false removes a frame's auto layout and keeps \
+             its parent frame's resizes, when the frame has no auto layout or the layer is \
+             position: absolute; autoLayout: false removes a frame's auto layout and keeps \
              its children where they are; strokeAlign (inside, center, outside; border sets \
              inside), strokeLinecap (butt, round, square), strokeLinejoin (miter, round, bevel); \
              sides for polygons and star points; innerRadius for stars (0.01 to 1, or a percent). \
@@ -1065,7 +1066,8 @@ undoes it, for frames too. flip_nodes mirrors, align_nodes lines layers up with 
 centers one in its parent frame, and distribute_nodes evens out the gaps between three or more.
 Each is one undo step.
 Free frames (no auto layout): children sit at left/top, and horizontalConstraint /
-verticalConstraint in update_styles say how they follow when the frame resizes, e.g. a footer
+verticalConstraint in update_styles say how they follow when the frame resizes (in an auto
+layout frame, only position:absolute children use them), e.g. a footer
 with verticalConstraint: \"bottom\" and horizontalConstraint: \"left-right\". To turn a flex
 frame into a free one, update_styles {autoLayout: false}. get_computed_styles shows constraints
 that aren't left/top.
@@ -1097,8 +1099,8 @@ border, border-color/width/style, border-radius (1–4 values), opacity, mix-ble
 font-family, font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
 radial-gradient() takes a size and center: ellipse 30% 60% at 25% 50%, circle 80px, or
 closest-side, farthest-side, closest-corner, farthest-corner; without a size it is 50% 50%.
-Sketch keys (see update_styles): horizontal-constraint, vertical-constraint, stroke-align,
-stroke-linecap, stroke-linejoin, sides, inner-radius.
+Sketch keys (see update_styles): horizontal-constraint, vertical-constraint, auto-layout
+(false makes a free frame), stroke-align, stroke-linecap, stroke-linejoin, sides, inner-radius.
 
 Effects: box-shadow with lists, inset and spread, text-shadow on text, filter: blur(),
 backdrop-filter: blur(). A shadow whose color is var(--token) stays bound to that color token.

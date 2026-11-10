@@ -727,7 +727,12 @@ impl Editor {
     /// `axis` 0 = x, 1 = y; `to` 0 = start, 0.5 = center, 1 = end.
     pub fn align(&mut self, axis: usize, to: f64) {
         let moves = self.align_moves(axis, to);
-        self.edit("Align", |tx| {
+        self.translate("Align", moves);
+    }
+
+    /// Move layers by the given offsets as one edit.
+    pub fn translate(&mut self, label: &str, moves: Vec<(NodeId, V2)>) {
+        self.edit(label, |tx| {
             for (id, d) in moves {
                 let n = tx.node_mut(id).unwrap();
                 n.rect = n.rect.translate(d);

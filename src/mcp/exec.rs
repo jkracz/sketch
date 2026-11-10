@@ -2927,6 +2927,8 @@ struct Parent {
     definite: [bool; 2],
     /// Children without an explicit cross size stretch (CSS `align-items: normal`).
     stretch: bool,
+    /// A frame, whose free and absolute children follow constraints.
+    frame: bool,
 }
 
 impl Parent {
@@ -2938,6 +2940,7 @@ impl Parent {
                 size: None,
                 definite: [false; 2],
                 stretch: false,
+                frame: false,
             },
             Some(n) => Parent {
                 id: Some(n.id),
@@ -2948,6 +2951,7 @@ impl Parent {
                     n.layout_child.sizing[1] != Sizing::Hug,
                 ],
                 stretch: stretches(page_id, n),
+                frame: n.is_frame(),
             },
         }
     }
@@ -2955,6 +2959,7 @@ impl Parent {
         Context {
             parent_layout: self.layout,
             parent_size: self.size,
+            parent_is_frame: self.frame,
         }
     }
     /// The cross axis, when children are laid out.

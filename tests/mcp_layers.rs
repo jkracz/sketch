@@ -267,6 +267,14 @@ fn radial_gradients_take_a_size_and_center() {
             p => panic!("{p:?}"),
         }
     };
+    // Measured against the 200×100 box the same update makes, not the 40×40 one before it.
+    assert_eq!(
+        set(
+            &mut h,
+            "radial-gradient(circle 50px at left top, #fff, #000)"
+        ),
+        (0.0, 0.0, 0.25, 0.5)
+    );
     assert_eq!(
         set(&mut h, "radial-gradient(#fff, #000)"),
         (0.5, 0.5, 0.5, 0.5)
@@ -277,13 +285,6 @@ fn radial_gradients_take_a_size_and_center() {
             "radial-gradient(ellipse 30% 60% at 25% 75%, #fff, #000)"
         ),
         (0.25, 0.75, 0.3, 0.6)
-    );
-    assert_eq!(
-        set(
-            &mut h,
-            "radial-gradient(circle 50px at left top, #fff, #000)"
-        ),
-        (0.0, 0.0, 0.25, 0.5)
     );
     assert_eq!(
         set(&mut h, "radial-gradient(circle closest-side, #fff, #000)"),
@@ -344,7 +345,11 @@ fn lock_group_and_ungroup() {
     let e = try_call(&mut h, "group_nodes", json!({"nodeIds": [b[0], b[2]]})).unwrap_err();
     assert!(e.contains("same parent"), "{e}");
 
-    let r = call(&mut h, "ungroup_nodes", json!({"nodeIds": [g["groupId"]]}));
+    let r = call(
+        &mut h,
+        "ungroup_nodes",
+        json!({"nodeIds": [g["groupId"], g["groupId"]]}),
+    );
     assert_eq!(r["childIds"], json!([b[0], b[1]]));
     assert!(h.ed.doc.get(gid).is_none());
     assert_eq!((rect(&h, &b[0]), rect(&h, &b[1])), before);
@@ -433,4 +438,32 @@ fn flip_mirrors_a_vector() {
         panic!()
     };
     assert_eq!((a.y, b.y), (40.0, 0.0));
+}
+
+#[test]
+fn constraints_only_apply_where_the_layer_is_free() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Flex", "styles": {"width": "300px", "height": "200px"}}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+               "html": "<div style=\"width:40px;height:40px\"></div><div style=\"position:absolute;left:0;top:0;width:40px;height:40px\"></div>"}),
+    );
+    let (flow, abs) = (&r["createdNodeIds"][0], &r["createdNodeIds"][1]);
+    let r = call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [flow, abs], "styles": {"horizontalConstraint": "right"}}]}),
+    );
+    // The auto layout places the first one; the absolute one follows constraints.
+    assert_eq!(
+        r["ignoredStyles"],
+        json!({flow.as_str().unwrap(): ["horizontalConstraint"]})
+    );
+    assert_eq!(styles(&mut h, abs)["horizontalConstraint"], "right");
 }

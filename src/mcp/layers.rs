@@ -3,7 +3,7 @@
 
 use super::ToolResult;
 use super::exec::{Args, node_key, page_arg, resolve_all, text};
-use super::tools::tool;
+use super::tools::{page_id, tool};
 use crate::editor::Editor;
 use crate::geom::Rect;
 use crate::model::NodeId;
@@ -22,7 +22,7 @@ pub fn definitions() -> Vec<Value> {
     let ids = |d: &str| json!({"type": "array", "minItems": 1, "items": {"type": "string"}, "description": d});
     let direction =
         |d: &str| json!({"type": "string", "enum": ["horizontal", "vertical"], "description": d});
-    vec![
+    let mut defs = vec![
         tool(
             "lock_nodes",
             "Lock or unlock layers. Locked layers can't be selected or dragged on the canvas, and \
@@ -86,7 +86,7 @@ pub fn definitions() -> Vec<Value> {
             "distribute_nodes",
             "Space three or more layers evenly, like the inspector's distribute buttons: the \
              first and last layers along the direction stay put and the ones between move so \
-             the gaps are equal.",
+             the gaps are equal. Locked layers move too, as in the app.",
             json!({
                 "nodeIds": ids("At least three layers."),
                 "direction": direction("\"horizontal\" equalizes the gaps along x, \"vertical\" along y."),
@@ -94,11 +94,18 @@ pub fn definitions() -> Vec<Value> {
             &["nodeIds", "direction"],
             false,
         ),
-    ]
+    ];
+    for d in &mut defs {
+        d["inputSchema"]["properties"]["pageId"] = page_id();
+    }
+    defs
 }
 
 pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
-    let (page, ids) = resolve_all(ed, &a.strs("nodeIds")?, page_arg(ed, a)?)?;
+    let (page, mut ids) = resolve_all(ed, &a.strs("nodeIds")?, page_arg(ed, a)?)?;
+    // The editor commands expect a selection, which never repeats a layer.
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
     if ids.is_empty() {
         return Err("nodeIds is empty".into());
     }
@@ -113,7 +120,11 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
                     for id in &ids {
                         tx.node_mut(*id).unwrap().locked = locked;
                     }
-                })
+                });
+                // Like the lock shortcut: a locked layer can't stay selected.
+                if locked {
+                    ed.selection.retain(|id| !ids.contains(id));
+                }
             });
             text(json!({"updated": ids.len(), "locked": locked}))
         }
@@ -125,7 +136,7 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
                     "the layers must have the same parent; move_nodes can gather them".into(),
                 );
             }
-            let (_, left) = on_nodes(ed, page, ids.clone(), Editor::group_selection);
+            let left = on_nodes(ed, page, ids.clone(), Editor::group_selection);
             let doc = ed.page_doc(page);
             let group = match left[..] {
                 [g] if !ids.contains(&g) && doc.get(g).is_some_and(|n| n.is_group()) => g,
@@ -147,12 +158,13 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
                     node_key(ed, page, *id)
                 ));
             }
-            let (_, freed) = on_nodes(ed, page, ids, Editor::ungroup_selection);
+            let freed = on_nodes(ed, page, ids, Editor::ungroup_selection);
             text(json!({"childIds": keys(ed, page, &freed)}))
         }
         "flip_nodes" => {
             let axis = axis(a)?;
-            let (_, locked) = moved(ed, page, ids.clone(), |ed| ed.flip(axis));
+            let locked = locked(ed, page, &ids);
+            on_nodes(ed, page, ids.clone(), |ed| ed.flip(axis));
             // A layer flipped in place keeps its box, so report every unlocked one.
             let flipped: Vec<NodeId> = ids.into_iter().filter(|id| !locked.contains(id)).collect();
             report(ed, page, "flipped", &flipped, &locked)
@@ -184,16 +196,12 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
                         .into(),
                 );
             }
-            let (moved, locked) = moved(ed, page, ids, |ed| {
+            let locked = locked(ed, page, &ids);
+            let moved = moved(ed, page, ids, |ed| {
                 // Both axes as one undo step. A move along x leaves y unchanged.
                 let mut moves = h.map_or(Vec::new(), |to| ed.align_moves(0, to));
                 moves.extend(v.map_or(Vec::new(), |to| ed.align_moves(1, to)));
-                ed.edit("Align", |tx| {
-                    for (id, d) in moves {
-                        let n = tx.node_mut(id).unwrap();
-                        n.rect = n.rect.translate(d);
-                    }
-                });
+                ed.translate("Align", moves);
             });
             report(ed, page, "moved", &moved, &locked)
         }
@@ -202,7 +210,7 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
             if ids.len() < 3 {
                 return Err("distributing needs at least three layers".into());
             }
-            let (moved, _) = moved(ed, page, ids, |ed| ed.distribute(axis));
+            let moved = moved(ed, page, ids, |ed| ed.distribute(axis));
             report(ed, page, "moved", &moved, &[])
         }
         _ => Err(format!("unknown tool `{name}`")),
@@ -221,32 +229,38 @@ fn keys(ed: &Editor, page: usize, ids: &[NodeId]) -> Vec<String> {
     ids.iter().map(|id| node_key(ed, page, *id)).collect()
 }
 
+fn locked(ed: &Editor, page: usize, ids: &[NodeId]) -> Vec<NodeId> {
+    let doc = ed.page_doc(page);
+    (ids.iter().copied())
+        .filter(|id| doc.is_effectively_locked(*id))
+        .collect()
+}
+
 /// Run a selection command on `ids` as if the user had selected them, then give the user's
-/// selection back. Returns the command's result and the selection it left.
-fn on_nodes<R>(
+/// selection back. Returns the selection the command left.
+fn on_nodes(
     ed: &mut Editor,
     page: usize,
     ids: Vec<NodeId>,
-    f: impl FnOnce(&mut Editor) -> R,
-) -> (R, Vec<NodeId>) {
+    f: impl FnOnce(&mut Editor),
+) -> Vec<NodeId> {
     ed.with_page(page, |ed| {
         let users = std::mem::replace(&mut ed.selection, ids);
-        let r = f(ed);
+        f(ed);
         let left = std::mem::replace(&mut ed.selection, users);
         let doc = &ed.doc;
         ed.selection.retain(|id| doc.nodes.contains_key(id));
-        (r, left)
+        left
     })
 }
 
-/// Run a command that moves layers. Returns the layers whose box changed and the locked
-/// ones, which the command leaves alone.
+/// Run a command that moves layers and return the ones whose box changed.
 fn moved(
     ed: &mut Editor,
     page: usize,
     ids: Vec<NodeId>,
     f: impl FnOnce(&mut Editor),
-) -> (Vec<NodeId>, Vec<NodeId>) {
+) -> Vec<NodeId> {
     let rects = |ed: &Editor| -> Vec<Option<Rect>> {
         let doc = ed.page_doc(page);
         ids.iter().map(|id| doc.get(*id).map(|n| n.rect)).collect()
@@ -254,15 +268,10 @@ fn moved(
     let before = rects(ed);
     on_nodes(ed, page, ids.clone(), f);
     let after = rects(ed);
-    let doc = ed.page_doc(page);
-    let moved = (ids.iter().zip(before.iter().zip(&after)))
+    (ids.iter().zip(before.iter().zip(&after)))
         .filter(|(_, (b, a))| b != a)
         .map(|(id, _)| *id)
-        .collect();
-    let locked = (ids.iter().copied())
-        .filter(|id| doc.is_effectively_locked(*id))
-        .collect();
-    (moved, locked)
+        .collect()
 }
 
 fn report(ed: &Editor, page: usize, key: &str, done: &[NodeId], locked: &[NodeId]) -> ToolResult {

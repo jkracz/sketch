@@ -481,8 +481,7 @@ pub fn gradient(s: &str, w: f64, h: f64) -> Option<Paint> {
 }
 
 /// The `[circle | ellipse] [size] [at position]` argument of `radial-gradient`, as a center
-/// and x/y radii in fractions of a `w`×`h` box. Without a size the radii are 50% 50%, which
-/// is how Sketch has always read a bare radial gradient.
+/// and x/y radii in fractions of a `w`×`h` box. Without a size the radii are 50% 50%.
 fn radial_shape(arg: &str, w: f64, h: f64) -> Option<(V2, V2)> {
     let lower = arg.to_ascii_lowercase();
     let parts = split_ws(&lower);
@@ -797,6 +796,7 @@ pub struct Context {
     pub parent_layout: Option<AutoLayout>,
     /// The parent's size (for percentages and right/bottom).
     pub parent_size: Option<(f64, f64)>,
+    pub parent_is_frame: bool,
 }
 
 /// What `apply` did besides changing the node.
@@ -974,7 +974,11 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             k.strip_prefix(TOKEN_MARKER)
                 .is_some_and(|k| matches!(k, "borderWidth" | "strokeWidth"))
         });
-    for (k, v) in styles {
+    // Sizes next: a radial gradient's px and keyword sizes are measured against the box.
+    let is_size = |k: &str| matches!(k, "width" | "height");
+    let sized_first = (styles.iter().filter(|(k, _)| is_size(k)))
+        .chain(styles.iter().filter(|(k, _)| !is_size(k)));
+    for (k, v) in sized_first {
         let v = v.trim();
         if k == STYLE_MARKER {
             if matches!(n.kind, NodeKind::Text { .. }) {
