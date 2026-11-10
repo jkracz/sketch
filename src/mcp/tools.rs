@@ -719,9 +719,10 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "set_text_styles",
             "Updates or deletes text styles by class or name, applied in order. Set `newName` \
-             to rename, any field to change it, `delete: true` to delete. Changing a style \
-             updates every layer that uses it, on all pages, except fields a layer overrides. \
-             Deleting keeps those layers' current values.",
+             to rename, any field to change it, `delete: true` to delete. Setting a field drops \
+             the per-mode values get_tokens lists under `modes`; a var() value still follows \
+             its token in each mode. Changing a style updates every layer that uses it, on all pages, except \
+             fields a layer overrides. Deleting keeps those layers' current values.",
             json!({"styles": {"type": "array", "minItems": 1, "description": "Changes to apply.", "items": {
                 "type": "object",
                 "properties": style_props(&[

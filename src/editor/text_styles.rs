@@ -199,6 +199,16 @@ mod tests {
         assert_eq!(size(&e, t), Some(48.0));
         let r = e.doc.get(t).unwrap().text_style_ref.clone().unwrap();
         assert!(r.overrides.is_empty(), "{:?}", r.overrides);
+
+        let token = e.tokens.by_css_name("--size").unwrap().id.clone();
+        e.edit_tokens("delete", None, |s| s.delete(&[token]));
+        assert_eq!(size(&e, t), Some(48.0));
+        let r = e.doc.get(t).unwrap().text_style_ref.clone().unwrap();
+        assert!(r.overrides.is_empty(), "{:?}", r.overrides);
+        let other = text(&mut e);
+        e.edit("move", |tx| tx.reparent(other, Some(frame), None));
+        e.apply_text_style(&[other], &style);
+        assert_eq!(size(&e, other), Some(48.0));
     }
 
     fn setup() -> (Editor, NodeId, String, String) {

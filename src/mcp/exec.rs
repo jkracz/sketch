@@ -1201,6 +1201,18 @@ fn style_json(tokens: &TokenSet, s: &TextStyleDef) -> Value {
         "class": tokens.style_class(s),
         "css": tokens.style_short(s),
     });
+    let modes = tokens.style_mode_values(s);
+    if !modes.is_empty() {
+        let by_mode: serde_json::Map<String, Value> = (modes.into_iter())
+            .map(|(m, fields)| {
+                let fields: serde_json::Map<String, Value> = (fields.into_iter())
+                    .map(|(f, v)| (f.css_key().to_string(), json!(v)))
+                    .collect();
+                (m, Value::Object(fields))
+            })
+            .collect();
+        v["modes"] = Value::Object(by_mode);
+    }
     if let Some(d) = &s.description {
         v["description"] = json!(d);
     }
@@ -1566,11 +1578,12 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
                 system: None,
                 ..s.clone()
             };
-            for (_, v) in s.values_mut() {
+            for v in s.values_mut() {
                 if let crate::model::TokenValue::Alias(a) = v {
                     *a = strip(a);
                 }
             }
+            s.rekey_modes(strip);
             s
         })
         .collect();
@@ -1762,6 +1775,9 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
                 set.style_class(s),
                 set.style_short(s)
             ));
+            for note in set.style_mode_notes(s) {
+                out.push_str(&format!(" /* {note} */"));
+            }
             if let Some(d) = &s.description {
                 out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
             }

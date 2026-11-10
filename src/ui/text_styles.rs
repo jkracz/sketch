@@ -25,6 +25,8 @@ struct Draft {
     id: String,
     name: String,
     values: [String; 5],
+    /// Retyping the default value must clear per-mode values too.
+    typed: [bool; 5],
     description: String,
     error: Option<String>,
 }
@@ -35,6 +37,7 @@ impl Draft {
             id: s.id.clone(),
             name: s.name.clone(),
             values: TEXT_FIELDS.map(|f| ed.tokens.style_value_css(s, f)),
+            typed: [false; 5],
             description: s.description.clone().unwrap_or_default(),
             error: None,
         }
@@ -233,6 +236,9 @@ fn small(ui: &Ui, s: impl Into<String>) -> RichText {
 fn locked_fields(ui: &mut Ui, ed: &mut Editor, s: &TextStyleDef) {
     ui.add_space(3.0);
     ui.label(small(ui, ed.tokens.style_short(s)));
+    for note in ed.tokens.style_mode_notes(s) {
+        ui.label(small(ui, note));
+    }
     if let Some(d) = &s.description {
         ui.label(small(ui, d.clone()));
     }
@@ -282,6 +288,7 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
     }
 
     let mut responses = Vec::new();
+    let by_mode = ed.tokens.style_mode_values(s);
     for (i, f) in TEXT_FIELDS.into_iter().enumerate() {
         let r = ui
             .horizontal(|ui| {
@@ -297,7 +304,15 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
                 )
             })
             .inner;
-        if committed(ui, &r) && d.values[i] != ed.tokens.style_value_css(s, f) {
+        d.typed[i] |= r.changed();
+        if r.lost_focus() && !committed(ui, &r) {
+            d.typed[i] = false;
+        }
+        let moded = !s.mode_values(f).is_empty();
+        if committed(ui, &r)
+            && (d.values[i] != ed.tokens.style_value_css(s, f) || (moded && d.typed[i]))
+        {
+            d.typed[i] = false;
             let mut input = StyleInput::default();
             input.set(f, d.values[i].clone());
             let res = ed.edit_tokens("Edit text style", None, |t| {
@@ -306,6 +321,19 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
             d.error = res.err();
         }
         responses.push(r);
+        let others: Vec<String> = (by_mode.iter())
+            .filter_map(|(m, fields)| {
+                let (_, v) = fields.iter().find(|(x, _)| *x == f)?;
+                Some(format!("{m}: {v}"))
+            })
+            .collect();
+        if !others.is_empty() {
+            ui.horizontal(|ui| {
+                label(ui, "");
+                ui.label(small(ui, others.join(", ")))
+                    .on_hover_text("Typing a value sets it for every mode.");
+            });
+        }
     }
 
     ui.horizontal(|ui| {
@@ -440,6 +468,7 @@ pub fn inspector_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node)
 mod tests {
     use super::super::tokens::tests::{Harness, key, typed};
     use super::*;
+    use crate::model::TokenKind;
 
     #[test]
     fn a_field_edit_reaches_the_style() {
@@ -465,5 +494,87 @@ mod tests {
         h.step(vec![], &mut f);
         let r = h.ed.tokens.resolve_style(&id).unwrap();
         assert_eq!(r.size, 28.0);
+    }
+
+    #[test]
+    fn retyping_the_default_value_sets_every_mode() {
+        let mut h = Harness::new();
+        let id = h.ed.edit_tokens("add", None, |t| {
+            let dark = vec![("dark".to_string(), "48px".to_string())];
+            let size = t
+                .create_in_modes(TokenKind::FontSize, "size", "12px", &dark, None)
+                .unwrap();
+            let mut i = StyleInput::default();
+            i.set(StyleField::Size, "var(--size)".into());
+            let id = t.create_style("Body", &i, None).unwrap();
+            t.delete(&[size]);
+            id
+        });
+        h.st.tokens.styles.open(&h.ed, &id);
+        let mut f = |ui: &mut Ui, ed: &mut Editor, st: &mut UiState| {
+            let s = ed.tokens.style(&id).cloned().unwrap();
+            fields(ui, ed, st, &s);
+        };
+        h.step(vec![], &mut f);
+        for _ in 0..3 {
+            h.step(vec![key(egui::Key::Tab)], &mut f);
+            h.step(vec![], &mut f);
+        }
+        h.step(vec![key(egui::Key::Tab)], &mut f);
+        h.step(vec![], &mut f);
+        assert!(!h.ed.tokens.style(&id).unwrap().modes.is_empty());
+        let back = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        h.step(vec![back], &mut f);
+        h.step(vec![], &mut f);
+        for _ in 0..4 {
+            h.step(vec![key(egui::Key::Backspace)], &mut f);
+        }
+        h.step(vec![typed("12px")], &mut f);
+        h.step(vec![key(egui::Key::Enter)], &mut f);
+        h.step(vec![], &mut f);
+        h.step(vec![], &mut f);
+        assert!(h.ed.tokens.style(&id).unwrap().modes.is_empty());
+        let dark = h.ed.tokens.resolve_style_in(&id, Some("Dark")).unwrap();
+        assert_eq!(dark.size, 12.0);
+    }
+
+    #[test]
+    fn escape_keeps_other_modes_values() {
+        let mut h = Harness::new();
+        let id = h.ed.edit_tokens("add", None, |t| {
+            let dark = vec![("dark".to_string(), "48px".to_string())];
+            let size = t
+                .create_in_modes(TokenKind::FontSize, "size", "12px", &dark, None)
+                .unwrap();
+            let mut i = StyleInput::default();
+            i.set(StyleField::Size, "var(--size)".into());
+            let id = t.create_style("Body", &i, None).unwrap();
+            t.delete(&[size]);
+            id
+        });
+        h.st.tokens.styles.open(&h.ed, &id);
+        let mut f = |ui: &mut Ui, ed: &mut Editor, st: &mut UiState| {
+            let s = ed.tokens.style(&id).cloned().unwrap();
+            fields(ui, ed, st, &s);
+        };
+        h.step(vec![], &mut f);
+        for _ in 0..3 {
+            h.step(vec![key(egui::Key::Tab)], &mut f);
+            h.step(vec![], &mut f);
+        }
+        h.step(vec![typed("9")], &mut f);
+        h.step(vec![key(egui::Key::Escape)], &mut f);
+        for _ in 0..3 {
+            h.step(vec![], &mut f);
+        }
+        assert!(!h.ed.tokens.style(&id).unwrap().modes.is_empty());
+        let dark = h.ed.tokens.resolve_style_in(&id, Some("Dark")).unwrap();
+        assert_eq!(dark.size, 48.0);
     }
 }
