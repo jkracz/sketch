@@ -801,3 +801,63 @@ fn m2_pages_panel_screenshot() {
         )) > 500
     );
 }
+
+#[test]
+fn instances_of_mains_on_other_pages_keep_their_token_mode_on_reopen() {
+    use sketch_rs::model::{TokenKind, TokenProp};
+    let store = temp_store("xpage");
+    let mut sess = Session::new(store.clone());
+    let mut ed = Editor::default();
+    sess.create(&mut ed, "Cross page").unwrap();
+    let dir = sess.project.as_ref().unwrap().dir.clone();
+    let (dark, fg) = ed.edit_tokens("add", None, |t| {
+        let d = t.add_mode();
+        let dark = [(d.clone(), "#000000".to_string())];
+        let fg = t.create_in_modes(TokenKind::Color, "fg", "#ffffff", &dark, None);
+        (d, fg.unwrap())
+    });
+    let f = ed.add_node(
+        Node::new(
+            NodeId(0),
+            NodeKind::Frame { clip: true },
+            Rect::new(0.0, 0.0, 80.0, 40.0),
+        ),
+        None,
+    );
+    let r = ed.add_node(
+        Node::new(NodeId(0), NodeKind::Rect, Rect::new(5.0, 5.0, 10.0, 10.0)),
+        Some(f),
+    );
+    ed.bind_token(&[r], TokenProp::Fill, &fg);
+    ed.selection = vec![f];
+    ed.create_component();
+    let cmd = sketch_rs::editor::Modifiers::cmd();
+    key(&mut ed, sketch_rs::editor::Key::Char('c'), cmd);
+    ed.add_page();
+    key(&mut ed, sketch_rs::editor::Key::Char('v'), cmd);
+    let inst = ed.selection[0];
+    ed.edit("mode", |tx| {
+        let n = tx.node_mut(inst).unwrap();
+        n.mode = Some(dark.clone());
+        n.instance.as_mut().unwrap().overrides.push("mode".into());
+    });
+    let leaf = *ed.doc.subtree(inst).last().unwrap();
+    let black = Some(Color::rgb(0, 0, 0));
+    assert_eq!(ed.doc.get(leaf).unwrap().style.fill(), black);
+    sess.save(&mut ed).unwrap();
+    assert!(
+        ed.dirty_pages().is_empty(),
+        "a sync that ends where it began saves nothing"
+    );
+    ed.switch_page(0);
+    ed.switch_page(1);
+    assert!(ed.dirty_pages().is_empty());
+
+    let mut ed2 = Editor::default();
+    Session::new(store.clone()).open(&mut ed2, &dir).unwrap();
+    assert_eq!(ed2.active_page, 1, "opens on the instance's page");
+    let n = ed2.doc.get(leaf).unwrap();
+    assert_eq!(n.style.fill(), black);
+    assert_eq!(n.tokens.get(&TokenProp::Fill), Some(&fg));
+    std::fs::remove_dir_all(&store.root).ok();
+}

@@ -6,7 +6,7 @@ use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::layout;
 use crate::model::{
-    AutoLayout, Direction, InstanceLink, Node, NodeId, NodeKind, Sizing, TokenProp,
+    AutoLayout, Direction, Document, InstanceLink, Node, NodeId, NodeKind, Sizing, TokenProp,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -131,41 +131,62 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct Source<'a> {
+    /// The main's page document, or `None` for the document being edited.
+    pub doc: Option<&'a Document>,
+    /// Copied into new instance links; `None` keeps links local.
+    pub page: Option<&'a str>,
+}
+
+impl Source<'_> {
+    pub const LOCAL: Source<'static> = Source {
+        doc: None,
+        page: None,
+    };
+
+    fn get(&self, tx: &Tx, id: NodeId) -> Option<Node> {
+        self.doc.unwrap_or(tx.doc()).get(id).cloned()
+    }
+}
+
 /// Copy a subtree as a new instance subtree under `parent` (ids are fresh).
 fn instantiate(
     tx: &mut Tx,
+    src: Source,
     main: NodeId,
     parent: Option<NodeId>,
     index: Option<usize>,
     root_rect: Option<Rect>,
 ) -> NodeId {
-    let src = tx.doc().get(main).unwrap().clone();
+    let m = src.get(tx, main).unwrap();
     let id = tx.alloc_id();
-    let mut n = src.clone();
+    let mut n = m.clone();
     n.id = id;
     n.children = Vec::new();
     n.component = false;
     n.instance = Some(InstanceLink {
         main,
+        page: src.page.map(String::from),
         overrides: Vec::new(),
     });
     if let Some(r) = root_rect {
         n.rect = r;
     }
     tx.insert(n, parent, index);
-    for c in src.children {
-        instantiate(tx, c, Some(id), None, None);
+    for c in m.children {
+        instantiate(tx, src, c, Some(id), None, None);
     }
     id
 }
 
 /// Bring one instance subtree in line with its main counterpart.
-fn sync_node(tx: &mut Tx, inst: NodeId, is_root: bool) {
+pub(super) fn sync_node(tx: &mut Tx, src: Source, inst: NodeId, is_root: bool) {
     let Some(n) = tx.doc().get(inst) else { return };
     let Some(link) = n.instance.clone() else {
         return;
     };
-    let Some(main) = tx.doc().get(link.main).cloned() else {
+    let Some(main) = src.get(tx, link.main) else {
         return;
     };
     let mut updated = n.clone();
@@ -202,10 +223,10 @@ fn sync_node(tx: &mut Tx, inst: NodeId, is_root: bool) {
                 if tx.doc().children(Some(inst)).iter().position(|x| *x == k) != Some(i) {
                     tx.move_to_index(k, i);
                 }
-                sync_node(tx, k, false);
+                sync_node(tx, src, k, false);
             }
             None => {
-                instantiate(tx, *mc, Some(inst), Some(i), None);
+                instantiate(tx, src, *mc, Some(inst), Some(i), None);
             }
         }
     }
@@ -250,7 +271,8 @@ impl Editor {
             .filter(|id| self.doc.get(*id).is_some_and(|n| n.is_group()))
             .collect();
         groups.sort_by_key(|g| std::cmp::Reverse(depth(self, *g)));
-        // 2. Components touched (self or ancestor is a main component).
+        // 2. Components touched (self or ancestor is a main component). Other pages sync
+        // later (see `components.rs`).
         let comps: Vec<NodeId> = cands
             .iter()
             .copied()
@@ -266,11 +288,13 @@ impl Editor {
                     .doc()
                     .nodes
                     .values()
-                    .filter(|n| n.instance.as_ref().is_some_and(|l| l.main == *c))
+                    .filter(|n| {
+                        (n.instance.as_ref()).is_some_and(|l| l.main == *c && l.page.is_none())
+                    })
                     .map(|n| n.id)
                     .collect();
                 for i in instances {
-                    sync_node(&mut tx, i, true);
+                    sync_node(&mut tx, Source::LOCAL, i, true);
                     cands.insert(i);
                 }
             }
@@ -475,6 +499,7 @@ impl Editor {
         let id = self.edit("Create instance", |tx| {
             instantiate(
                 tx,
+                Source::LOCAL,
                 component,
                 None,
                 None,
@@ -528,7 +553,9 @@ impl Editor {
                     .find(|a| self.is_instance_root(*a))
             })
             .collect();
-        self.edit("Reset overrides", |tx| {
+        self.begin("Reset overrides");
+        {
+            let mut tx = self.tx();
             for r in &ids {
                 for id in tx.doc().subtree(*r) {
                     if let Some(l) = &mut tx.node_mut(id).unwrap().instance {
@@ -536,37 +563,35 @@ impl Editor {
                     }
                 }
             }
-            for r in roots {
-                sync_node(tx, r, true);
-            }
-        });
+        }
+        self.sync_instances(&roots);
+        self.commit();
     }
 
     pub fn is_instance_root(&self, id: NodeId) -> bool {
-        self.doc.get(id).is_some_and(|n| {
-            n.instance
-                .as_ref()
-                .is_some_and(|l| self.doc.get(l.main).is_some_and(|m| m.component))
-        })
+        self.instance_main(id).is_some()
     }
 
-    /// The main component an instance root points to.
-    pub fn instance_main_root(&self, id: NodeId) -> Option<NodeId> {
+    pub fn instance_main(&self, id: NodeId) -> Option<(usize, NodeId)> {
         let l = self.doc.get(id)?.instance.as_ref()?;
-        self.doc.get(l.main).filter(|m| m.component).map(|m| m.id)
+        let page = self.main_page(l)?;
+        let main = self.page_doc(page).get(l.main)?;
+        main.component.then_some((page, main.id))
     }
 
-    /// Select the main component of the selected instance.
     pub fn go_to_main(&mut self) {
-        if let Some(m) = self
+        if let Some((page, m)) = self
             .selection
             .first()
-            .and_then(|id| self.instance_main_root(*id))
+            .and_then(|id| self.instance_main(*id))
         {
+            self.switch_page(page);
             self.selection = vec![m];
             if let Some(r) = self.doc.world_rect(m) {
                 self.camera
                     .fit(&r, self.viewport, 80.0, self.camera.zoom.max(1.0));
+                // A page shown for the first time would otherwise fit to all its content.
+                self.pending_fit = false;
                 self.revision += 1;
             }
         }

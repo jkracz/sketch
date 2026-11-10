@@ -136,7 +136,7 @@ impl Editor {
                     .iter()
                     .any(|o| o == super::structure::override_key(field))
             })
-            .map(|l| self.tokens.mode_at(&self.doc, l.main));
+            .and_then(|l| Some(self.tokens.mode_at(self.main_doc(l)?, l.main)));
         let mut before = None;
         let mut cur = Some(id);
         while let Some(c) = cur {

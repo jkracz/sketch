@@ -340,6 +340,8 @@ pub fn publish(
     project_name: &str,
     req: &PublishRequest,
 ) -> Result<PublishReport, String> {
+    // Components publish with their instances of mains on other pages up to date.
+    ed.sync_all_instances();
     let prev = ed.published.clone();
     let reg = Registry::in_store(store);
     let old = prev.as_ref().and_then(|l| reg.get(&l.id));

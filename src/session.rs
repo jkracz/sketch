@@ -64,6 +64,8 @@ impl Session {
         if !updates.is_empty() {
             ed.status = updates.join(" ");
         }
+        // Load tokens before syncing layers that bind to them.
+        ed.sync_page_instances(ed.active_page);
         self.project = Some(p);
         self.dirty_since = None;
         self.thumb_stale = false;
@@ -128,6 +130,7 @@ impl Session {
             return Ok(0);
         };
         ed.commit_pending();
+        ed.sync_all_instances();
         let dirty = ed.dirty_pages();
         for &i in &dirty {
             let data = ed.page_data(i);

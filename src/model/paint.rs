@@ -673,6 +673,9 @@ impl LayoutChild {
 pub struct InstanceLink {
     /// The corresponding node in the main component.
     pub main: NodeId,
+    /// The main's project page. `None` means this node's page, including in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
     /// Properties overridden on this node (not synced from the main component).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,

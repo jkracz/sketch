@@ -411,6 +411,7 @@ impl App {
     /// Export through a save (or folder) dialog.
     fn export(&mut self, spec: crate::io::export::Spec) {
         use crate::io::export;
+        self.ed.sync_all_instances();
         let names: Vec<String> = self.ed.pages.iter().map(|p| p.name.clone()).collect();
         let pages: Vec<(&str, &crate::model::Document)> = names
             .iter()
@@ -511,7 +512,7 @@ impl App {
                     })]
                 } else {
                     self.ed
-                        .insert_subtrees(&label, &nodes, &roots, &world, off, false)
+                        .insert_subtrees(&label, &nodes, &roots, &world, off, None)
                 };
                 self.ed.selection = ids;
                 Ok(format!("Imported {}", p.display()))
@@ -540,7 +541,7 @@ impl App {
                             &roots,
                             &world,
                             V2::ZERO,
-                            false,
+                            None,
                         );
                     }
                     format!("Imported {n} page(s)")

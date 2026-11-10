@@ -284,6 +284,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
             }
             let ed = host.editor();
             ed.commit_pending();
+            // Agents read and export instances as their mains on other pages are now.
+            ed.sync_all_instances();
             // The first content on the page the user is looking at is brought into view.
             let was_empty = ed.doc.root.is_empty();
             let r = match name {
@@ -327,6 +329,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 _ => Err(format!("unknown tool `{name}`")),
             };
             let ed = host.editor();
+            // An edit to a main on a background page shows on the page the user is viewing.
+            ed.sync_page_instances(ed.active_page);
             if r.is_ok() && was_empty && !ed.doc.root.is_empty() {
                 ed.zoom_to_fit();
             }

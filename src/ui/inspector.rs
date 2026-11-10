@@ -572,6 +572,15 @@ fn header(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         first.kind.type_name()
     };
     ui.label(title_text(format!("{kind} · {}", first.name)));
+    if let Some((page, _)) = ed.instance_main(first.id)
+        && page != ed.active_page
+    {
+        ui.label(
+            RichText::new(format!("Main component on {}", ed.pages[page].name))
+                .size(theme::SECONDARY)
+                .color(theme::pal(ui).secondary),
+        );
+    }
     ui.horizontal_wrapped(|ui| {
         if first.component {
             if ui.small_button("Create instance").clicked() {
