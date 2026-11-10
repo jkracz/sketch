@@ -744,4 +744,27 @@ fn shapes_and_instances_keep_their_frames_mode() {
     let n = h.ed.doc.get(inst).unwrap();
     assert_eq!(n.style.fill(), Some(Color::WHITE));
     assert!(n.tokens.is_empty());
+
+    h.ed.selection = vec![main];
+    h.ed.instance_of_selection();
+    let other = h.ed.selection[0];
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(other)], "styles": {"backgroundColor": "nope", "border": "1px solid #ffffff"}}]}),
+    );
+    let overrides = &h
+        .ed
+        .doc
+        .get(other)
+        .unwrap()
+        .instance
+        .as_ref()
+        .unwrap()
+        .overrides;
+    assert!(overrides.contains(&"stroke".to_string()), "{overrides:?}");
+    assert!(
+        !overrides.contains(&"fills".to_string()),
+        "an ignored style edits nothing: {overrides:?}"
+    );
 }

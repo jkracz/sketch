@@ -3767,10 +3767,15 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
-                    // Like the inspector, an edited bindable field on an instance layer stops
+                    let mut applied = css::apply(&mut n, &styles, &parent.ctx());
+                    // Like the inspector, a bindable field edited on an instance layer stops
                     // following the main component.
-                    let edited: Vec<&str> = (raw.iter())
-                        .filter_map(|(k, _)| TokenProp::from_css_key(k, &n))
+                    let edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
+                        .filter(|k| !applied.ignored.iter().any(|i| i == k))
+                        .filter_map(|k| match k {
+                            "border" => Some(TokenProp::Stroke),
+                            k => TokenProp::from_css_key(k, &n),
+                        })
                         .map(|p| crate::editor::structure::override_key(p.field()))
                         .collect();
                     if let Some(l) = &mut n.instance {
@@ -3780,7 +3785,6 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                             }
                         }
                     }
-                    let mut applied = css::apply(&mut n, &styles, &parent.ctx());
                     if mode.is_some() && !frame {
                         applied.ignored.push("mode".into());
                     }

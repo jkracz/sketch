@@ -1044,6 +1044,11 @@ impl TokenSet {
             let Some(i) = self.tokens.iter().position(|t| t.id == *id) else {
                 continue;
             };
+            let names: Vec<String> = (self.modes_of(&self.tokens[i]).iter())
+                .filter(|m| self.tokens[i].modes.contains_key(&m.id))
+                .map(|m| m.name.clone())
+                .collect();
+            self.promote_modes(&names);
             let mut t = self.local_copy(&self.tokens[i]);
             t.id = crate::project::new_id();
             t.name = self.unused_name(t.kind, &t.name);
@@ -1055,6 +1060,32 @@ impl TokenSet {
             self.tokens.insert(at, t);
         }
         out
+    }
+
+    /// Make design system modes named in `names` this file's own, so local tokens can hold
+    /// values for them. They keep their ids, so frames that picked them keep them.
+    fn promote_modes(&mut self, names: &[String]) {
+        let missing: Vec<Mode> = (self.systems.iter().flat_map(|s| &s.modes))
+            .filter(|m| names.iter().any(|n| same_mode(n, &m.name)))
+            .filter(|m| !self.modes.iter().any(|x| same_mode(&x.name, &m.name)))
+            .cloned()
+            .collect();
+        for m in missing {
+            if !self.modes.iter().any(|x| same_mode(&x.name, &m.name)) {
+                self.modes.push(m);
+            }
+        }
+    }
+
+    /// System mode ids that share a name with one of this file's modes, with that mode's id.
+    /// Detaching the system drops them, so frames that picked them should move.
+    pub fn shadowed_modes(&self, system: &str) -> Vec<(String, String)> {
+        (self.system(system).into_iter().flat_map(|l| &l.modes))
+            .filter_map(|m| {
+                let local = self.modes.iter().find(|x| same_mode(&x.name, &m.name))?;
+                Some((m.id.clone(), local.id.clone()))
+            })
+            .collect()
     }
 
     /// Keep a system token's CSS name, and give each local mode the system's value for the
@@ -1130,6 +1161,12 @@ impl TokenSet {
     /// suffix. An alias to a token outside the clip finds a token with the same kind and name
     /// here, else becomes the value it had when copied.
     pub fn paste(&mut self, clip: &TokenClip) -> Vec<String> {
+        // Modes a frame here can pick, from a design system, that pasted values need.
+        let needed: Vec<String> = (clip.tokens.iter())
+            .flat_map(|t| t.modes.iter().filter(|(_, v)| **v != t.value))
+            .map(|(slug, _)| slug.clone())
+            .collect();
+        self.promote_modes(&needed);
         let ids: HashMap<&str, String> = clip
             .tokens
             .iter()
@@ -1525,11 +1562,10 @@ impl TokenSet {
     /// and `var()` references keep working. Its modes this file lacks become the file's, under
     /// the same ids so frames that picked them keep them.
     pub fn detach_system(&mut self, id: &str) {
-        let missing: Vec<Mode> = (self.system(id).into_iter().flat_map(|l| &l.modes))
-            .filter(|m| !self.modes.iter().any(|x| same_mode(&x.name, &m.name)))
-            .cloned()
+        let names: Vec<String> = (self.system(id).into_iter().flat_map(|l| &l.modes))
+            .map(|m| m.name.clone())
             .collect();
-        self.modes.extend(missing);
+        self.promote_modes(&names);
         let local: Vec<Token> = self
             .tokens
             .iter()
@@ -2352,6 +2388,18 @@ mod tests {
         let new = other.paste(&s.copy(&[bg]));
         let red = TokenValue::Color(Color::rgb(255, 0, 0));
         assert_eq!(other.resolve_in(&new[0], Some("Contrast")), Some(red));
+    }
+
+    #[test]
+    fn copies_in_the_same_file_keep_a_system_only_mode() {
+        let mut s = using_modes(&["Light", "Dark", "Contrast"]);
+        let bg = s.by_css_name("--s-bg").unwrap().id.clone();
+        let red = Some(TokenValue::Color(Color::rgb(255, 0, 0)));
+        let pasted = s.paste(&s.copy(std::slice::from_ref(&bg)));
+        let duplicated = s.duplicate(std::slice::from_ref(&bg));
+        assert_eq!(s.resolve_in(&pasted[0], Some("Contrast")), red);
+        assert_eq!(s.resolve_in(&duplicated[0], Some("Contrast")), red);
+        assert_eq!(s.modes().len(), 3, "Contrast became the file's own");
     }
 
     #[test]

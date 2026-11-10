@@ -90,7 +90,9 @@ impl Editor {
     pub fn detach_system(&mut self, id: &str) -> Result<(), String> {
         let name = self.system_name(id)?;
         let label = format!("Detach {name} design system");
+        let moved = self.tokens.shadowed_modes(id);
         self.edit_tokens(&label, None, |t| t.detach_system(id));
+        self.retarget_frame_modes(&moved);
         Ok(())
     }
 
