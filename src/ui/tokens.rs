@@ -1082,6 +1082,33 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_dark_field_sets_and_clears_the_dark_value() {
+        let (mut h, id) = spacing_fields();
+        let mut f = fields_frame(&id);
+        focus_value(&mut h, &mut f);
+        h.step(vec![key(egui::Key::Tab)], &mut f);
+        h.step(vec![], &mut f);
+        h.step(vec![typed("12px")], &mut f);
+        h.step(vec![key(egui::Key::Enter)], &mut f);
+        h.step(vec![], &mut f);
+        let dark = |h: &Harness| h.ed.tokens.resolve_in(&id, Some("Dark"));
+        assert_eq!(dark(&h), Some(TokenValue::Number(12.0)));
+        assert_eq!(value(&h, &id), "8px", "Light keeps its value");
+        h.ed.edit_tokens("clear", None, |t| t.update_in_mode(&id, "dark", None))
+            .unwrap();
+        h.step(vec![], &mut f);
+        assert_eq!(
+            dark(&h),
+            Some(TokenValue::Number(8.0)),
+            "Dark follows Light"
+        );
+        assert_eq!(
+            h.st.tokens.open.as_ref().unwrap().modes,
+            vec![String::new()]
+        );
+    }
+
+    #[test]
     fn search_matches_word_starts_and_values() {
         assert!(matches_search("", "anything", "#fff"));
         assert!(matches_search("prim", "color-primary", "#000000"));
