@@ -928,7 +928,7 @@ fn deleting_a_token_keeps_a_text_styles_other_modes() {
     );
     let css = call(&mut h, "get_tokens", json!({"format": "css"}));
     assert!(
-        (css.as_str().unwrap()).contains("[data-theme=\"dark\"] .body {\n  font-size: 48px;\n}"),
+        (css.as_str().unwrap()).contains("[data-theme=\"dark\"] {\n  --body--font-size: 48px;\n}"),
         "{css}"
     );
 

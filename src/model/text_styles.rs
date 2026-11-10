@@ -514,46 +514,49 @@ impl TokenSet {
         out
     }
 
-    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks. A style
-    /// with its own values in other modes adds `[data-theme="dark"] .heading-l { ... }`, nested
-    /// as `[data-theme="dark"] & { ... }` in a utility.
+    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks. A field
+    /// with its own values in other modes reads `var(--heading-l--font-size)`, set in a
+    /// `[data-theme]` block per mode, so the nearest frame's mode wins as it does for tokens.
+    /// Token names never hold `--`, so the two can't clash.
     pub fn style_sheet(&self, styles: &[&TextStyleDef], tailwind: bool) -> String {
         let mut out = String::new();
-        let decls = |fields: &[(StyleField, String)], indent: &str| {
-            (fields.iter())
-                .map(|(f, v)| format!("{indent}{}: {v};\n", css_kebab(f.css_key())))
-                .collect::<String>()
-        };
         for s in styles {
             let class = self.style_class(s);
-            let theme = |m: &str| format!("[data-theme=\"{}\"]", css_slug(m));
-            let modes = self.style_mode_values(s);
-            // Tailwind utility names must start with a letter.
-            let utility = tailwind && class.starts_with(|c: char| c.is_ascii_lowercase());
-            let selector = format!(".{}", selector_escape(&class));
-            match utility {
-                true => out.push_str(&format!("@utility {class} {{\n")),
-                false => out.push_str(&format!("{selector} {{\n")),
-            }
-            let all: Vec<(StyleField, String)> = (StyleField::ALL.into_iter())
-                .map(|f| (f, self.style_value_css(s, f)))
+            let var = |f: StyleField| format!("--{class}--{}", css_kebab(f.css_key()));
+            let varied: Vec<(StyleField, TokenKind)> = (StyleField::ALL.into_iter())
+                .filter(|f| s.value(*f).is_some() && !s.mode_values(*f).is_empty())
+                .filter_map(|f| Some((f, f.kind()?)))
                 .collect();
-            out.push_str(&decls(&all, "  "));
-            if utility {
-                for (m, fields) in &modes {
-                    out.push_str(&format!("  {} & {{\n", theme(m)));
-                    out.push_str(&decls(fields, "    "));
-                    out.push_str("  }\n");
-                }
-            }
-            out.push_str("}\n");
-            if !utility {
-                for (m, fields) in &modes {
-                    out.push_str(&format!("{} {selector} {{\n", theme(m)));
-                    out.push_str(&decls(fields, "  "));
+            if !varied.is_empty() {
+                for (i, m) in self.choices().into_iter().enumerate() {
+                    let theme = format!("[data-theme=\"{}\"]", css_slug(&m.name));
+                    match i {
+                        0 => out.push_str(&format!(":root,\n{theme} {{\n")),
+                        _ => out.push_str(&format!("{theme} {{\n")),
+                    }
+                    for (f, kind) in &varied {
+                        if let Some(v) = self.style_value_in(s, *f, Some(&m.name)) {
+                            let v = self.value_css(*kind, v);
+                            out.push_str(&format!("  {}: {v};\n", var(*f)));
+                        }
+                    }
                     out.push_str("}\n");
                 }
             }
+            // Tailwind utility names must start with a letter.
+            if tailwind && class.starts_with(|c: char| c.is_ascii_lowercase()) {
+                out.push_str(&format!("@utility {class} {{\n"));
+            } else {
+                out.push_str(&format!(".{} {{\n", selector_escape(&class)));
+            }
+            for f in StyleField::ALL {
+                let v = match varied.iter().any(|(x, _)| *x == f) {
+                    true => format!("var({})", var(f)),
+                    false => self.style_value_css(s, f),
+                };
+                out.push_str(&format!("  {}: {v};\n", css_kebab(f.css_key())));
+            }
+            out.push_str("}\n");
         }
         out
     }
@@ -1115,15 +1118,18 @@ mod tests {
         s.delete(&[size]);
         let st = s.style(&id).unwrap();
         let css = s.style_sheet(&[st], false);
-        assert!(css.contains(".body {\n"), "{css}");
-        assert!(css.contains("  font-size: 12px;\n"), "{css}");
-        assert!(
-            css.contains("[data-theme=\"dark\"] .body {\n  font-size: 48px;\n}\n"),
-            "{css}"
-        );
+        for part in [
+            ":root,\n[data-theme=\"light\"] {\n  --body--font-size: 12px;\n}\n",
+            "[data-theme=\"dark\"] {\n  --body--font-size: 48px;\n}\n",
+            ".body {\n  font-family: Inter;\n  font-size: var(--body--font-size);\n",
+        ] {
+            assert!(css.contains(part), "{part} missing from {css}");
+        }
         let tw = s.style_sheet(&[st], true);
         assert!(
-            tw.contains("  [data-theme=\"dark\"] & {\n    font-size: 48px;\n  }\n}\n"),
+            tw.contains(
+                "@utility body {\n  font-family: Inter;\n  font-size: var(--body--font-size);"
+            ),
             "{tw}"
         );
         assert_eq!(s.style_mode_notes(st), vec!["Dark: font-size: 48px"]);
