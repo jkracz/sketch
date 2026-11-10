@@ -122,14 +122,15 @@ pub fn definitions() -> Vec<Value> {
              end where it is. startAnchor/endAnchor say where on the layer the end aims, as \
              [fx, fy] fractions of its box (default [0.5, 0.5], the center); the end stops at \
              the layer's outline. `points` replaces the route in world units ([[x,y],...], two \
-             or more; middle points bend a curved arrow, and bound ends are recomputed). route \
-             is straight, curved or elbow (elbow routes around the bound shapes by itself; \
-             straight keeps only the two ends). Heads: none, arrow, triangle, dot, bar, \
+             or more; a curved arrow bends through the middle points and a straight one \
+             makes corners at them; bound ends are recomputed). route is straight, curved or \
+             elbow (elbow routes around the bound shapes by itself; switching to straight \
+             without `points` keeps only the two ends). Heads: none, arrow, triangle, dot, bar, \
              diamond. get_node_info shows an arrow's `arrow` details.",
             json!({"updates": {"type": "array", "minItems": 1, "items": {
                 "type": "object",
                 "properties": {
-                    "nodeId": {"type": "string", "description": "An arrow or line made with create_shape or the arrow tool."},
+                    "nodeId": {"type": "string", "description": "An arrow, or a line bound to a layer, made with create_shape or the arrow tool."},
                     "startNodeId": {"type": ["string", "null"]},
                     "endNodeId": {"type": ["string", "null"]},
                     "startAnchor": point.clone(),
@@ -892,8 +893,9 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
         *end = new_end;
         if let Some(r) = e.route {
             *route = r;
-            // Like the inspector: a straight arrow keeps only its two ends.
-            if r == Route::Straight && pts.len() > 2 {
+            // Like the inspector: switching to straight keeps only the two ends. Points given
+            // in the same call draw a straight polyline, as Excalidraw's sharp arrows do.
+            if r == Route::Straight && e.points.is_none() && pts.len() > 2 {
                 pts = vec![pts[0], *pts.last().unwrap()];
             }
         }

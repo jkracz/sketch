@@ -367,6 +367,17 @@ fn arrows_rebind_reroute_and_change_heads() {
         json!({"updates": [{"nodeId": arrow, "route": "straight"}]}),
     );
     assert_eq!(h.ed.connector_points(num(&arrow)).unwrap().len(), 2);
+    // Points given to a straight arrow make a polyline with corners, as reported.
+    let r = call(
+        &mut h,
+        "update_arrows",
+        json!({"updates": [{"nodeId": arrow, "points": [[0, 0], [100, 0], [100, 100]]}]}),
+    );
+    assert_eq!(r["updated"][0]["arrow"]["route"], "straight");
+    assert_eq!(
+        r["updated"][0]["arrow"]["points"].as_array().unwrap().len(),
+        3
+    );
     // An anchor aims the end at part of the shape.
     call(
         &mut h,
