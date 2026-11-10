@@ -103,6 +103,21 @@ impl Editor {
         }
     }
 
+    /// Instances in `doc` of design system components this file has: the outermost layer
+    /// linked to each.
+    pub(super) fn linked_roots(&self, doc: &Document) -> Vec<NodeId> {
+        let comp = |id: Option<NodeId>| {
+            id.and_then(|id| doc.get(id)?.instance.as_ref()?.component.as_deref())
+        };
+        (doc.nodes.values())
+            .filter(|n| {
+                let c = comp(Some(n.id));
+                c.is_some_and(|c| self.tokens.component(c).is_some()) && comp(n.parent) != c
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
     /// Sync source pages first, without adding undo steps. Mark changed pages for saving.
     /// Defer during edits or [`Editor::with_page`] to avoid splitting an edit.
     pub fn sync_page_instances(&mut self, i: usize) {
@@ -132,17 +147,7 @@ impl Editor {
         let own = &self.pages[i].id;
         let doc = self.page_doc(i);
         let mut sources: Vec<usize> = Vec::new();
-        // Instances of design system components: the outermost layer linked to one.
-        let comp = |id: Option<NodeId>| {
-            id.and_then(|id| doc.get(id)?.instance.as_ref()?.component.as_deref())
-        };
-        let mut roots: Vec<NodeId> = (doc.nodes.values())
-            .filter(|n| {
-                let c = comp(Some(n.id));
-                c.is_some_and(|c| self.tokens.component(c).is_some()) && comp(n.parent) != c
-            })
-            .map(|n| n.id)
-            .collect();
+        let mut roots = self.linked_roots(doc);
         for n in doc.nodes.values() {
             let Some(page) = n.instance.as_ref().and_then(|l| l.page.as_ref()) else {
                 continue;

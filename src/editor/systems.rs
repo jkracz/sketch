@@ -90,11 +90,21 @@ impl Editor {
             return None;
         }
         let label = format!("Update {} to v{}", p.name, p.release);
-        let (gone, gone_components) = self.edit_tokens(&label, None, |t| {
-            let gone = t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles);
-            (gone, t.replace_components(&p.id, p.linked_components()))
-        });
-        // Every page now, so the update is saved whole and not when each page is next shown.
+        let (gone, gone_components) = self.edit_tokens_then(
+            &label,
+            None,
+            |t| {
+                let gone = t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles);
+                (gone, t.replace_components(&p.id, p.linked_components()))
+            },
+            // This page's instances in the same step, so undo brings back layers the update
+            // removed with their overrides.
+            |ed| {
+                let roots = ed.linked_roots(&ed.doc);
+                ed.sync_instances(&roots);
+            },
+        );
+        // Other pages now, so the update is saved whole and not when each page is next shown.
         self.sync_all_instances();
         let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
         let comp_ids: Vec<&str> = gone_components.iter().map(|c| c.id.as_str()).collect();

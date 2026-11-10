@@ -340,3 +340,27 @@ fn a_files_copy_of_a_component_keeps_its_images() {
         .join(format!("{asset}.png"));
     assert!(saved.exists(), "saved with the file before any instance");
 }
+
+#[test]
+fn undoing_an_update_brings_back_a_removed_layer_with_its_override() {
+    let store = temp_store();
+    let (s, mut src) = source(&store);
+    let (_, _, plain) = component(&mut src, "Button", 0.0);
+    let sys = publish_open(&s, &mut src, &PublishRequest::default()).system;
+    let (mut c, mut app) = consumer(&store, "App", &sys);
+    let inst = place(&mut app, "Button", 0.0);
+    let overridden = kids(&app, 0, inst)[1];
+    set_fill(&mut app, overridden, GREEN);
+    app.mark_overrides(&[overridden], "fill");
+    app.commit();
+    let dir = close(&mut c, &mut app);
+
+    src.edit("delete", |tx| tx.remove(plain));
+    publish_open(&s, &mut src, &PublishRequest::default());
+    let (_c, mut app) = reopen(&store, &dir);
+    assert!(app.doc.get(overridden).is_none());
+    app.undo();
+    let n = app.doc.get(overridden).unwrap();
+    assert_eq!(n.style.fill(), Some(GREEN));
+    assert_eq!(n.instance.as_ref().unwrap().overrides, ["fills"]);
+}

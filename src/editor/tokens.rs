@@ -14,6 +14,17 @@ impl Editor {
         key: Option<&str>,
         f: impl FnOnce(&mut TokenSet) -> R,
     ) -> R {
+        self.edit_tokens_then(label, key, f, |_| {})
+    }
+
+    /// [`Editor::edit_tokens`], running `then` in the same undo step after the edit.
+    pub(super) fn edit_tokens_then<R>(
+        &mut self,
+        label: &str,
+        key: Option<&str>,
+        f: impl FnOnce(&mut TokenSet) -> R,
+        then: impl FnOnce(&mut Editor),
+    ) -> R {
         self.begin_coalescing(label, key);
         let before = self.tokens.clone();
         let r = f(&mut self.tokens);
@@ -25,6 +36,7 @@ impl Editor {
                 rec.set_tokens(edits);
             }
         }
+        then(self);
         self.commit();
         self.sync_tokens();
         r
