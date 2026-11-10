@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
+mod components;
+
 /// What a tool call needs from its surroundings.
 pub trait Host {
     fn editor(&mut self) -> &mut Editor;
@@ -328,6 +330,9 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "set_tokens" => set_tokens(ed, &a),
                 "create_text_styles" => create_text_styles(ed, &a),
                 "set_text_styles" => set_text_styles(ed, &a),
+                "create_component" => components::create_component(ed, &a),
+                "detach_instances" => components::detach_instances(ed, &a),
+                "reset_overrides" => components::reset_overrides(ed, &a),
                 "finish_working_on_nodes" => {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
@@ -787,6 +792,7 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
         "otherTopLevelLayers": others,
         "fontFamilies": font_families(doc),
         "tokens": token_list(&ed.tokens),
+        "components": components::list(ed),
         "designSystems": ed.tokens.systems().iter().map(|s| json!({
             "name": s.name, "prefix": format!("--{}-", s.prefix),
         })).collect::<Vec<_>>(),
@@ -859,6 +865,7 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     if let Some(name) = instance_of(ed, Some(n)) {
         v["instanceOf"] = json!(name);
     }
+    components::describe(ed, page, id, &mut v);
     v["autoLayout"] = json!(n.layout.is_some());
     text(v)
 }
@@ -2241,7 +2248,12 @@ fn check_components(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     }
     let mut wanted = Vec::new();
     names(&html::parse(a.str("html").unwrap_or("")), &mut wanted);
-    let tokens = &host.editor().tokens;
+    let ed = host.editor();
+    for c in &wanted {
+        components::find_main(ed, c)?;
+    }
+    wanted.retain(|c| components::find_main(ed, c).is_ok_and(|m| m.is_none()));
+    let tokens = &ed.tokens;
     wanted.retain(|c| tokens.find_component(c).is_none());
     if wanted.is_empty() {
         return Ok(());
@@ -3188,6 +3200,8 @@ struct Builder<'t, 'a> {
     warnings: Vec<String>,
     /// In placement order.
     instances: Vec<NodeId>,
+    /// The file's own mains this call places.
+    local: &'t components::LocalMains,
 }
 
 impl Builder<'_, '_> {
@@ -3743,18 +3757,23 @@ impl Builder<'_, '_> {
         index: &mut Option<usize>,
     ) -> Option<NodeId> {
         let key = el.attr("component").unwrap_or("");
-        let found = self.tokens.find_component(key);
-        let Some((c, main)) = found.and_then(|c| Some((c, c.main()?))) else {
+        let (local, tokens) = (self.local, self.tokens);
+        let system = || {
+            let c = tokens.find_component(key)?;
+            let src = Source {
+                doc: Some(&c.doc),
+                page: None,
+                component: Some(&c.id),
+            };
+            Some((src, c.main()?))
+        };
+        let Some((src, main)) = local.get(key).or_else(system) else {
             self.warnings.push(format!(
-                "{INSTANCE_TAG}: no component `{key}` in the design systems this file uses. \
-                 get_design_system lists a system's components."
+                "{INSTANCE_TAG}: no component `{key}` in this file or the design systems it \
+                 uses. get_basic_info lists the file's components; get_design_system lists a \
+                 system's."
             ));
             return None;
-        };
-        let src = Source {
-            doc: Some(&c.doc),
-            page: None,
-            component: Some(&c.id),
         };
         let id = instantiate(self.tx, src, main, parent.id, *index, None);
         if let Some(i) = index {
@@ -3932,6 +3951,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("insert-children needs a frame or group target; use mode \"replace\" or target its parent".into());
     }
     let tree = html::parse(src);
+    let local = components::LocalMains::resolve(ed, &tree, page, target)?;
     let page_id = ed.pages[page].id.clone();
     let tokens = ed.tokens.clone();
     let canvas = CanvasStyle::of(ed.canvas_dark).background;
@@ -3968,6 +3988,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
                 ignored: BTreeSet::new(),
                 warnings: Vec::new(),
                 instances: Vec::new(),
+                local: &local,
             };
             let flex = parent.layout.is_some();
             let made = b.nodes(&tree, &inherited, &parent, &mut index, flex);
@@ -4038,7 +4059,8 @@ fn instance_json(ed: &Editor, page: usize, id: NodeId) -> Value {
         })
         .collect();
     let mut v = json!({"id": node_key(ed, page, id)});
-    if let Some(name) = instance_of(ed, doc.get(id)) {
+    let n = doc.get(id).unwrap();
+    if let Some(name) = instance_of(ed, Some(n)).or_else(|| components::main_name(ed, page, n)) {
         v["component"] = json!(name);
     }
     if !texts.is_empty() {

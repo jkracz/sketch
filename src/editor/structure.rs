@@ -474,11 +474,18 @@ impl Editor {
 
     /// Make the selection a main component (Cmd+Alt+K). A single frame is converted in
     /// place; anything else is wrapped in a new component frame.
-    pub fn create_component(&mut self) {
+    pub fn create_component(&mut self) -> Option<NodeId> {
+        self.create_component_named(None)
+    }
+
+    /// [`Editor::create_component`] in one undo step, naming the component `name` when given.
+    /// `None` when nothing is selected or the selected layers don't share a parent.
+    pub fn create_component_named(&mut self, name: Option<&str>) -> Option<NodeId> {
         let ids = self.top_selection();
         if ids.is_empty() {
-            return;
+            return None;
         }
+        let name = name.map(str::trim).filter(|s| !s.is_empty());
         if let [id] = ids[..]
             && self
                 .doc
@@ -486,19 +493,21 @@ impl Editor {
                 .is_some_and(|n| n.is_frame() && n.instance.is_none())
         {
             self.edit("Create component", |tx| {
-                tx.node_mut(id).unwrap().component = true;
+                let n = tx.node_mut(id).unwrap();
+                n.component = true;
+                if let Some(name) = name {
+                    n.name = name.into();
+                }
             });
-            return;
+            return Some(id);
         }
-        self.wrap_in_frame();
-        if let [f] = self.selection[..] {
-            let n = self.doc.nodes.values().filter(|n| n.component).count();
-            self.edit("Create component", |tx| {
-                let node = tx.node_mut(f).unwrap();
-                node.component = true;
-                node.name = format!("Component {}", n + 1);
-            });
-        }
+        let n = self.doc.nodes.values().filter(|n| n.component).count();
+        let f = self.frame_selection("Create component", |node| {
+            node.component = true;
+            node.name = name.map_or_else(|| format!("Component {}", n + 1), String::from);
+        })?;
+        self.selection = vec![f];
+        Some(f)
     }
 
     /// Place an instance of a main component at world position `at` (top-left).
