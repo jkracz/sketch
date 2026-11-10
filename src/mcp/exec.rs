@@ -3779,6 +3779,9 @@ impl Builder<'_, '_> {
         if let Some(i) = index {
             *i += 1;
         }
+        // A local main's canvas position isn't the instance's; root placement picks a spot.
+        let r = &mut self.tx.node_mut(id).unwrap().rect;
+        (r.x, r.y) = (0.0, 0.0);
         let before = self.tx.doc().get(id).unwrap().clone();
         let mut n = before.clone();
         if parent.layout.is_some() {
@@ -3951,7 +3954,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("insert-children needs a frame or group target; use mode \"replace\" or target its parent".into());
     }
     let tree = html::parse(src);
-    let local = components::LocalMains::resolve(ed, &tree, page, target)?;
+    let local = components::LocalMains::resolve(ed, &tree, page, target, replace)?;
     let page_id = ed.pages[page].id.clone();
     let tokens = ed.tokens.clone();
     let canvas = CanvasStyle::of(ed.canvas_dark).background;

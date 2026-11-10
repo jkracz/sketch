@@ -256,6 +256,24 @@ fn component_mistakes_tell_the_agent_what_to_do() {
         "{e}"
     );
 
+    // Replacing a node that holds the main would delete it first.
+    let wrap = write(
+        &mut h,
+        "root",
+        "<div><div layer-name=\"Badge\" style=\"width:20px;height:20px\"></div></div>",
+    );
+    let wrap = wrap["createdNodeIds"][0].clone();
+    let badge = call(&mut h, "get_node_info", json!({"nodeId": wrap}))["childIds"][0].clone();
+    call(&mut h, "create_component", json!({"nodeIds": [badge]}));
+    let e = try_call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": wrap, "mode": "replace",
+               "html": "<x-sketch-instance component=\"Badge\"/>"}),
+    )
+    .unwrap_err();
+    assert!(e.contains("being replaced"), "{e}");
+
     // Two mains with one name need an id.
     let dup = write(&mut h, "root", BUTTON);
     call(
@@ -290,4 +308,27 @@ fn component_mistakes_tell_the_agent_what_to_do() {
     )
     .unwrap_err();
     assert!(w.contains("get_basic_info"), "{w}");
+}
+
+#[test]
+fn a_root_instance_goes_to_free_space_not_onto_its_main() {
+    let mut h = host();
+    let m = write(
+        &mut h,
+        "root",
+        "<div style=\"position:absolute;left:300px;top:40px;width:80px;height:30px\"></div>",
+    );
+    let main = m["createdNodeIds"][0].clone();
+    call(
+        &mut h,
+        "create_component",
+        json!({"nodeIds": [main], "name": "Chip"}),
+    );
+    let w = write(&mut h, "root", "<x-sketch-instance component=\"Chip\"/>");
+    let doc = &h.ed.doc;
+    let (a, b) = (
+        doc.world_rect(num(&main)).unwrap(),
+        doc.world_rect(num(&w["instances"][0]["id"])).unwrap(),
+    );
+    assert!(!a.intersects(&b), "{a:?} overlaps {b:?}");
 }

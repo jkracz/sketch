@@ -198,12 +198,14 @@ pub(super) struct LocalMains {
 impl LocalMains {
     /// Resolve every `<x-sketch-instance component>` in `tree` that names one of the file's
     /// own mains. `target` is where the HTML goes on `page`: a main can't be placed inside
-    /// itself, directly or through its instances.
+    /// itself, directly or through its instances. With `replace`, the target is removed first,
+    /// so it can't hold a main the HTML places.
     pub(super) fn resolve(
         ed: &Editor,
         tree: &[Html],
         page: usize,
         target: Option<NodeId>,
+        replace: bool,
     ) -> Result<LocalMains, String> {
         let mut keys = Vec::new();
         wanted(tree, &mut keys);
@@ -224,6 +226,14 @@ impl LocalMains {
             let Some((mp, main)) = find_main(ed, &key)? else {
                 continue;
             };
+            if let Some(t) = target.filter(|_| replace && mp == page)
+                && (t == main || doc.is_ancestor(t, main))
+            {
+                return Err(format!(
+                    "{INSTANCE_TAG} `{key}`: the main component is inside the node being \
+                     replaced. Replace a node that doesn't hold it."
+                ));
+            }
             if holds_any(ed, (mp, main), &around, 0) {
                 return Err(format!(
                     "{INSTANCE_TAG} `{key}`: a component can't hold an instance of itself. \
