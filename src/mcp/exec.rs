@@ -2281,7 +2281,6 @@ fn jsx_node(
     show_token_vars(tokens, n, &mut st);
     // The effect properties carry the style as `var()`. If one of them holds values instead,
     // or none is written, `effectStyle` stays, which write_html takes as `effect-style`.
-    let effect_style = st.get(EFFECT_STYLE_TYPE).cloned();
     let style_var = |v: &Value| {
         let name = (v.as_str()).and_then(|s| s.strip_prefix("var(")?.strip_suffix(')'));
         name.is_some_and(|n| tokens.effect_style_by_var(n).is_some())
@@ -2387,10 +2386,6 @@ fn jsx_node(
             // A box shadow here would be the shadow of the element's box, not of the shape.
             if let Some(f) = css::shape_filter_css(n, |i, c| shadow_color(tokens, n, i, c)) {
                 pos.insert("filter".into(), json!(f));
-            }
-            // The shape's own `filter` holds values, so the style goes by name.
-            if let Some(s) = effect_style {
-                pos.insert(EFFECT_STYLE_TYPE.into(), s);
             }
             out.push_str(&format!(
                 "{ind}<div data-name=\"{name}\" style={}>{}</div>\n",

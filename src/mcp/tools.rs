@@ -877,7 +877,8 @@ layer the whole list with box-shadow: var(--elevation-2) in write_html (text-sha
 --elevation-2-blur for filter and --elevation-2-backdrop-blur for backdrop-filter; any of the
 three applies the style. get_computed_styles shows effectStyle and the variables, and get_jsx
 writes the variables, or effectStyle where no variable fits (text whose style has spread or
-inset shadows, and vector shapes); write_html takes that as effect-style. effectStyle wins over
+inset shadows); write_html takes that as effect-style. Vector shapes export as inline SVG with
+their shadows as filter values, without the style. effectStyle wins over
 shadow and blur values set beside it. Setting a shadow or blur by value without it detaches the
 style and keeps the rest.
 Editing a style in the app updates every layer that uses it.
