@@ -176,6 +176,7 @@ pub fn capture(
 ) -> image::RgbaImage {
     let ctx = egui::Context::default();
     ui::setup_style(&ctx, st.appearance);
+    st.assets.gpu.get_or_insert_with(|| gpu.clone());
     let size = [
         (size_points[0] * ppp).round() as u32,
         (size_points[1] * ppp).round() as u32,

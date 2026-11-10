@@ -33,6 +33,7 @@ pub enum Command {
     Library(String),
     Component(String),
     ToggleLibrary,
+    ToggleAssets,
     ToggleTokens,
 }
 
@@ -144,6 +145,15 @@ pub fn entries(ed: &Editor, st: &UiState) -> Vec<Entry> {
         cmd: Command::ToggleLibrary,
     });
     out.push(Entry {
+        label: if st.sidebar == SidebarTab::Assets {
+            "Show layers".into()
+        } else {
+            "Show assets".into()
+        },
+        detail: String::new(),
+        cmd: Command::ToggleAssets,
+    });
+    out.push(Entry {
         label: if st.sidebar == SidebarTab::Tokens {
             "Show layers".into()
         } else {
@@ -219,12 +229,9 @@ pub fn run(ed: &mut Editor, st: &mut UiState, cmd: Command) {
                 ed.insert_library_item(&item, at);
             }
         }
-        Command::Component(id) => {
-            let (w, h) = ed.tokens.component(&id).map_or((0.0, 0.0), |c| c.size());
-            let at = ed.camera.screen_to_world(ed.viewport * 0.5) - crate::geom::v2(w, h) * 0.5;
-            ed.place_component(&id, at.round());
-        }
+        Command::Component(id) => super::assets::insert(ed, &id),
         Command::ToggleLibrary => toggle_tab(st, SidebarTab::Library),
+        Command::ToggleAssets => toggle_tab(st, SidebarTab::Assets),
         Command::ToggleTokens => toggle_tab(st, SidebarTab::Tokens),
     }
 }

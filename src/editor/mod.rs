@@ -2,6 +2,7 @@
 //!
 //! It consumes platform-agnostic [`InputEvent`]s, so every interaction can be scripted in tests.
 
+pub mod assets;
 pub mod commands;
 pub mod components;
 pub mod effect_styles;

@@ -683,6 +683,9 @@ impl App {
             .as_ref()
             .map(|p| (p.manifest.id.as_str(), p.manifest.name.as_str()));
         self.st.systems.set_context(&self.session.store, project);
+        if self.st.assets.gpu.is_none() {
+            self.st.assets.gpu = self.offscreen();
+        }
         let mut l = frame::layout(&self.ctx, input, &mut self.ed, &mut self.st);
         if self.st.appearance != appearance {
             self.set_appearance();
