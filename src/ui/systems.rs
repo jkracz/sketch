@@ -92,17 +92,13 @@ impl SystemsUi {
         };
     }
 
-    /// Whether the open project's tokens or settings differ from its last publish.
+    /// Whether the open project's tokens, components or settings differ from its last
+    /// publish.
     fn unpublished_changes(&self, ed: &Editor) -> bool {
         match (&ed.published, &self.snapshot.own) {
             (None, _) => false,
             (Some(_), None) => true,
-            (Some(l), Some(p)) => {
-                p.tokens != ed.tokens.publishable()
-                    || p.text_styles != ed.tokens.publishable_styles()
-                    || p.effect_styles != ed.tokens.publishable_effect_styles()
-                    || p.link() != *l
-            }
+            (Some(_), Some(p)) => !systems::up_to_date(p, ed),
         }
     }
 
@@ -154,9 +150,7 @@ pub fn header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
 /// Entries for the Tokens tab's More menu.
 pub fn menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     st.systems.refresh(ed);
-    let has_local = !ed.tokens.publishable().is_empty()
-        || !ed.tokens.publishable_styles().is_empty()
-        || !ed.tokens.publishable_effect_styles().is_empty();
+    let has_local = !systems::Contents::of(ed).is_empty();
     let label = if ed.published.is_some() {
         "Publish changes…"
     } else {
@@ -167,7 +161,7 @@ pub fn menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             has_local && st.systems.project.is_some(),
             egui::Button::new(label),
         )
-        .on_disabled_hover_text("Add a token first. Only projects can publish.")
+        .on_disabled_hover_text("Add a token or component first. Only projects can publish.")
         .clicked()
     {
         open_publish(ed, st);
@@ -370,27 +364,26 @@ pub fn dialog(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState) {
         );
         ui.add_space(6.0);
         let prefix = d.prefix.trim();
-        let styles = ed.tokens.publishable_styles();
-        let effects = ed.tokens.publishable_effect_styles();
-        let tokens = ed.tokens.publishable();
-        let c = systems::changes(own.as_ref(), prefix, &tokens, &styles, &effects);
+        let new = systems::Contents::of(ed);
+        let c = systems::changes(own.as_ref(), prefix, &new);
         let summary = if own.is_none() {
-            let mut parts = vec![plural(tokens.len(), "token")];
-            for (n, what) in [
-                (styles.len(), "text style"),
-                (effects.len(), "effect style"),
-            ] {
-                if n > 0 {
-                    parts.push(plural(n, what));
-                }
-            }
-            let last = parts.pop().unwrap_or_default();
+            let mut parts: Vec<String> = [
+                (new.tokens.len(), "token"),
+                (new.text_styles.len(), "text style"),
+                (new.effect_styles.len(), "effect style"),
+                (new.components.len(), "component"),
+            ]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| plural(n, what))
+            .collect();
+            let last = parts.pop().unwrap_or_else(|| plural(0, "token"));
             match parts.is_empty() {
                 true => format!("Publishes {last}."),
                 false => format!("Publishes {} and {last}.", parts.join(", ")),
             }
         } else if c.is_empty() {
-            "No token changes since the last publish.".to_string()
+            "No changes since the last publish.".to_string()
         } else {
             [
                 ("Adds", &c.added),

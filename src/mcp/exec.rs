@@ -1702,6 +1702,8 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
                 aka: Vec::new(),
             })
             .collect(),
+        // Files don't keep copies of a system's components yet.
+        components: Vec::new(),
     }
 }
 

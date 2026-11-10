@@ -117,9 +117,13 @@ pub fn save_to_dir(dir: &Path, ids: impl IntoIterator<Item = String>) -> std::io
 
 /// Asset ids referenced by a document's image fills.
 pub fn used_by(doc: &crate::model::Document) -> Vec<String> {
-    let mut out: Vec<String> = doc
-        .nodes
-        .values()
+    used_by_nodes(doc.nodes.values())
+}
+
+/// Asset ids referenced by these layers' image fills.
+pub fn used_by_nodes<'a>(nodes: impl IntoIterator<Item = &'a crate::model::Node>) -> Vec<String> {
+    let mut out: Vec<String> = nodes
+        .into_iter()
         .flat_map(|n| n.style.fills.iter())
         .filter_map(|p| match p {
             crate::model::Paint::Image { asset, .. } => Some(asset.clone()),
