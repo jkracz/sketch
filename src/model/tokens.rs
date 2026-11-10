@@ -1078,7 +1078,9 @@ impl TokenSet {
     }
 
     /// Make design system modes named in `names` this file's own, so local tokens can hold
-    /// values for them. They keep their ids, so frames that picked them keep them.
+    /// values for them. Each gets a fresh id and stands in for the system's (`Mode::aka`), so
+    /// frames that picked it keep it once the system is gone, and the two stay apart while
+    /// it's live.
     fn promote_modes(&mut self, names: &[String]) {
         let missing: Vec<Mode> = (self.systems.iter().flat_map(|s| &s.modes))
             .filter(|m| names.iter().any(|n| same_mode(n, &m.name)))
@@ -1087,7 +1089,15 @@ impl TokenSet {
             .collect();
         for m in missing {
             if !self.modes.iter().any(|x| same_mode(&x.name, &m.name)) {
-                self.modes.push(m);
+                // An older stand-in was renamed away from the system mode's name.
+                for x in &mut self.modes {
+                    x.aka.retain(|a| *a != m.id);
+                }
+                self.modes.push(Mode {
+                    id: crate::project::new_id(),
+                    name: m.name,
+                    aka: vec![m.id],
+                });
             }
         }
     }
@@ -1579,8 +1589,8 @@ impl TokenSet {
         }
         self.promote_modes(&names);
         for m in theirs {
-            if let Some(local) =
-                (self.modes.iter_mut()).find(|x| x.id != m.id && same_mode(&x.name, &m.name))
+            if let Some(local) = (self.modes.iter_mut())
+                .find(|x| same_mode(&x.name, &m.name) && !x.aka.contains(&m.id))
             {
                 local.aka.push(m.id);
             }
@@ -2442,6 +2452,29 @@ mod tests {
         assert_eq!(s.resolve_in(&copy[0], Some("Sepia")), Some(WHITE));
         s.detach_system("s");
         assert_eq!(s.resolve_in(&bg, Some("Sepia")), Some(WHITE));
+    }
+
+    #[test]
+    fn a_promoted_mode_stays_apart_from_the_systems() {
+        let mut s = using_modes(&["Contrast", "Light"]);
+        s.attach(bare_system("t", "Sepia"), &[], &[]).unwrap();
+        let bg = s.by_css_name("--s-bg").unwrap().id.clone();
+        s.duplicate(std::slice::from_ref(&bg));
+        let sepia = s
+            .modes()
+            .iter()
+            .find(|m| m.name == "Sepia")
+            .unwrap()
+            .id
+            .clone();
+        s.rename_mode(&sepia, "Dim").unwrap();
+        assert_eq!(s.mode_name("t/m"), Some("Sepia"));
+        s.detach_system("t");
+        assert_eq!(
+            s.mode_name("t/m"),
+            Some("Sepia"),
+            "the detached copy stands in"
+        );
     }
 
     #[test]
