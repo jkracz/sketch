@@ -505,9 +505,6 @@ pub fn url(s: &str) -> Option<String> {
     Some(inner.trim().trim_matches(['"', '\'']).to_string())
 }
 
-// ------------------------------------------------------------------------------ effects
-
-/// The CSS property that lists `n`'s shadows. Text casts its shadow from the glyphs.
 pub fn shadow_key(n: &Node) -> &'static str {
     if matches!(n.kind, NodeKind::Text { .. }) {
         "textShadow"
@@ -516,8 +513,7 @@ pub fn shadow_key(n: &Node) -> &'static str {
     }
 }
 
-/// Indices into `style.effects` of the shadows [`shadow_key`] lists, in order: the visible
-/// ones, and for text only drop shadows, since `text-shadow` has no `inset`.
+/// Indices in CSS shadow order. Text excludes inner shadows because `text-shadow` has no `inset`.
 pub fn shadow_slots(n: &Node) -> Vec<usize> {
     let text = matches!(n.kind, NodeKind::Text { .. });
     (n.style.effects.iter().enumerate())
@@ -527,8 +523,7 @@ pub fn shadow_slots(n: &Node) -> Vec<usize> {
         .collect()
 }
 
-/// One shadow of a `box-shadow` or `text-shadow` list: `[inset] x y [blur [spread]] [color]`
-/// in any order CSS allows. No color means black.
+/// CSS permits `[inset] x y [blur [spread]] [color]` with color at either end.
 fn shadow(s: &str, fs: f64, text: bool) -> Option<Effect> {
     let mut lengths = Vec::new();
     let (mut inset, mut col) = (false, None);
@@ -563,7 +558,6 @@ fn shadow(s: &str, fs: f64, text: bool) -> Option<Effect> {
     })
 }
 
-/// A whole `box-shadow` or `text-shadow` value. `none` is an empty list.
 pub fn shadows(v: &str, fs: f64, text: bool) -> Option<Vec<Effect>> {
     if v.trim().eq_ignore_ascii_case("none") {
         return Some(Vec::new());
@@ -574,8 +568,7 @@ pub fn shadows(v: &str, fs: f64, text: bool) -> Option<Vec<Effect>> {
     list.filter(|l| !l.is_empty())
 }
 
-/// The `blur()` radius of a `filter` or `backdrop-filter` value (None without one), and
-/// whether that was all the value held.
+/// Returns the blur radius and whether all filters were supported.
 fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
     if v.trim().eq_ignore_ascii_case("none") {
         return (None, true);
@@ -594,7 +587,6 @@ fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
     (radius, all)
 }
 
-/// Put `new` first in place of the effects `replaced` picks.
 fn replace_effects(n: &mut Node, new: Vec<Effect>, replaced: impl Fn(&Effect) -> bool) {
     edit_effects(n, |list| {
         list.retain(|(e, _)| !replaced(e));
@@ -602,8 +594,7 @@ fn replace_effects(n: &mut Node, new: Vec<Effect>, replaced: impl Fn(&Effect) ->
     });
 }
 
-/// Set the one blur of `kind` from a `filter` value. False when the value had no `blur()`
-/// we could read, or held other filters, which Sketch drops.
+/// Applies supported blur filters even when other filters make the return value false.
 fn apply_blur(n: &mut Node, kind: EffectKind, v: &str, fs: f64) -> bool {
     let (radius, all) = blur_filter(v, fs);
     if radius.is_none() && !all {
@@ -620,8 +611,7 @@ fn apply_blur(n: &mut Node, kind: EffectKind, v: &str, fs: f64) -> bool {
     all
 }
 
-/// `n`'s shadows as a `box-shadow` or `text-shadow` value. `color` writes the color of the
-/// effect at an index.
+/// The color callback receives the effect index, which may differ from its CSS list position.
 pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<String> {
     let text = matches!(n.kind, NodeKind::Text { .. });
     let list: Vec<String> = (shadow_slots(n).into_iter())
@@ -642,7 +632,6 @@ pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<S
     (!list.is_empty()).then(|| list.join(", "))
 }
 
-/// The combined visible blur of `kind` as a `blur()` filter.
 fn blur_css(n: &Node, kind: EffectKind) -> Option<String> {
     let r = blur_sigma(&n.style.effects, kind);
     (r > 0.0).then(|| format!("blur({})", px(r)))
@@ -1823,7 +1812,6 @@ mod tests {
             back["boxShadow"],
             "0px 4px 8px -2px rgba(0, 0, 0, 0.251), inset 1px 2px 0px #ff0000, 0px 0px 4px #0000ff"
         );
-        // What we write reads back as the same effects.
         let (again, _) = styled(
             NodeKind::Rect,
             &format!("box-shadow: {}", back["boxShadow"].as_str().unwrap()),
@@ -1853,7 +1841,6 @@ mod tests {
             &ctx,
         );
         assert_eq!(kinds(&n), [BackgroundBlur]);
-        // A hidden shadow is not in the CSS.
         n.style.effects.push(Effect {
             visible: false,
             ..Effect::new(DropShadow)
@@ -1883,11 +1870,9 @@ mod tests {
             "1px 2px 3px #000000, 0px 0px 0px #ff0000"
         );
         assert!(!back.contains_key("boxShadow"));
-        // A box shadow on text would be a shadow of its box, which text layers don't have.
         let (n, a) = styled(text_kind(), "box-shadow: 0 0 4px #000");
         assert!(n.style.effects.is_empty());
         assert_eq!(a.ignored, ["boxShadow"]);
-        // Boxes pass `text-shadow` on to their text.
         let (n, a) = styled(NodeKind::Rect, "text-shadow: 1px 1px #000");
         assert!(n.style.effects.is_empty() && a.ignored.is_empty());
     }

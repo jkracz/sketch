@@ -1,13 +1,11 @@
-//! GPU resources for layer effects: the box shadow shader, the blur and composite passes,
-//! the uniform slots every pass reads its parameters from, and a pool of offscreen textures.
+//! Layer effects share per-frame uniforms and pooled offscreen textures.
 
 use super::gpu::MSAA;
 use super::mesh::Vertex;
 use bytemuck::{Pod, Zeroable};
 use std::num::NonZeroU64;
 
-/// Blur with a Gaussian at most this many texels wide. A wider blur runs at a lower
-/// resolution, where it is this wide again, so its cost stays flat as the radius grows.
+/// Downsample wider blurs to keep their cost independent of radius.
 pub const MAX_TEXEL_SIGMA: f64 = 6.0;
 /// Largest edge of a blur texture. Anything bigger runs at a lower resolution.
 pub const MAX_BLUR_EDGE: f64 = 2048.0;
@@ -357,7 +355,6 @@ impl Slots {
         }
     }
 
-    /// Store `v` for this frame and return the offset to bind it at.
     pub fn push<T: Pod>(&mut self, v: &T) -> u32 {
         let at = self.data.len() as u32;
         if at / self.stride >= self.cap {
@@ -443,7 +440,6 @@ impl Pool {
         &self.layout
     }
 
-    /// A texture view and a bind group that samples it.
     pub fn texture(
         &self,
         device: &wgpu::Device,
@@ -530,18 +526,15 @@ impl Pool {
     }
 }
 
-/// The pipelines effects draw with.
 pub struct FxPipelines {
     pub shadow: wgpu::RenderPipeline,
     /// A blurred texture painted over a px rect.
     pub quad: wgpu::RenderPipeline,
-    /// The same through world geometry: blended over, or mixed with what is there by the
-    /// pass's blend constant, which at 1 replaces it.
+    /// Paint through world geometry. The second pipeline mixes by the blend constant.
     pub mask: [wgpu::RenderPipeline; 2],
     pub blur: wgpu::RenderPipeline,
 }
 
-/// Premultiplied source over.
 pub const OVER: wgpu::BlendState = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
 
 /// The source and what is there, mixed by the blend constant. Unlike source over, this

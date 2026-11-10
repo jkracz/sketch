@@ -485,7 +485,6 @@ pub fn draw_bounds(n: &Node, wr: Rect) -> Rect {
     wr.inflate(pad)
 }
 
-/// How far a Gaussian of `sigma` visibly reaches.
 pub fn blur_reach(sigma: f64) -> f64 {
     sigma * 3.0
 }
@@ -504,7 +503,6 @@ pub fn shadow_bounds(n: &Node, wr: Rect) -> Rect {
     b
 }
 
-/// How far a layer blur on `n` spreads what it and its children paint.
 pub fn layer_blur_reach(n: &Node) -> f64 {
     blur_reach(blur_sigma(&n.style.effects, EffectKind::LayerBlur))
 }
@@ -535,8 +533,7 @@ impl RoundRect {
     }
 }
 
-/// The node's outline when it is a rounded box, which casts shadows the way a CSS box does:
-/// from the box, whatever is painted in it. A circle counts.
+/// CSS box shadows use the box outline regardless of its fill. Circles qualify too.
 pub fn box_shape(n: &Node, wr: Rect) -> Option<RoundRect> {
     let max = (wr.w.min(wr.h) * 0.5).max(0.0);
     let radii = match n.kind {
@@ -551,7 +548,6 @@ pub fn box_shape(n: &Node, wr: Rect) -> Option<RoundRect> {
     })
 }
 
-/// How far the stroke of a box reaches outside its rect and inside it.
 pub fn stroke_reach(n: &Node) -> (f64, f64) {
     if n.style.stroke.is_none() || n.style.stroke_width <= 0.0 {
         return (0.0, 0.0);
@@ -607,10 +603,8 @@ fn solid(path: VPath) -> DrawOp {
     }
 }
 
-/// What a drop shadow with spread is cast from: the area the node paints, grown by `d` or
-/// shrunk when `d` is negative, as opaque ops, and how opaque the node paints it. A filled
-/// shape grows from its outline, a hollow one from its stroke, and text from its glyphs.
-/// None for groups, which paint nothing themselves.
+/// Returns opaque shadow geometry and its paint opacity. Spread follows filled outlines,
+/// hollow strokes or text glyphs. Groups have no geometry of their own.
 pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f64)> {
     let alpha = |c: Color| c.a as f64 / 255.0;
     let fill_alpha = (n.style.fills.iter())
@@ -638,11 +632,9 @@ pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f6
     let ink = matches!(n.kind, NodeKind::Stroke { .. });
     // A fill you can't see casts nothing, so the stroke casts the shadow.
     if is_area(n) && (ink || fill_alpha > 0.0) {
-        // A stroke outside the outline is part of what the layer paints.
         let op = spread_op(n, wr, stroke_reach(n).0 + d, tol)?;
         return Some((vec![op], if ink { 1.0 } else { fill_alpha }));
     }
-    // Strokes only: a hollow shape, a line, or a connector with its heads.
     let color = n.style.stroke?;
     let mut ops = Vec::new();
     if matches!(n.kind, NodeKind::Connector { .. }) {
@@ -658,7 +650,6 @@ pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f6
             dash: n.style.dash.clone(),
         });
     }
-    // Widening every stroke grows the whole of it, filled heads included.
     ops.retain_mut(|op| match op {
         DrawOp::Stroke { color, width, .. } => {
             *color = [1.0; 4];

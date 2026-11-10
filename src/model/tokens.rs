@@ -1366,7 +1366,6 @@ impl TokenSet {
                 continue;
             }
             if matches!(k.as_str(), "boxShadow" | "textShadow") {
-                // Each shadow in the list can take its color from a token.
                 for (i, shadow) in css::split_top(v, ',').iter().enumerate() {
                     let color = (css::split_ws(shadow).iter())
                         .filter_map(|part| self.by_css_name(var_name(part)?))
@@ -1694,7 +1693,6 @@ impl<'de> Deserialize<'de> for TokenProp {
 }
 
 impl TokenProp {
-    /// The name this property is saved under.
     pub fn key(self) -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed(match self {
             TokenProp::Fill => "fill",

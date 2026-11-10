@@ -182,10 +182,8 @@ struct Entry {
     used: bool,
 }
 
-/// One node's cached triangles.
 #[derive(Clone, Default)]
 struct Shapes {
-    /// What the node paints.
     pieces: Arc<Vec<Piece>>,
     /// The filled shape, for effects that work inside it. Empty unless an effect needs it.
     mask: Arc<Vec<Piece>>,
@@ -202,7 +200,7 @@ pub struct SceneCache {
     /// Ops of the previous frame and what they were built for (doc stamp, zoom bucket,
     /// culled world rect): reused while the view stays inside that rect.
     last: Option<(u64, i32, Rect, Arc<Vec<Op>>)>,
-    /// Tessellations performed during the last `ops` call (for tests and profiling).
+    /// Tessellations performed during the last `ops` call.
     pub last_misses: usize,
     /// `fonts::generation` the cached geometry was built with.
     fonts: u64,
@@ -224,7 +222,6 @@ fn within(r: Rect, clip: Option<Rect>) -> Option<Rect> {
     clip.map_or(Some(r), |c| c.intersection(&r))
 }
 
-/// What the walk carries down the tree.
 #[derive(Clone, Copy)]
 struct Walk {
     origin: V2,
@@ -286,7 +283,6 @@ impl SceneCache {
         out
     }
 
-    /// The node's cached triangles, with the shapes its effects need.
     fn shapes(&mut self, n: &Node, wr: Rect, w: Walk, tess: &mut Tess) -> Shapes {
         let hit = self.entries.get(&n.id).is_some_and(|e| {
             e.bucket == w.bucket && e.wr == wr && e.opacity == w.opacity && e.node == *n
@@ -341,7 +337,6 @@ impl SceneCache {
         e.shapes.clone()
     }
 
-    /// Paint `id` and its children into `out`. Returns the world bounds painted.
     fn walk(
         &mut self,
         doc: &Document,
@@ -460,7 +455,6 @@ impl SceneCache {
     }
 }
 
-/// One node's shadows as ops.
 struct Effects<'a> {
     n: &'a Node,
     wr: Rect,
@@ -470,13 +464,10 @@ struct Effects<'a> {
 }
 
 impl<'a> Effects<'a> {
-    /// The visible effects of `kind`, with their index in the list.
     fn of(&self, kind: EffectKind) -> impl DoubleEndedIterator<Item = (usize, &'a Effect)> {
         (self.n.style.effects.iter().enumerate()).filter(move |(_, e)| e.visible && e.kind == kind)
     }
 
-    /// What the shadow at `i` is cast from when it has a spread, as blur content, and how
-    /// opaque the layer paints it.
     fn spread(&self, i: usize) -> Option<(Vec<Op>, f64)> {
         let (_, pieces, alpha) = self.shapes.spread.iter().find(|(at, ..)| *at == i)?;
         let item = Item {
@@ -493,10 +484,8 @@ impl<'a> Effects<'a> {
         Some((content, *alpha))
     }
 
-    /// A box casts its shadow from the box and leaves it out from under itself, as CSS does.
-    /// Any other shape casts it from `cast`, what it paints, like `filter: drop-shadow()`,
-    /// so the shadow shows through a translucent fill. With a spread it casts from the area
-    /// it paints, grown. A group paints nothing itself and ignores the spread.
+    /// CSS box shadows exclude the box interior. Other shapes cast from their paint,
+    /// so translucent fills show the shadow through them. Groups ignore spread.
     fn drop_shadow(
         &self,
         i: usize,
@@ -568,7 +557,6 @@ impl<'a> Effects<'a> {
                 blend: BlendMode::Normal,
             })]
         };
-        // Room for the shape where it is, where the shadow moves it, and how far it grows.
         let grown = self.wr.inflate((-e.spread).max(0.0));
         Some(Op::Blur(Blur {
             content: self.spread(i).map_or_else(whole, |(shrunk, _)| shrunk),

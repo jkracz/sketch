@@ -2296,7 +2296,6 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
         let (page, id) = resolve(ed, key, def)?;
         let doc = ed.page_doc(page);
         let plain = crate::io::svg::export_bounds(doc, &[id]).ok_or("nothing to export")?;
-        // A PNG is as big as what it draws, shadows included.
         let drawn = crate::io::svg::effect_bounds(doc, &[id]).unwrap_or(plain);
         let name = doc.get(id).unwrap().name.clone();
         let list: Vec<Value> = match settings.as_array() {

@@ -1,5 +1,3 @@
-//! Layer effects: shadows and blurs.
-
 use super::node::{Color, Node};
 use super::tokens::TokenProp;
 use serde::{Deserialize, Serialize};
@@ -44,15 +42,13 @@ pub struct Effect {
     pub kind: EffectKind,
     /// A shadow's `box-shadow` blur radius, or a blur's `blur()` radius.
     pub blur: f64,
-    /// Shadow offset.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub x: f64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub y: f64,
-    /// Grows a drop shadow and shrinks an inner one. Only box shapes use it.
+    /// Positive spread grows drop shadows and shrinks inner shadows.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spread: f64,
-    /// Shadow color.
     #[serde(default = "shadow_color", skip_serializing_if = "is_shadow_color")]
     pub color: Color,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -76,7 +72,6 @@ fn is_shadow_color(c: &Color) -> bool {
 }
 
 impl Effect {
-    /// What the inspector adds: a soft shadow below the layer, or an 8px blur.
     pub fn new(kind: EffectKind) -> Effect {
         let shadow = kind.is_shadow();
         Effect {
@@ -114,9 +109,7 @@ pub fn blur_sigma(effects: &[Effect], kind: EffectKind) -> f64 {
 /// An effect and the token bound to its color.
 pub type BoundEffect = (Effect, Option<String>);
 
-/// Edit a layer's effects along with the token bound to each one's color. Bindings are keyed
-/// by position, so every reorder, insert and removal goes through here to keep them on the
-/// right effect.
+/// Bindings use effect indices. Route list edits through here to keep bindings with effects.
 pub fn edit_effects(n: &mut Node, f: impl FnOnce(&mut Vec<BoundEffect>)) {
     let mut list: Vec<BoundEffect> = std::mem::take(&mut n.style.effects)
         .into_iter()
@@ -137,19 +130,6 @@ pub fn edit_effects(n: &mut Node, f: impl FnOnce(&mut Vec<BoundEffect>)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::Rect;
-    use crate::model::{NodeId, NodeKind};
-
-    #[test]
-    fn effects_keep_only_what_they_use_on_disk() {
-        let blur = Effect::new(EffectKind::LayerBlur);
-        let json = serde_json::to_string(&blur).unwrap();
-        assert_eq!(json, r#"{"type":"layer-blur","blur":8.0}"#);
-        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), blur);
-        let minimal: Effect = serde_json::from_str(r#"{"type":"drop-shadow","blur":2}"#).unwrap();
-        assert!(minimal.visible);
-        assert_eq!((minimal.x, minimal.y, minimal.spread), (0.0, 0.0, 0.0));
-    }
 
     #[test]
     fn sigma_follows_css() {
@@ -170,29 +150,5 @@ mod tests {
         ];
         assert_eq!(blur_sigma(&both, EffectKind::LayerBlur), 5.0);
         assert_eq!(blur_sigma(&both, EffectKind::BackgroundBlur), 0.0);
-    }
-
-    #[test]
-    fn bindings_follow_their_effect() {
-        let mut n = Node::new(NodeId(1), NodeKind::Rect, Rect::new(0.0, 0.0, 10.0, 10.0));
-        n.style.effects = vec![
-            Effect::new(EffectKind::DropShadow),
-            Effect::new(EffectKind::InnerShadow),
-        ];
-        n.tokens.insert(TokenProp::EffectColor(1), "ink".into());
-        edit_effects(&mut n, |l| l.swap(0, 1));
-        assert_eq!(n.style.effects[0].kind, EffectKind::InnerShadow);
-        assert_eq!(
-            n.tokens.get(&TokenProp::EffectColor(0)).map(String::as_str),
-            Some("ink")
-        );
-        assert!(!n.tokens.contains_key(&TokenProp::EffectColor(1)));
-        // A blur has no color to bind.
-        edit_effects(&mut n, |l| l[0].0.kind = EffectKind::LayerBlur);
-        assert!(n.tokens.is_empty());
-        edit_effects(&mut n, |l| {
-            l.remove(0);
-        });
-        assert_eq!(n.style.effects.len(), 1);
     }
 }

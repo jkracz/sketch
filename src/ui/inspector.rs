@@ -1336,7 +1336,6 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
     mode_row(ui, ed, ids, first);
 }
 
-/// Shadows and blurs, top first.
 fn effects(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
     let list = first.style.effects.clone();
     ui.horizontal(|ui| {
@@ -1359,7 +1358,7 @@ fn effects(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
 }
 
 fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usize, e: &Effect) {
-    // Change the effect in place. Its token binding stays unless the color no longer matches.
+    // Keep the token binding unless the color no longer matches.
     let set = |ed: &mut Editor, f: &dyn Fn(&mut Effect)| {
         apply(ed, "effects", ids, |n| {
             if let Some(slot) = n.style.effects.get_mut(i) {
@@ -1367,7 +1366,6 @@ fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usi
             }
         });
     };
-    // Reorder or remove, carrying each effect's binding with it.
     let rearrange = |ed: &mut Editor, f: &dyn Fn(&mut Vec<BoundEffect>)| {
         apply(ed, "effects", ids, |n| {
             edit_effects(n, |l| {
@@ -1415,7 +1413,6 @@ fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usi
             }
         });
     });
-    // The second row ends with the buttons that move the effect up and down the list.
     let reorder = |ui: &mut Ui, ed: &mut Editor| {
         if count < 2 {
             return;

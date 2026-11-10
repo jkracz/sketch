@@ -64,7 +64,6 @@ fn bounds(doc: &Document, roots: &[NodeId], effects: bool) -> Option<Rect> {
     })
 }
 
-/// The world rects the roots and their subtrees paint into.
 fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
     let mut rects = Vec::new();
     for r in roots {

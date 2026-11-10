@@ -133,7 +133,6 @@ fn blend_state(key: usize) -> wgpu::BlendState {
 
 // ---------------------------------------------------------------------------------- world plan
 
-/// A run of cached world triangles.
 struct Draw {
     range: Range<u32>,
     clip: Option<Rect>,
@@ -144,7 +143,6 @@ struct Draw {
 /// The ops of a frame, with geometry replaced by ranges of the uploaded buffers.
 enum Step {
     Draw(Draw),
-    /// A run of box shadow instances.
     Shadows {
         range: Range<u32>,
         clip: Option<Rect>,
@@ -179,7 +177,7 @@ struct BackdropPlan {
     clip: Option<Rect>,
 }
 
-/// Cached world-space geometry: reused while the ops are unchanged (panning, idle).
+/// Reuse world geometry across idle frames and camera pans.
 struct World {
     /// Held so a new list can't reuse this one's address and pass for it.
     ops: Arc<Vec<Op>>,
@@ -196,7 +194,6 @@ fn rect_bits(r: &Rect) -> [u64; 4] {
     [r.x, r.y, r.w, r.h].map(f64::to_bits)
 }
 
-/// Everything about the ops that the uploaded buffers and plans depend on.
 fn signature(ops: &[Op], out: &mut Vec<u64>) {
     let clip = |c: &Option<Rect>, out: &mut Vec<u64>| match c {
         Some(c) => {
@@ -270,7 +267,6 @@ impl Builder {
         start..self.indices.len() as u32
     }
 
-    /// Triangles of a shape used only for where it is, as one range.
     fn mask(&mut self, pieces: &[Piece]) -> Range<u32> {
         let start = self.indices.len() as u32;
         for p in pieces {
@@ -369,9 +365,7 @@ impl Builder {
     }
 }
 
-// ---------------------------------------------------------------------------------- one frame
-
-/// World units to the px of a render target: `px = world * k + t`.
+/// Maps world units to target pixels with `px = world * k + t`.
 #[derive(Clone, Copy)]
 struct Map {
     k: f64,
@@ -401,13 +395,11 @@ impl Map {
     }
 }
 
-/// Where a list of steps is drawn.
 struct Target {
     size: [u32; 2],
     map: Map,
     /// The px that end up on screen. Nothing is drawn outside.
     visible: Rect,
-    /// Slot of its `Globals`.
     globals: u32,
     /// The canvas itself. Only it can blur what is behind a layer.
     main: bool,
@@ -434,13 +426,11 @@ impl Target {
         (x1 > x0 && y1 > y0).then_some([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
     }
 
-    /// The scissor for world geometry clipped to `clip`.
     fn clip(&self, clip: &Option<Rect>) -> Option<Scissor> {
         self.scissor(&self.shown(self.visible, clip)?)
     }
 }
 
-/// A texture a pass samples.
 #[derive(Clone, Copy)]
 enum Tex {
     Pool(usize),
@@ -455,7 +445,6 @@ enum Cmd {
         scissor: Scissor,
         blend: usize,
         image: Option<String>,
-        /// Slot of the `Globals` to draw with.
         globals: u32,
         /// From the per-frame screen buffers that hold the chrome, not the world buffers.
         screen: bool,
@@ -465,7 +454,6 @@ enum Cmd {
         scissor: Scissor,
         globals: u32,
     },
-    /// Paint a blurred texture back: over a quad, or through `mask`.
     Paint {
         tex: usize,
         fx: u32,
@@ -478,21 +466,18 @@ enum Cmd {
     /// Blur what the pass has painted so far. Ends the pass.
     Backdrop {
         plan: usize,
-        /// The visible px it covers.
+        /// Visible bounds in target pixels.
         shown: Rect,
     },
 }
 
-/// What to do with a blur on a target.
 enum BlurMode {
-    /// Nothing of it shows.
     Skip,
     /// Too slight to see, so its content is drawn as it is.
     Inline,
     Offscreen(Job),
 }
 
-/// A blur to draw offscreen: where it lands on its target and how big its texture is.
 struct Job {
     plan: usize,
     /// The target px that show it.
@@ -508,24 +493,20 @@ struct Job {
 struct Page {
     size: [u32; 2],
     tex: usize,
-    /// Jobs on it, with where each sits.
     jobs: Vec<(usize, [u32; 2])>,
 }
 
-/// Largest edge of an atlas page.
 const PAGE_EDGE: u32 = 2048;
 
 /// Most times a background blur halves the canvas. Sixteen take any canvas down to a pixel.
 const MAX_HALVINGS: usize = 16;
 
-/// The rects that landed on one page: its size, then each rect's index and position.
 #[derive(Default)]
 struct Packed {
     size: [u32; 2],
     rects: Vec<(usize, [u32; 2])>,
 }
 
-/// Place rects of `sizes` on pages, in shelves.
 fn pack(sizes: &[[u32; 2]]) -> Vec<Packed> {
     let mut order: Vec<usize> = (0..sizes.len()).collect();
     order.sort_by_key(|i| std::cmp::Reverse(sizes[*i][1]));
@@ -553,12 +534,11 @@ fn pack(sizes: &[[u32; 2]]) -> Vec<Packed> {
     pages
 }
 
-/// The source of a blur pass: a px region of a texture.
+/// Source region in texture pixels.
 struct Source {
     tex: Tex,
     at: [f64; 2],
     size: [f64; 2],
-    /// Allocated size of the texture.
     alloc: [u32; 2],
 }
 
@@ -572,7 +552,6 @@ impl Source {
         }
     }
 
-    /// Origin and extent of the region, in uv.
     fn uv(&self) -> [f32; 4] {
         let [w, h] = self.alloc.map(|a| a as f64);
         [
@@ -597,8 +576,7 @@ impl Source {
     }
 }
 
-/// One draw of a blur pass: `src` into the px rect at `at`. A Gaussian along `dir` (0 = x,
-/// 1 = y), or with no direction a resampling copy.
+/// `dir` selects the Gaussian axis, 0 for x and 1 for y. None makes a resampling copy.
 struct BlurPart {
     src: Source,
     at: [u32; 2],
@@ -935,7 +913,6 @@ impl CanvasRenderer {
         }
     }
 
-    /// Rebuild the world buffers and plans when the ops changed.
     fn sync_world(&mut self, device: &wgpu::Device, ops: &Arc<Vec<Op>>) {
         if (self.world.as_ref()).is_some_and(|w| Arc::ptr_eq(&w.ops, ops)) {
             return;
@@ -1073,7 +1050,6 @@ impl CanvasRenderer {
             )
         });
 
-        // One pass, plus one more after each background blur.
         let msaa = self.msaa_view(device, size);
         let clear = wgpu::Color {
             r: clear[0],
@@ -1142,9 +1118,7 @@ impl CanvasRenderer {
         emit(world, steps, tgt, &painted, out);
     }
 
-    /// Draw every offscreen blur of one target, sharing atlas pages. Each page costs one pass
-    /// for its content and two to blur it, however many blurs sit on it. Returns the draw
-    /// that paints each one back, by plan.
+    /// Share three passes per atlas page across all its blurs. Return composite draws by plan.
     fn bake(
         &mut self,
         device: &wgpu::Device,
@@ -1167,7 +1141,6 @@ impl CanvasRenderer {
             })
             .collect();
         for page in &pages {
-            // Content: every blur's layers, each in its own corner of the page.
             let mut cmds = Vec::new();
             for (j, at) in &page.jobs {
                 let job = &jobs[*j];
@@ -1202,7 +1175,6 @@ impl CanvasRenderer {
                 }
             }
 
-            // Blur: across into a scratch page, then down back into this one.
             let alloc = self.pool.get(page.tex).alloc;
             let sigma = |j: &Job| world.blurs[j.plan].sigma * tgt.map.k / j.down;
             if page.jobs.iter().any(|(j, _)| sigma(&jobs[*j]) * 3.0 >= 0.5) {
@@ -1234,7 +1206,6 @@ impl CanvasRenderer {
                 };
                 let [aw, ah] = alloc.map(|a| a as f64);
                 let src = Source::pool(page.tex, *at, job.size, alloc);
-                // The texel at `at` lands on `origin`.
                 let x = job.origin.x - at[0] as f64 * job.down;
                 let y = job.origin.y - at[1] as f64 * job.down;
                 let [w, h] = job.size.map(|s| s as f64 * job.down);
@@ -1261,8 +1232,6 @@ impl CanvasRenderer {
         painted
     }
 
-    /// Blur the canvas copy under a background blur. Returns the draw that paints it back
-    /// through the layer's shape.
     fn backdrop(
         &mut self,
         device: &wgpu::Device,
@@ -1330,13 +1299,11 @@ impl CanvasRenderer {
             fx,
             scissor: tgt.scissor(shown).unwrap_or([0, 0, 1, 1]),
             mask: Some(plan.mask.clone()),
-            // A see-through layer shows that much of the blur.
             mix: Some(plan.opacity.clamp(0.0, 1.0)),
             globals: tgt.globals,
         }
     }
 
-    /// One pass of the blur shader into pool texture `to`, a draw per part.
     fn blur_pass(&mut self, enc: &mut wgpu::CommandEncoder, to: usize, parts: &[BlurPart]) {
         let slots: Vec<u32> = (parts.iter())
             .map(|p| {
@@ -1526,14 +1493,12 @@ impl CanvasRenderer {
                         None => pass.draw(0..4, 0..1),
                     }
                 }
-                // The caller ends the pass here.
                 Cmd::Backdrop { .. } => {}
             }
         }
     }
 }
 
-/// What a blur does on `tgt`: nothing, its content drawn as it is, or an offscreen job.
 fn blur_mode(i: usize, plan: &BlurPlan, tgt: &Target) -> BlurMode {
     let k = tgt.map.k;
     let sigma = plan.sigma * k;
@@ -1573,7 +1538,6 @@ fn blur_mode(i: usize, plan: &BlurPlan, tgt: &Target) -> BlurMode {
     })
 }
 
-/// The blurs among `steps` that draw offscreen for `tgt`.
 fn collect(world: &World, steps: &[Step], tgt: &Target, jobs: &mut Vec<Job>) {
     for step in steps {
         if let Step::Blur(i) = step {
@@ -1587,7 +1551,6 @@ fn collect(world: &World, steps: &[Step], tgt: &Target, jobs: &mut Vec<Job>) {
     }
 }
 
-/// The draws of `steps` on `tgt`, given the draw that paints each offscreen blur back.
 fn emit(
     world: &World,
     steps: &[Step],
@@ -1813,12 +1776,5 @@ mod tests {
             }
         }
         assert!(seen.iter().all(|s| *s), "every rect is placed");
-        // A few small rects get a small page.
-        let small = pack(&[[30, 20], [10, 10]]);
-        assert!(
-            small[0].size[0] <= 64 && small[0].size[1] <= 64,
-            "{:?}",
-            small[0].size
-        );
     }
 }

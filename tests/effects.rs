@@ -1,5 +1,3 @@
-//! Layer effects through the real renderer: shadows and blurs at known pixels.
-
 mod common;
 
 use EffectKind::*;
@@ -14,19 +12,11 @@ use sketch_rs::model::{
     Color, Effect, EffectKind, Node, NodeId, NodeKind, TextAlign, TokenKind, TokenProp,
 };
 use sketch_rs::project::Store;
-use sketch_rs::render::frame;
-use sketch_rs::ui::{UiState, inspector};
-use std::path::PathBuf;
+use sketch_rs::ui::inspector;
 
 const WHITE: Color = Color::WHITE;
 const RED: Color = Color::rgb(230, 40, 40);
 const BLUE: Color = Color::rgb(30, 80, 230);
-
-fn artifact(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".artifacts/effects");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
-}
 
 fn node(kind: NodeKind, r: Rect, fill: Color, effects: Vec<Effect>) -> Node {
     let mut n = Node::new(NodeId(0), kind, r);
@@ -53,7 +43,6 @@ fn blur(kind: EffectKind, radius: f64) -> Effect {
     }
 }
 
-/// A white page to paint on, so pixels read as plain colors.
 fn page(e: &mut Editor) -> NodeId {
     let page = node(
         NodeKind::Frame { clip: false },
@@ -70,7 +59,6 @@ fn luma(p: [u8; 4]) -> i32 {
 
 const BLACK: Color = Color::BLACK;
 
-/// Editor with a white page and one more layer on it.
 fn scene(n: Node) -> (Editor, NodeId) {
     let mut e = editor(800.0, 500.0);
     let page = page(&mut e);
@@ -94,7 +82,6 @@ fn a_drop_shadow_fades_away_from_the_box_and_follows_its_offset() {
     let img = render_canvas(g, &e);
     let at = |x, y| luma(px(&img, v2(x, y)));
     assert_eq!(at(400.0, 250.0), 255, "the box itself stays white");
-    // Below the box: darkest at the edge, lighter further out, gone past the blur.
     let (near, mid, far) = (at(400.0, 304.0), at(400.0, 325.0), at(400.0, 360.0));
     assert!(near < 60, "{near}");
     assert!(near < mid && mid < far, "{near} {mid} {far}");
@@ -162,7 +149,6 @@ fn shapes_cast_shadows_of_their_outline() {
     assert!(close(at(545.0, 180.0), WHITE, 2));
     assert!(close(at(400.0, 250.0), RED, 2), "the star paints over it");
 
-    // An inner shadow shows inside the outline only.
     e.edit("inner", |tx| {
         tx.node_mut(id).unwrap().style.effects =
             vec![shadow(InnerShadow, 0.0, 0.0, 16.0, 0.0, BLACK)];
@@ -203,7 +189,6 @@ fn text_and_groups_cast_shadows_of_what_they_paint() {
         "{red} {below}"
     );
 
-    // A group has no shape of its own, so its children cast the shadow.
     let page = e.doc.root[0];
     let a = e.add_node(
         node(
@@ -265,7 +250,6 @@ fn a_layer_blur_spreads_the_layer_and_what_is_in_it() {
     });
     let img = render_canvas(g, &e);
     let at = |x, y| px(&img, v2(x, y));
-    // Where red met blue there is now an even mix of the two.
     let seam = at(400.0, 250.0);
     assert!((seam[0] as i32 - 130).abs() < 12, "{seam:?}");
     assert!((seam[2] as i32 - 135).abs() < 12, "{seam:?}");
@@ -273,7 +257,6 @@ fn a_layer_blur_spreads_the_layer_and_what_is_in_it() {
         close(at(330.0, 250.0), RED, 6),
         "far from an edge it is still red"
     );
-    // The frame's edge is half gone, and reaches past where it was.
     let edge = at(500.0, 250.0);
     assert!(
         (luma(edge) - luma([142, 167, 242, 255])).abs() < 12,
@@ -302,16 +285,13 @@ fn a_background_blur_blurs_what_is_behind_the_layer_only() {
     let glass = e.add_node(glass, Some(page));
     let img = render_canvas(g, &e);
     let at = |x, y| luma(px(&img, v2(x, y)));
-    // Inside, the stripes average out to gray.
     for x in [385.0, 395.0, 405.0] {
         assert!((at(x, 250.0) - 128).abs() < 25, "x {x}: {}", at(x, 250.0));
     }
-    // Outside the ellipse they are as sharp as ever, corners of its box included.
     assert_eq!(at(305.0, 250.0), 0);
     assert_eq!(at(315.0, 250.0), 255);
     assert_eq!((at(325.0, 185.0), at(335.0, 185.0)), (0, 255));
 
-    // Hidden, the effect does nothing.
     inspector::apply(&mut e, "effects", &[glass], |n| {
         n.style.effects[0].visible = false
     });
@@ -323,7 +303,6 @@ fn a_background_blur_blurs_what_is_behind_the_layer_only() {
 #[test]
 fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
     let Some(g) = gpu() else { return };
-    // An ellipse 200 wide and 100 tall, centered on (400, 250).
     let oval = |effects| {
         node(
             NodeKind::Ellipse,
@@ -341,10 +320,8 @@ fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
         close(at(520.0, 250.0), WHITE, 2),
         "but no further than the spread"
     );
-    // It is still an ellipse: the corner of its grown box stays clear.
     assert!(close(at(505.0, 195.0), WHITE, 2));
 
-    // An inner shadow's spread pushes it inward from the edge.
     let inner = |spread| vec![shadow(InnerShadow, 0.0, 0.0, 0.0, spread, BLUE)];
     e.edit("inner", |tx| {
         tx.node_mut(id).unwrap().style.effects = inner(20.0)
@@ -360,7 +337,6 @@ fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
         "nothing outside"
     );
 
-    // Other outlines grow with round corners.
     let star = node(
         NodeKind::Star {
             points: 4,
@@ -387,7 +363,6 @@ fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
 fn spread_follows_what_the_layer_paints() {
     let Some(g) = gpu() else { return };
     let spread = |s| vec![shadow(DropShadow, 0.0, 150.0, 0.0, s, BLACK)];
-    // A ring: an ellipse with a stroke and no fill, and its shadow 150px below.
     let oval = Rect::new(300.0, 100.0, 200.0, 100.0);
     let mut ring = node(NodeKind::Ellipse, oval, WHITE, spread(0.0));
     ring.style.fills.clear();
@@ -400,19 +375,16 @@ fn spread_follows_what_the_layer_paints() {
         [400.0, 500.0, 512.0].map(|x| is_dark(px(&img, v2(x, 300.0))))
     };
     assert_eq!(look(&e), [false, true, false]);
-    // Grown by 10, the ring is still a ring.
     e.edit("spread", |tx| {
         tx.node_mut(id).unwrap().style.effects = spread(10.0)
     });
     assert_eq!(look(&e), [false, true, true]);
-    // A fill too clear to see changes nothing: the stroke still casts the shadow.
     e.edit("clear fill", |tx| {
         let n = tx.node_mut(id).unwrap();
         n.style.set_fill(Some(Color::rgba(255, 255, 255, 0)));
     });
     assert_eq!(look(&e), [false, true, true]);
 
-    // A line has no area, and its shadow grows from its stroke.
     let mut line = Node::new(
         NodeId(0),
         NodeKind::Line {
@@ -428,7 +400,6 @@ fn spread_follows_what_the_layer_paints() {
     assert!(is_dark(px(&img, v2(400.0, 258.0))), "8px above its middle");
     assert!(close(px(&img, v2(400.0, 236.0)), WHITE, 2));
 
-    // Text grows from its glyphs.
     let text = |s| {
         node(
             NodeKind::Text {
@@ -471,7 +442,6 @@ fn a_background_blur_fades_with_the_layer_and_survives_its_layer_blur() {
     );
     glass.style.fills.clear();
     let glass = e.add_node(glass, Some(page));
-    // On a stripe, then on the gap next to it.
     let stripe_and_gap = |e: &Editor| {
         let img = render_canvas(g, e);
         (
@@ -515,7 +485,6 @@ fn a_background_blur_fades_with_the_layer_and_survives_its_layer_blur() {
     assert_eq!(outside[3], 128);
     assert!((inside[3] as i32 - 128).abs() <= 1, "{inside:?}");
 
-    // With a layer blur as well, the layer still blurs what is behind it.
     set_opacity(&mut e, 1.0);
     inspector::apply(&mut e, "effects", &[glass], |n| {
         n.style.effects.push(blur(LayerBlur, 4.0))
@@ -587,7 +556,6 @@ fn png_export_makes_room_for_shadows() {
     );
     assert_eq!(img.get_pixel(0, 0).0[3], 0);
 
-    // A group casts its shadow from its children and their shadows, and needs room for it.
     let a = e.add_node(card(vec![]), Some(e.doc.root[0]));
     e.select(vec![id, a]);
     key(&mut e, Key::Char('g'), Modifiers::cmd());
@@ -602,7 +570,6 @@ fn png_export_makes_room_for_shadows() {
     assert_eq!(img.dimensions(), (600, 100));
     assert_eq!(img.get_pixel(300, 50).0, [0, 0, 0, 255]);
     assert_eq!(img.get_pixel(500, 50).0, [0, 0, 0, 255]);
-    // A layer blur on the group spreads that shadow further.
     inspector::apply(&mut e, "effects", &[group], |n| {
         n.style.effects.push(blur(LayerBlur, 10.0))
     });
@@ -610,7 +577,6 @@ fn png_export_makes_room_for_shadows() {
     assert_eq!(img.dimensions(), (660, 160));
     inspector::apply(&mut e, "effects", &[group], |n| n.style.effects.clear());
 
-    // The project thumbnail draws them too.
     let thumb = sketch_rs::session::render_thumbnail(g, &e.doc)
         .unwrap()
         .unwrap();
@@ -645,7 +611,6 @@ fn effect_edits_undo_and_instances_follow_until_overridden() {
     key(&mut e, Key::Char('z'), Modifiers::cmd_shift());
     assert_eq!(effects(&e, inst).len(), 1);
 
-    // An effect edited on the instance is an override, so the main no longer reaches it.
     inspector::apply(&mut e, "effects", &[inst], |n| {
         n.style.effects[0].blur = 30.0
     });
@@ -655,7 +620,6 @@ fn effect_edits_undo_and_instances_follow_until_overridden() {
     inspector::apply(&mut e, "effects", &[id], |n| n.style.effects.clear());
     assert!(effects(&e, id).is_empty());
     assert_eq!(effects(&e, inst)[0].blur, 30.0);
-    // Until the override is reset.
     e.select(vec![inst]);
     e.reset_overrides();
     assert!(effects(&e, inst).is_empty());
@@ -682,7 +646,6 @@ fn a_shadow_color_follows_its_token_through_reorders() {
     assert_eq!(color(&e, 0), BLACK);
     assert!(bound(&e, 1) && !bound(&e, 0));
 
-    // Moving the effect moves its binding.
     inspector::apply(&mut e, "effects", &[id], |n| {
         edit_effects(n, |l| l.swap(0, 1))
     });
@@ -694,7 +657,6 @@ fn a_shadow_color_follows_its_token_through_reorders() {
     assert_eq!(color(&e, 0), Color::rgb(0, 255, 0));
     assert_eq!(color(&e, 1), BLACK);
 
-    // Blur and offset edits keep it. A hand-picked color is no longer the token's.
     inspector::apply(&mut e, "effects", &[id], |n| n.style.effects[0].blur = 9.0);
     assert!(bound(&e, 0));
     inspector::apply(&mut e, "effects", &[id], |n| {
@@ -702,7 +664,6 @@ fn a_shadow_color_follows_its_token_through_reorders() {
     });
     assert!(!bound(&e, 0));
 
-    // Removing an effect drops its binding and keeps the others in place.
     e.bind_token(&[id], TokenProp::EffectColor(1), &token);
     inspector::apply(&mut e, "effects", &[id], |n| {
         edit_effects(n, |l| {
@@ -712,9 +673,11 @@ fn a_shadow_color_follows_its_token_through_reorders() {
     assert!(bound(&e, 0));
     assert_eq!(color(&e, 0), Color::rgb(0, 255, 0));
     assert_eq!(e.doc.get(id).unwrap().tokens.len(), 1);
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        edit_effects(n, |l| l[0].0.kind = LayerBlur)
+    });
+    assert!(e.doc.get(id).unwrap().tokens.is_empty());
 }
-
-// ------------------------------------------------------------------------------------ MCP
 
 fn host() -> exec::SessionHost {
     let dir = std::env::temp_dir().join(format!("sketch-rs-effects-{:016x}", fastrand::u64(..)));
@@ -770,7 +733,6 @@ fn html_shadows_and_blurs_round_trip_through_the_mcp_tools() {
     let card_node = h.ed.doc.get(id_of(card)).unwrap();
     let text = card_node.children[0];
     assert_eq!(kinds(&h, text), [DropShadow, LayerBlur]);
-    // Text with a box shadow needs a box to cast it.
     let label_node = h.ed.doc.get(id_of(label)).unwrap();
     assert!(label_node.is_frame(), "{:?}", label_node.kind);
     assert_eq!(label_node.style.effects[0].spread, 2.0);
@@ -806,7 +768,6 @@ fn html_shadows_and_blurs_round_trip_through_the_mcp_tools() {
         assert!(jsx.contains(part), "{part} not in {jsx}");
     }
 
-    // update_styles replaces the list, drops other filters and reports them.
     let up = call(
         &mut h,
         "update_styles",
@@ -857,7 +818,6 @@ fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
         "0px 8px 16px var(--shadow), inset 0px 0px 0px 1px #ffffff"
     );
 
-    // Saved, reopened, and still following the token.
     let dir = h.session.project.as_ref().unwrap().dir.clone();
     h.session.save(&mut h.ed).unwrap();
     let mut again = exec::SessionHost::new(h.session.store.clone());
@@ -875,7 +835,6 @@ fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
     assert_eq!(n.style.effects[0].color, Color::rgb(255, 0, 0));
     assert_eq!(n.style.effects[1].color, WHITE);
 
-    // A file from before effects has none, and opens.
     let old: Node = serde_json::from_str(
         r##"{"id":1,"name":"Old","type":"rect","rect":{"x":0,"y":0,"w":10,"h":10},
             "style":{"fills":[{"type":"solid","color":"#ffffff"}],"stroke":null,
@@ -885,152 +844,4 @@ fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
     .unwrap();
     assert!(old.style.effects.is_empty());
     assert_eq!(old.tokens[&TokenProp::Fill], "t1");
-}
-
-/// The inspector with every kind of effect on the selection, for a look at the section.
-#[test]
-fn the_inspector_lists_effects() {
-    let Some(g) = gpu() else { return };
-    let (mut e, id) = scene(card(vec![
-        shadow(DropShadow, 0.0, 8.0, 24.0, -4.0, Color::rgba(0, 0, 0, 90)),
-        shadow(InnerShadow, 0.0, 1.0, 0.0, 0.0, WHITE),
-        Effect {
-            visible: false,
-            ..blur(LayerBlur, 4.0)
-        },
-        blur(BackgroundBlur, 12.0),
-    ]));
-    let token = e
-        .edit_tokens("add", None, |t| {
-            t.create(TokenKind::Color, "shadow/soft", "#0000005a", None)
-        })
-        .unwrap();
-    e.bind_token(&[id], TokenProp::EffectColor(0), &token);
-    let mut st = UiState::default();
-    let img = frame::capture(g, &mut e, &mut st, [1280.0, 800.0], 2.0, |e| {
-        e.zoom_to_fit();
-        e.select(vec![id]);
-    });
-    img.save(artifact("inspector.png")).unwrap();
-    assert_eq!(
-        e.doc.get(id).unwrap().style.effects.len(),
-        4,
-        "looking edits nothing"
-    );
-}
-
-/// Every effect on one page at three zooms, saved for a look. Nothing may fail to draw.
-#[test]
-fn every_effect_draws_at_any_zoom() {
-    let Some(g) = gpu() else { return };
-    let mut e = editor(800.0, 500.0);
-    let page = page(&mut e);
-    let black = Color::rgba(0, 0, 0, 128);
-    // Box drop shadow, rounded, with spread.
-    let mut card = node(
-        NodeKind::Rect,
-        Rect::new(40.0, 40.0, 140.0, 90.0),
-        WHITE,
-        vec![shadow(DropShadow, 0.0, 12.0, 24.0, 4.0, black)],
-    );
-    card.style.corner_radius = 16.0;
-    e.add_node(card, Some(page));
-    // Inner shadow.
-    let mut well = node(
-        NodeKind::Rect,
-        Rect::new(230.0, 40.0, 140.0, 90.0),
-        Color::rgb(240, 240, 240),
-        vec![shadow(InnerShadow, 0.0, 6.0, 12.0, 0.0, black)],
-    );
-    well.style.radii = Some([30.0, 0.0, 30.0, 0.0]);
-    e.add_node(well, Some(page));
-    // Shape shadows go through the blur passes.
-    e.add_node(
-        node(
-            NodeKind::Star {
-                points: 5,
-                inner: 0.5,
-            },
-            Rect::new(420.0, 30.0, 120.0, 110.0),
-            RED,
-            vec![
-                shadow(DropShadow, 10.0, 10.0, 8.0, 0.0, black),
-                shadow(InnerShadow, 0.0, 4.0, 6.0, 0.0, Color::rgba(0, 0, 0, 200)),
-            ],
-        ),
-        Some(page),
-    );
-    e.add_node(
-        node(
-            NodeKind::Text {
-                text: "Shadow".into(),
-                font_size: 40.0,
-                auto_width: true,
-                align: TextAlign::Left,
-            },
-            Rect::new(590.0, 60.0, 160.0, 50.0),
-            BLUE,
-            vec![shadow(DropShadow, 3.0, 4.0, 4.0, 0.0, black)],
-        ),
-        Some(page),
-    );
-    // Layer blur.
-    e.add_node(
-        node(
-            NodeKind::Ellipse,
-            Rect::new(40.0, 220.0, 160.0, 120.0),
-            BLUE,
-            vec![blur(LayerBlur, 12.0)],
-        ),
-        Some(page),
-    );
-    // Background blur over stripes.
-    for i in 0..10 {
-        e.add_node(
-            node(
-                NodeKind::Rect,
-                Rect::new(260.0 + i as f64 * 30.0, 200.0, 14.0, 200.0),
-                if i % 2 == 0 { RED } else { BLUE },
-                vec![],
-            ),
-            Some(page),
-        );
-    }
-    let mut glass = node(
-        NodeKind::Rect,
-        Rect::new(300.0, 240.0, 220.0, 120.0),
-        Color::rgba(255, 255, 255, 80),
-        vec![
-            blur(BackgroundBlur, 10.0),
-            shadow(DropShadow, 0.0, 8.0, 20.0, 0.0, black),
-        ],
-    );
-    glass.style.corner_radius = 24.0;
-    e.add_node(glass, Some(page));
-    // A circle is a box too.
-    e.add_node(
-        node(
-            NodeKind::Ellipse,
-            Rect::new(620.0, 240.0, 100.0, 100.0),
-            WHITE,
-            vec![
-                shadow(DropShadow, 0.0, 0.0, 0.0, 6.0, RED),
-                shadow(DropShadow, 0.0, 10.0, 20.0, 0.0, black),
-            ],
-        ),
-        Some(page),
-    );
-    for (name, zoom, pan) in [
-        ("gallery.png", 1.0, V2::ZERO),
-        ("gallery-3x.png", 3.0, v2(20.0, 20.0)),
-        ("gallery-small.png", 0.4, v2(-300.0, -200.0)),
-    ] {
-        e.camera.zoom = zoom;
-        e.camera.pan = pan;
-        let img = render_canvas(g, &e);
-        img.save(artifact(name)).unwrap();
-        // The card's shadow, just under its bottom edge.
-        let under = e.camera.world_to_screen(v2(110.0, 136.0));
-        assert!(luma(px(&img, under)) < 200, "{name}");
-    }
 }

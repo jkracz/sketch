@@ -106,8 +106,6 @@ fn ten_thousand_elements_cache_and_pan_without_rework() {
     assert_eq!(r.uploads, 1, "panning reuses the uploaded geometry");
 }
 
-/// Every layer with an effect is the costly case. Box shadows ride in the main pass, so they
-/// add none. Shape shadows and layer blurs share atlas pages, at three passes a page.
 #[test]
 fn effects_on_a_large_file_keep_their_cost_bounded() {
     use sketch_rs::model::{Effect, EffectKind};
@@ -173,14 +171,11 @@ fn effects_on_a_large_file_keep_their_cost_bounded() {
 
     let plain = measure("10k layers, no effects", with_effect(None, any), None);
     assert_eq!(plain, 1);
-    // 2,500 box shadows, all in view.
     let boxes = measure("2.5k box shadows", with_effect(Some(shadow), rect), None);
     assert_eq!(boxes, 1, "box shadows need no pass of their own");
-    // 2,500 shape shadows, all in view. They share one atlas page, so it is the canvas pass
-    // plus one to draw the page and two to blur it.
+    // One canvas pass plus three shared atlas passes.
     let stars = with_effect(Some(shadow), star);
     assert_eq!(measure("2.5k shape shadows", stars, None), 4);
-    // Up close fewer are in view and each is bigger.
     let stars = with_effect(Some(shadow), star);
     let near = measure("shape shadows at 400%", stars, Some(4.0));
     assert!(near <= 7, "{near}");
