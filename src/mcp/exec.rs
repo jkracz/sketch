@@ -4303,9 +4303,6 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
                     let before = n.clone();
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
-                    for k in edited_overrides(&before, &n) {
-                        mark_override(&mut n, k);
-                    }
                     if mode.is_some() && !frame {
                         applied.ignored.push("mode".into());
                     }
@@ -4330,6 +4327,9 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         if let Some(b) = applied.bottom {
                             n.rect.y = ps.1 - n.rect.h - b;
                         }
+                    }
+                    for k in edited_overrides(&before, &n) {
+                        mark_override(&mut n, k);
                     }
                     let new = n.rect;
                     let keep_h =

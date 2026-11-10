@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use sketch_rs::mcp::{Out, exec};
-use sketch_rs::model::{Color, NodeId, NodeKind, TokenProp};
+use sketch_rs::model::{Color, NodeId, NodeKind, Paint, TokenProp};
 use sketch_rs::project::Store;
 
 fn store() -> Store {
@@ -473,7 +473,18 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
         "update_styles",
         json!({"updates": [{"nodeIds": [inst[0]["textLayers"][0]["id"]], "styles": {"width": "40px"}}]}),
     );
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [inst[1]["id"]], "styles": {"backgroundImage": format!("url({png})")}}]}),
+    );
     call(&mut h, "get_basic_info", json!({}));
+    let fills = &h.ed.doc.get(wide).unwrap().style.fills;
+    assert!(
+        fills.iter().any(|p| matches!(p, Paint::Image { .. })),
+        "{fills:?}"
+    );
     assert!(!h.ed.doc.get(hidden).unwrap().visible);
     let o = h.ed.doc.get(other).unwrap();
     assert_eq!(o.kind.font_size(), Some(24.0));
