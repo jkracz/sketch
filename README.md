@@ -181,7 +181,8 @@ borders, radii, opacity and blend modes; `<img>` takes local paths or `data:` UR
 is imported as vectors. `update_styles` takes the same CSS as JSON, plus the hand-drawn keys
 `sketch`, `roughness`, `fillStyle`, `strokeStyle`. A style that is exactly `var(--token)` binds
 the property to that design token. `class="heading-l"` in `write_html`, or `textStyle` in
-`update_styles`, applies a text style. Node ids look like `3fa9c1:14` (page and
+`update_styles`, applies a text style. `data-theme="dark"` on a frame in `write_html`, or
+`mode` in `update_styles`, picks a token mode. Node ids look like `3fa9c1:14` (page and
 node); `pageId` lets an agent work on another page without switching the user's view.
 
 ## Tests
@@ -256,6 +257,18 @@ Typing a plain value into a bound property, or choosing **Detach**, unlinks it a
 value. Deleting a token leaves the layers looking the same. Token edits undo on the page they
 were made on.
 
+#### Modes
+
+Tokens can have a value per mode. New files have Light and Dark, and the Tokens tab shows a
+column for each. A token with one value uses it in every mode, and an alias takes its
+target's value in the same mode. Click a mode's name to rename or remove it, and add one from
+the **⋯** menu. Files saved before modes existed open with one.
+
+A frame picks a mode in the Layer section of the Design panel, and the layers inside it show
+their tokens' values for that mode. **Auto** follows the frame it sits in. CSS output puts the
+first mode in `:root` and each other mode in a `[data-theme="dark"]` block with the tokens
+that differ.
+
 #### Text styles
 
 A text style names a set of text settings, like `Heading/L`: family, size, weight, italic,
@@ -274,7 +287,8 @@ one undo step. Deleting a style leaves the layers looking the same.
 A project can publish its tokens and text styles as a design system that other projects use. In the Tokens
 tab's **⋯** menu, **Publish as design system** sets a name, a CSS prefix, a description and
 usage notes. The dialog lists what will change before you publish. **Use design system**
-adds another project's system. Its tokens show under their own heading, read-only, named
+adds another project's system, with its modes: a frame's mode applies to the system's tokens
+by name, and the system's other modes join the list a frame picks from. Its tokens show under their own heading, read-only, named
 with the prefix (`--brand-primary`), and bind like any token. To customize one, alias it
 from a local token, or **Detach** the system to make its tokens local. Its text styles work
 the same way, with prefixed classes (`brand-heading-l`).

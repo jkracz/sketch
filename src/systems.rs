@@ -7,7 +7,9 @@
 
 use crate::editor::Editor;
 use crate::model::{
-    SystemLink, TextStyleDef, Token, TokenSet, text_styles::style_slug, tokens::css_slug,
+    Mode, SystemLink, TextStyleDef, Token, TokenSet,
+    text_styles::style_slug,
+    tokens::{css_slug, linked_id},
 };
 use crate::project::{Store, new_id, now_ms};
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,10 @@ pub struct Published {
     /// Local text styles, flattened the same way (`TokenSet::publishable_styles`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_styles: Vec<TextStyleDef>,
+    /// The source's modes. Tokens key their other values by these ids. Empty for a system
+    /// published before modes existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<Mode>,
 }
 
 impl Published {
@@ -56,6 +62,12 @@ impl Published {
             release: self.release,
             description: self.description.clone(),
             notes: self.notes.clone(),
+            modes: (self.modes.iter())
+                .map(|m| Mode {
+                    id: linked_id(&self.id, &m.id),
+                    name: m.name.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -355,6 +367,7 @@ pub fn publish(
         published: now_ms(),
         tokens,
         text_styles,
+        modes: ed.tokens.modes().to_vec(),
     };
     let report = report(store, old.as_ref(), system);
     reg.save(&report.system).map_err(|e| e.to_string())?;
@@ -456,6 +469,7 @@ pub fn has_unpublished_changes(store: &Store, ed: &Editor) -> bool {
         Some(p) => {
             p.tokens != ed.tokens.publishable()
                 || p.text_styles != ed.tokens.publishable_styles()
+                || p.modes != ed.tokens.modes()
                 || p.link() != *l
         }
         None => true,
@@ -878,6 +892,7 @@ mod tests {
             published: 0,
             tokens: a.publishable(),
             text_styles: Vec::new(),
+            modes: Vec::new(),
         };
         let mut used = TokenSet::default();
         used.attach(p.link(), &p.tokens, &[]).unwrap();

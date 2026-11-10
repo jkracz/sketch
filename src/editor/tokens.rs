@@ -1,5 +1,6 @@
 //! Design tokens in the editor: undoable token edits, binding node properties to tokens, and
-//! keeping bound properties and text styles on every page in step with their tokens.
+//! keeping bound properties and text styles on every page in step with their tokens, each
+//! layer in the mode its frame picks.
 
 use super::Editor;
 use crate::history::Recording;
@@ -32,25 +33,30 @@ impl Editor {
     /// Bind `prop` of these layers to a token and take on its value. Layers without the
     /// property are skipped.
     pub fn bind_token(&mut self, ids: &[NodeId], prop: TokenProp, token: &str) {
-        let Some(value) = self.tokens.resolve(token) else {
-            return;
-        };
-        let targets: Vec<NodeId> = ids
+        let targets: Vec<(NodeId, crate::model::TokenValue)> = ids
             .iter()
             .copied()
             .filter(|id| self.doc.get(*id).is_some_and(|n| prop.applies_to(n)))
+            .filter_map(|id| {
+                let mode = self.tokens.mode_at(&self.doc, id);
+                Some((id, self.tokens.resolve_in(token, mode)?))
+            })
             .collect();
+        if targets.is_empty() {
+            return;
+        }
         let field = prop.field();
         self.begin(&format!("Apply token to {field}"));
         {
             let mut tx = self.tx();
-            for id in &targets {
+            for (id, value) in &targets {
                 if let Some(n) = tx.node_mut(*id) {
-                    prop.write(n, &value);
+                    prop.write(n, value);
                     n.tokens.insert(prop, token.to_string());
                 }
             }
         }
+        let targets: Vec<NodeId> = targets.into_iter().map(|(id, _)| id).collect();
         self.mark_overrides(&targets, field);
         for id in &targets {
             self.fit_text(*id);
@@ -82,6 +88,10 @@ impl Editor {
     /// End-of-transaction check: a bound property that no longer shows its token was edited
     /// by hand, so it is now a plain value. Runs for every edit path. Bindings to tokens that
     /// don't exist (deleted, or pasted from another project) go too.
+    ///
+    /// A value the token has in any mode counts as its own: a layer moved into a frame with
+    /// another mode, or synced from a main component in one, still holds the old mode's
+    /// value until [`Editor::resync_modes`] writes the new one.
     pub(super) fn drop_broken_bindings(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut broken: Vec<(NodeId, TokenProp)> = Vec::new();
@@ -92,8 +102,9 @@ impl Editor {
                     .tokens
                     .get(token)
                     .filter(|t| t.kind == prop.kind())
-                    .and_then(|t| self.tokens.resolve(&t.id))
-                    .is_some_and(|v| prop.holds(n, &v));
+                    .is_some_and(|t| {
+                        (self.tokens.resolve_any(&t.id).iter()).any(|v| prop.holds(n, v))
+                    });
                 if !kept {
                     broken.push((*id, *prop));
                 }
@@ -116,16 +127,9 @@ impl Editor {
             return;
         }
         for i in 0..self.pages.len() {
-            let tokens = &self.tokens;
-            let stale: Vec<NodeId> = self
-                .page_doc(i)
-                .nodes
-                .values()
-                .filter(|n| {
-                    n.tokens.iter().any(|(prop, token)| {
-                        tokens.resolve(token).is_some_and(|v| !prop.holds(n, &v))
-                    }) || self.style_is_stale(n)
-                })
+            let doc = self.page_doc(i);
+            let stale: Vec<NodeId> = (doc.nodes.values())
+                .filter(|n| self.is_stale(doc, n))
                 .map(|n| n.id)
                 .collect();
             if stale.is_empty() {
@@ -136,27 +140,100 @@ impl Editor {
         }
     }
 
+    /// Whether a bound field or text style field of `n` doesn't show its value in `n`'s mode.
+    fn is_stale(&self, doc: &crate::model::Document, n: &Node) -> bool {
+        if n.tokens.is_empty() && n.text_style_ref.is_none() {
+            return false;
+        }
+        let mode = self.tokens.mode_at(doc, n.id);
+        n.tokens.iter().any(|(prop, token)| {
+            (self.tokens.resolve_in(token, mode)).is_some_and(|v| !prop.holds(n, &v))
+        }) || self.style_is_stale(n, mode)
+    }
+
     fn write_token_values(&mut self, ids: &[NodeId]) {
         self.commit();
         self.rec = Some((Recording::new("Sync tokens", &self.doc), None));
+        self.write_values(ids);
+        self.fixup();
+        self.rec = None;
+    }
+
+    /// Write bound fields and text style fields of `ids` in each layer's mode, in the open
+    /// transaction.
+    fn write_values(&mut self, ids: &[NodeId]) {
         let tokens = self.tokens.clone();
+        let modes: Vec<Option<String>> = (ids.iter())
+            .map(|id| tokens.mode_at(&self.doc, *id).map(String::from))
+            .collect();
         {
             let mut tx = self.tx();
-            for id in ids {
+            for (id, mode) in ids.iter().zip(&modes) {
+                let mode = mode.as_deref();
                 let Some(n) = tx.node_mut(*id) else { continue };
                 for (prop, token) in n.tokens.clone() {
-                    if let Some(v) = tokens.resolve(&token) {
+                    if let Some(v) = tokens.resolve_in(&token, mode) {
                         prop.write(n, &v);
                     }
                 }
-                Self::write_style_values(&tokens, n);
+                Self::write_style_values(&tokens, n, mode);
             }
         }
         for id in ids {
             self.fit_text(*id);
         }
-        self.fixup();
-        self.rec = None;
+    }
+
+    /// Inside a transaction: layers whose mode may have changed (touched ones and everything
+    /// under them) take their tokens' values in their mode now. Returns the layers it wrote.
+    pub(super) fn resync_modes(&mut self) -> Vec<NodeId> {
+        let Some((rec, _)) = &self.rec else {
+            return Vec::new();
+        };
+        if self.tokens.is_blank() {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let stale: Vec<NodeId> = (rec.touched().iter())
+            .filter(|id| self.doc.nodes.contains_key(id))
+            .flat_map(|id| self.doc.subtree(*id))
+            .filter(|id| seen.insert(*id))
+            .filter(|id| {
+                self.doc
+                    .get(*id)
+                    .is_some_and(|n| self.is_stale(&self.doc, n))
+            })
+            .collect();
+        if !stale.is_empty() {
+            self.write_values(&stale);
+        }
+        stale
+    }
+
+    /// Show these frames, and what they hold, in a mode (a `TokenSet::choices` id), or in
+    /// their parent's with None. Other layers are skipped.
+    pub fn set_frame_mode(&mut self, ids: &[NodeId], mode: Option<&str>) {
+        let frames: Vec<NodeId> = (ids.iter().copied())
+            .filter(|id| {
+                self.doc
+                    .get(*id)
+                    .is_some_and(|n| matches!(n.kind, crate::model::NodeKind::Frame { .. }))
+            })
+            .collect();
+        if frames.is_empty() {
+            return;
+        }
+        self.begin("Set mode");
+        {
+            let mut tx = self.tx();
+            for id in &frames {
+                if let Some(n) = tx.node_mut(*id) {
+                    n.mode = mode.map(String::from);
+                }
+            }
+        }
+        self.mark_overrides(&frames, "mode");
+        self.commit();
     }
 
     /// Copy tokens to the in-app clipboard, which survives switching projects.
@@ -463,6 +540,59 @@ mod tests {
                 .insert(TokenProp::Fill, "from-elsewhere".into());
         });
         assert!(e.doc.get(id).unwrap().tokens.is_empty());
+    }
+
+    /// A frame in Dark mode, and a rect at the root, both bound to `bg` (white, black in
+    /// Dark).
+    fn themed() -> (Editor, NodeId, NodeId, String) {
+        let (mut e, rect, _) = editor_with_rect();
+        let dark = vec![("dark".to_string(), "#000000".to_string())];
+        let bg = e
+            .edit_tokens("add", None, |t| {
+                t.create_in_modes(TokenKind::Color, "bg", "#ffffff", &dark, None)
+            })
+            .unwrap();
+        let frame = e.edit("add", |tx| {
+            let id = tx.alloc_id();
+            let r = Rect::new(100.0, 0.0, 50.0, 50.0);
+            tx.insert(Node::new(id, NodeKind::Frame { clip: true }, r), None, None)
+        });
+        e.set_frame_mode(&[frame], Some("dark"));
+        e.bind_token(&[rect, frame], TokenProp::Fill, &bg);
+        (e, frame, rect, bg)
+    }
+
+    #[test]
+    fn layers_show_their_frames_mode() {
+        let (mut e, frame, rect, bg) = themed();
+        assert_eq!(fill(&e, frame), Some(Color::BLACK));
+        assert_eq!(fill(&e, rect), Some(Color::WHITE));
+        e.edit_tokens("edit", None, |t| {
+            t.update_in_mode(&bg, "dark", Some("#0000ff"))
+        })
+        .unwrap();
+        assert_eq!(fill(&e, frame), Some(BLUE));
+        assert_eq!(fill(&e, rect), Some(Color::WHITE));
+        e.set_frame_mode(&[frame], None);
+        assert_eq!(fill(&e, frame), Some(Color::WHITE));
+        e.undo();
+        assert_eq!(fill(&e, frame), Some(BLUE));
+    }
+
+    #[test]
+    fn a_layer_moved_into_a_dark_frame_takes_the_dark_value() {
+        let (mut e, frame, rect, _) = themed();
+        e.edit("move", |tx| tx.reparent(rect, Some(frame), None));
+        assert_eq!(fill(&e, rect), Some(Color::BLACK));
+        assert!(
+            e.doc
+                .get(rect)
+                .unwrap()
+                .tokens
+                .contains_key(&TokenProp::Fill)
+        );
+        e.undo();
+        assert_eq!(fill(&e, rect), Some(Color::WHITE));
     }
 
     #[test]

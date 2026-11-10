@@ -51,7 +51,8 @@ impl Session {
             .tokens
             .clone()
             .with_systems(p.manifest.systems.clone())
-            .with_styles(p.manifest.text_styles.clone());
+            .with_styles(p.manifest.text_styles.clone())
+            .with_modes(p.manifest.modes.clone());
         ed.published = p.manifest.published.clone();
         // Freshly loaded pages are saved by definition.
         for i in 0..ed.pages.len() {
@@ -157,6 +158,7 @@ impl Session {
         p.manifest.tokens = ed.tokens.clone();
         p.manifest.systems = ed.tokens.systems().to_vec();
         p.manifest.text_styles = ed.tokens.styles().to_vec();
+        p.manifest.modes = ed.tokens.modes().to_vec();
         p.manifest.published = ed.published.clone();
         if wrote {
             p.manifest.modified = now_ms();

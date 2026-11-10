@@ -104,6 +104,15 @@ fn style_fields() -> Map<String, Value> {
     m
 }
 
+fn mode_values() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "null"}]},
+        "description": "Values for the file's other modes by mode name, e.g. {\"Dark\": \"#111111\"}. \
+                        A mode left out uses `value`. Aliases resolve in the same mode.",
+    })
+}
+
 fn token_value() -> Value {
     json!({
         "anyOf": [{"type": "string"}, {"type": "number"}],
@@ -483,6 +492,8 @@ pub fn definitions() -> Vec<Value> {
              clones an existing node.\n\
              - class=\"heading-l\" applies that text style (see get_tokens); inline styles \
              after it override single fields. Text inside the element inherits it.\n\
+             - data-theme=\"dark\" on a frame picks a token mode for it and its children \
+             (see get_tokens); var() takes each token's value in that mode.\n\
              Returns the ids of the created top-level layers and the styles that were ignored.",
             json!({
                 "html": {"type": "string", "description": "HTML to parse into layers."},
@@ -526,7 +537,8 @@ pub fn definitions() -> Vec<Value> {
             "update_styles",
             "Update styles on one or more nodes (camelCase CSS, like React.CSSProperties). Setting \
              left/top on an artboard moves it. textStyle: \"heading-l\" applies a text style to \
-             text layers; keys after it override single fields. Hand-drawn keys: sketch, \
+             text layers; keys after it override single fields. mode: \"Dark\" makes frames and \
+             their children show tokens in that mode (\"inherit\" clears it). Hand-drawn keys: sketch, \
              roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
              ignoredStyles.",
             json!({"updates": {"type": "array", "description": "Each item applies styles to nodeIds.", "items": {
@@ -629,7 +641,9 @@ pub fn definitions() -> Vec<Value> {
              type, and its text styles in short form (`class` and one line of CSS). Tokens and \
              styles belong to the project, so every page shares them. By default only the \
              file's own, plus one line per design system the file uses; pass `system` to list \
-             a design system's.",
+             a design system's. Tokens can have a value per mode (`modes` lists the file's, \
+             the first is the default); a token's `modes` holds only values that differ. CSS \
+             puts other modes in `[data-theme=\"dark\"]` blocks.",
             json!({
                 "system": {"type": "string", "description": "A design system the file uses (id, name or prefix) to list its tokens instead, or \"all\" for every token."},
                 "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
@@ -644,7 +658,8 @@ pub fn definitions() -> Vec<Value> {
             "Creates design tokens. Each entry needs `type`, `name` and `value`; use \
              `var(--other-token)` as the value to alias a token of the same type. Returns one \
              result per entry, in order, with errors reported per entry. Creating a token that \
-             already exists with the same type, name and value returns it. Define color tokens \
+             already exists with the same type, name and value returns it. `value` is the first \
+             mode's; `modes` gives others, like {\"Dark\": \"#111111\"}. Define color tokens \
              semantically first, neutrals before accents; order other types smallest first. \
              Reuse tokens before adding new ones.",
             json!({"tokens": {"type": "array", "minItems": 1, "description": "Tokens to create.", "items": {
@@ -653,6 +668,7 @@ pub fn definitions() -> Vec<Value> {
                     "type": token_type(),
                     "name": {"type": "string", "description": "CSS custom property name, e.g. \"--color-primary\"."},
                     "value": token_value(),
+                    "modes": mode_values(),
                     "description": {"type": "string", "maxLength": 1024, "description": "What the token is for and how to use it."},
                 },
                 "required": ["type", "name", "value"],
@@ -664,6 +680,7 @@ pub fn definitions() -> Vec<Value> {
             "set_tokens",
             "Updates or deletes design tokens by CSS variable name, applied in order. Set \
              `newName` to rename, `value` to change the value (`var(--other)` aliases), \
+             `modes` to change other modes' values (null makes a mode use `value`), \
              `delete: true` to delete. Changing a value updates every layer bound to the token, \
              on all pages. Deleting keeps those layers' current values. Results are per entry.",
             json!({"tokens": {"type": "array", "minItems": 1, "description": "Changes to apply.", "items": {
@@ -672,6 +689,7 @@ pub fn definitions() -> Vec<Value> {
                     "name": {"type": "string", "description": "The token's CSS variable name, e.g. \"--color-primary\"."},
                     "newName": {"type": "string", "description": "New CSS variable name."},
                     "value": token_value(),
+                    "modes": mode_values(),
                     "description": {"type": "string", "maxLength": 1024, "description": "New description. An empty string clears it."},
                     "delete": {"type": "boolean", "description": "Delete the token."},
                 },

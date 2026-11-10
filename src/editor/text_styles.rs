@@ -70,6 +70,7 @@ impl Editor {
     }
 
     /// Run after `drop_broken_bindings` so only surviving token bindings become overrides.
+    /// Like there, a value the style has in any mode is the style's.
     pub(super) fn check_text_style_refs(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut changes: Vec<(NodeId, Option<TextStyleRef>)> = Vec::new();
@@ -81,13 +82,16 @@ impl Editor {
                 changes.push((*id, None));
                 continue;
             }
-            let Some(style) = self.tokens.resolve_style(&r.id) else {
+            let styles: Vec<_> = (self.tokens.choices().iter())
+                .filter_map(|m| self.tokens.resolve_style_in(&r.id, Some(&m.name)))
+                .collect();
+            if styles.is_empty() {
                 continue;
-            };
+            }
             let mut next = r.clone();
             for f in StyleField::ALL {
                 let token_owned = f.prop().is_some_and(|p| n.tokens.contains_key(&p));
-                if token_owned || !style.holds(f, n) {
+                if token_owned || !styles.iter().any(|s| s.holds(f, n)) {
                     next.overrides.insert(f);
                 }
             }
@@ -106,11 +110,11 @@ impl Editor {
         }
     }
 
-    pub(super) fn style_is_stale(&self, n: &Node) -> bool {
+    pub(super) fn style_is_stale(&self, n: &Node, mode: Option<&str>) -> bool {
         let Some(r) = &n.text_style_ref else {
             return false;
         };
-        let Some(style) = self.tokens.resolve_style(&r.id) else {
+        let Some(style) = self.tokens.resolve_style_in(&r.id, mode) else {
             return false;
         };
         StyleField::ALL
@@ -118,9 +122,13 @@ impl Editor {
             .any(|f| !r.overrides.contains(&f) && !style.holds(f, n))
     }
 
-    pub(super) fn write_style_values(tokens: &crate::model::TokenSet, n: &mut Node) {
+    pub(super) fn write_style_values(
+        tokens: &crate::model::TokenSet,
+        n: &mut Node,
+        mode: Option<&str>,
+    ) {
         let Some(r) = &n.text_style_ref else { return };
-        let Some(style) = tokens.resolve_style(&r.id) else {
+        let Some(style) = tokens.resolve_style_in(&r.id, mode) else {
             return;
         };
         let overrides = r.overrides.clone();

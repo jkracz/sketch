@@ -6,7 +6,7 @@
 //! unit-testable on its own.
 
 use crate::geom::Camera;
-use crate::model::{Document, Node, NodeId, SystemLink, TextStyleDef, TokenSet};
+use crate::model::{Document, Mode, Node, NodeId, SystemLink, TextStyleDef, TokenSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -88,6 +88,9 @@ pub struct Manifest {
     /// Text styles, local ones and those of the design systems it uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_styles: Vec<TextStyleDef>,
+    /// Token modes. A file saved before modes existed opens with one.
+    #[serde(default = "Mode::single")]
+    pub modes: Vec<Mode>,
     /// The design system this project last published, so the next publish keeps its id and
     /// prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +116,7 @@ impl Manifest {
             tokens: TokenSet::default(),
             systems: Vec::new(),
             text_styles: Vec::new(),
+            modes: Mode::defaults(),
             published: None,
         }
     }
@@ -319,6 +323,16 @@ pub fn new_id() -> String {
 mod tests {
     use super::*;
     use crate::demo;
+
+    #[test]
+    fn manifests_from_before_modes_open_with_one() {
+        let new = Manifest::new("A");
+        assert_eq!(new.modes, Mode::defaults());
+        let mut v: Value = serde_json::from_str(&new.to_json()).unwrap();
+        v.as_object_mut().unwrap().remove("modes");
+        let old = Manifest::from_json(&v.to_string()).unwrap();
+        assert_eq!(old.modes, Mode::single());
+    }
 
     #[test]
     fn page_roundtrip_is_deterministic() {

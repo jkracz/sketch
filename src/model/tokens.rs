@@ -6,12 +6,13 @@
 //! honest: a bound field always holds its token's value. The editor rewrites fields when a
 //! token changes, and drops a binding when a field stops matching (see `editor/tokens.rs`).
 
-use super::node::{Color, Node, NodeKind};
+use super::document::Document;
+use super::node::{Color, Node, NodeId, NodeKind};
 use super::paint::{LetterSpacing, Paint};
 use super::text_styles::TextStyleDef;
 use crate::mcp::css;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Limit on `Token::description`, in characters.
 pub const MAX_DESCRIPTION: usize = 1024;
@@ -117,6 +118,40 @@ pub enum TokenValue {
     Alias(String),
 }
 
+/// A theme such as Light or Dark. A file and each design system have a list of them, and a
+/// frame picks one for itself and its children (`Node::mode`). Modes match across lists by
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mode {
+    pub id: String,
+    pub name: String,
+}
+
+impl Mode {
+    pub(crate) fn new(id: &str, name: &str) -> Mode {
+        Mode {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// The modes a new file starts with.
+    pub fn defaults() -> Vec<Mode> {
+        vec![Mode::new("light", "Light"), Mode::new("dark", "Dark")]
+    }
+
+    /// The one mode a file saved before modes existed opens with.
+    pub fn single() -> Vec<Mode> {
+        vec![Mode::new("light", "Light")]
+    }
+}
+
+impl Keyed for Mode {
+    fn key(&self) -> &str {
+        &self.id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
     pub id: String,
@@ -124,7 +159,11 @@ pub struct Token {
     pub name: String,
     #[serde(rename = "type")]
     pub kind: TokenKind,
+    /// The value in the first mode, and in every mode without one of its own.
     pub value: TokenValue,
+    /// Values for the other modes of the token's file or design system, by mode id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, TokenValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// The design system this token comes from, by id. Such a token is a read-only copy of
@@ -148,6 +187,10 @@ pub struct SystemLink {
     /// How to use the system, in Markdown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// The system's modes, under ids from [`linked_id`]. Empty for one published before
+    /// modes existed, whose tokens have one value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<Mode>,
 }
 
 /// The id a published token gets in a project that uses its system. Ids are only unique per
@@ -226,6 +269,7 @@ pub(super) fn var_name(s: &str) -> Option<&str> {
 /// Tokens copied from the Tokens panel. Pasted tokens are independent of their source.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenClip {
+    /// Their `modes` are keyed by mode name, to match the modes of another project.
     pub tokens: Vec<Token>,
     /// Resolved values of alias targets outside the copied set, keyed by token id.
     resolved: HashMap<String, TokenValue>,
@@ -267,10 +311,11 @@ impl<T: Keyed> Edit<T> {
     }
 }
 
-/// A change to one token, text style or design system link.
+/// A change to one token, mode, text style or design system link.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenEdit {
     Token(Edit<Token>),
+    Mode(Edit<Mode>),
     System(Edit<SystemLink>),
     Style(Box<Edit<TextStyleDef>>),
 }
@@ -279,6 +324,7 @@ impl TokenEdit {
     fn changes(&self) -> bool {
         match self {
             TokenEdit::Token(e) => e.changes(),
+            TokenEdit::Mode(e) => e.changes(),
             TokenEdit::System(e) => e.changes(),
             TokenEdit::Style(e) => e.changes(),
         }
@@ -292,6 +338,10 @@ impl TokenEdit {
                 true
             }
             (TokenEdit::System(a), TokenEdit::System(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            (TokenEdit::Mode(a), TokenEdit::Mode(b)) if a.id == b.id => {
                 a.after = b.after.clone();
                 true
             }
@@ -342,15 +392,28 @@ fn apply_list<'a, T: Keyed + 'a>(
     }
 }
 
-/// The project's tokens and text styles, and the design systems it uses. Vector order is
-/// creation order, and duplicates sit after their source. Only the tokens are serialized
-/// here: the project manifest keeps the system links and styles in fields of their own.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The project's tokens, modes and text styles, and the design systems it uses. Vector order
+/// is creation order, and duplicates sit after their source. Only the tokens are serialized
+/// here: the project manifest keeps the modes, system links and styles in fields of their own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "Vec<Token>", into = "Vec<Token>")]
 pub struct TokenSet {
     pub(super) tokens: Vec<Token>,
+    /// Never empty. The first is the default for layers outside any frame with a mode.
+    pub(super) modes: Vec<Mode>,
     pub(super) systems: Vec<SystemLink>,
     pub(super) styles: Vec<TextStyleDef>,
+}
+
+impl Default for TokenSet {
+    fn default() -> TokenSet {
+        TokenSet {
+            tokens: Vec::new(),
+            modes: Mode::defaults(),
+            systems: Vec::new(),
+            styles: Vec::new(),
+        }
+    }
 }
 
 impl From<Vec<Token>> for TokenSet {
@@ -373,6 +436,158 @@ impl TokenSet {
     pub fn with_systems(mut self, systems: Vec<SystemLink>) -> TokenSet {
         self.systems = systems;
         self
+    }
+
+    /// A token set as a project stores it: modes apart. An empty list keeps the default.
+    pub fn with_modes(mut self, modes: Vec<Mode>) -> TokenSet {
+        if !modes.is_empty() {
+            self.modes = modes;
+        }
+        self
+    }
+
+    /// This file's modes. The first is the default.
+    pub fn modes(&self) -> &[Mode] {
+        &self.modes
+    }
+
+    /// The modes `t` keeps values for: its design system's, or this file's.
+    pub fn modes_of(&self, t: &Token) -> &[Mode] {
+        match &t.system {
+            Some(s) => self.system(s).map_or(&[], |l| &l.modes),
+            None => &self.modes,
+        }
+    }
+
+    /// The modes a frame can pick: this file's, then each design system's that the file has
+    /// no mode of the same name for.
+    pub fn choices(&self) -> Vec<&Mode> {
+        let mut out: Vec<&Mode> = self.modes.iter().collect();
+        for m in self.systems.iter().flat_map(|s| &s.modes) {
+            if !out.iter().any(|o| o.name == m.name) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// The name of the mode a frame's `mode` id picks.
+    pub fn mode_name(&self, id: &str) -> Option<&str> {
+        let all = self
+            .modes
+            .iter()
+            .chain(self.systems.iter().flat_map(|s| &s.modes));
+        all.into_iter()
+            .find(|m| m.id == id)
+            .map(|m| m.name.as_str())
+    }
+
+    /// A mode a frame can pick, by name ignoring case or by its `data-theme` name.
+    pub fn find_choice(&self, name: &str) -> Option<&Mode> {
+        let name = name.trim();
+        let slug = css_slug(name);
+        self.choices()
+            .into_iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name) || css_slug(&m.name) == slug)
+    }
+
+    /// The mode layer `id` shows: that of the nearest frame, itself included, that picks one.
+    /// None is the default mode.
+    pub fn mode_at(&self, doc: &Document, id: NodeId) -> Option<&str> {
+        let mut cur = Some(id);
+        while let Some(n) = cur.and_then(|c| doc.get(c)) {
+            if let Some(name) = n.mode.as_deref().and_then(|m| self.mode_name(m)) {
+                return Some(name);
+            }
+            cur = n.parent;
+        }
+        None
+    }
+
+    fn default_mode(&self) -> &str {
+        self.modes.first().map_or("", |m| m.name.as_str())
+    }
+
+    /// `t`'s own value in the mode named `mode` (None for the default), aliases unfollowed.
+    /// A design system without a mode of that name gives its first value.
+    pub fn value_in<'a>(&self, t: &'a Token, mode: Option<&str>) -> &'a TokenValue {
+        let name = mode.unwrap_or(self.default_mode());
+        self.modes_of(t)
+            .iter()
+            .find(|m| m.name == name)
+            .and_then(|m| t.modes.get(&m.id))
+            .unwrap_or(&t.value)
+    }
+
+    /// Add a mode and return its id: Dark when the file has none, else Mode 3 for the third.
+    pub fn add_mode(&mut self) -> String {
+        let taken = |n: &str| self.modes.iter().any(|m| css_slug(&m.name) == css_slug(n));
+        let name = match taken("Dark") {
+            false => "Dark".to_string(),
+            true => (self.modes.len() + 1..)
+                .map(|i| format!("Mode {i}"))
+                .find(|n| !taken(n))
+                .unwrap_or_default(),
+        };
+        let id = crate::project::new_id();
+        self.modes.push(Mode {
+            id: id.clone(),
+            name,
+        });
+        id
+    }
+
+    /// Rename a mode. Names must differ as `data-theme` values too.
+    pub fn rename_mode(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        let slug = css_slug(name);
+        if slug.is_empty() {
+            return Err(format!("Mode name \"{name}\" needs a letter or number."));
+        }
+        if self
+            .modes
+            .iter()
+            .any(|m| m.id != id && css_slug(&m.name) == slug)
+        {
+            return Err(format!("This file already has a mode called \"{name}\"."));
+        }
+        let m = self
+            .modes
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or("Mode not found")?;
+        m.name = name.to_string();
+        Ok(())
+    }
+
+    /// Remove a mode and its values. Every other mode keeps showing what it did, so removing
+    /// the first moves the next one's values into `Token::value`. A file keeps one mode.
+    pub fn delete_mode(&mut self, id: &str) -> Result<(), String> {
+        let at = self
+            .modes
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or("Mode not found")?;
+        if self.modes.len() == 1 {
+            return Err("A file needs at least one mode.".into());
+        }
+        let rest: Vec<String> = self.modes[1..].iter().map(|m| m.id.clone()).collect();
+        for t in self.tokens.iter_mut().filter(|t| t.system.is_none()) {
+            t.modes.remove(id);
+            if at == 0 {
+                let old = t.value.clone();
+                if let Some(v) = t.modes.remove(&rest[0]) {
+                    t.value = v;
+                }
+                for m in &rest[1..] {
+                    if !t.modes.contains_key(m) && old != t.value {
+                        t.modes.insert(m.clone(), old.clone());
+                    }
+                }
+            }
+        }
+        self.modes.remove(at);
+        Ok(())
     }
 
     /// The design systems this project uses, in the order they were added.
@@ -446,36 +661,71 @@ impl TokenSet {
         format!("--{}", self.slug(t))
     }
 
-    /// Follow aliases to a literal. None when a link is missing or the chain loops, which
-    /// only a hand-edited file can produce.
+    /// Follow aliases to a literal in the default mode.
     pub fn resolve(&self, id: &str) -> Option<TokenValue> {
+        self.resolve_in(id, None)
+    }
+
+    /// Follow aliases to a literal in the mode named `mode`, each link taking its value in
+    /// that mode. None when a link is missing or the chain loops, which only a hand-edited
+    /// file can produce.
+    pub fn resolve_in(&self, id: &str, mode: Option<&str>) -> Option<TokenValue> {
         let mut seen = HashSet::new();
         let mut cur = id;
         loop {
             if !seen.insert(cur) {
                 return None;
             }
-            match &self.get(cur)?.value {
+            match self.value_in(self.get(cur)?, mode) {
                 TokenValue::Alias(next) => cur = next,
                 v => return Some(v.clone()),
             }
         }
     }
 
-    /// Would pointing token `id` at `target` make it depend on itself?
-    fn would_cycle(&self, id: &str, target: &str) -> bool {
+    /// Every value token `id` shows in the modes a frame can pick.
+    pub fn resolve_any(&self, id: &str) -> Vec<TokenValue> {
+        let mut out = Vec::new();
+        for m in self.choices() {
+            if let Some(v) = self.resolve_in(id, Some(&m.name))
+                && !out.contains(&v)
+            {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Would pointing token `id` at `target` in mode `mode` make it depend on itself?
+    fn would_cycle(&self, id: &str, target: &str, mode: Option<&str>) -> bool {
         let mut cur = target;
         let mut seen = HashSet::new();
         while seen.insert(cur) {
             if cur == id {
                 return true;
             }
-            match self.get(cur).map(|t| &t.value) {
+            match self.get(cur).map(|t| self.value_in(t, mode)) {
                 Some(TokenValue::Alias(next)) => cur = next,
                 _ => return false,
             }
         }
         true
+    }
+
+    /// Names of the modes in which token `id` shows its first value.
+    fn first_value_modes(&self, id: &str) -> Vec<String> {
+        let own = self.get(id).map(|t| (self.modes_of(t), &t.modes));
+        self.choices()
+            .into_iter()
+            .filter(|m| {
+                own.is_none_or(|(modes, values)| {
+                    !modes
+                        .iter()
+                        .any(|o| o.name == m.name && values.contains_key(&o.id))
+                })
+            })
+            .map(|m| m.name.clone())
+            .collect()
     }
 
     /// Parse user or agent input: a CSS value for `kind`, or `var(--other)` for an alias.
@@ -551,7 +801,7 @@ impl TokenSet {
             ));
         }
         if let TokenValue::Alias(target) = value
-            && self.would_cycle(id, target)
+            && (self.first_value_modes(id).iter()).any(|m| self.would_cycle(id, target, Some(m)))
         {
             return Err(format!("Circular token reference \"{raw}\"."));
         }
@@ -567,13 +817,37 @@ impl TokenSet {
         raw: &str,
         description: Option<&str>,
     ) -> Result<String, String> {
+        self.create_in_modes(kind, name, raw, &[], description)
+    }
+
+    /// [`create`](Self::create) with values for other modes, as (mode id, input) pairs.
+    pub fn create_in_modes(
+        &mut self,
+        kind: TokenKind,
+        name: &str,
+        raw: &str,
+        modes: &[(String, String)],
+        description: Option<&str>,
+    ) -> Result<String, String> {
         let name = name.trim().trim_start_matches("--").to_string();
         let value = self.parse_value(kind, raw)?;
-        if let Some(t) = self
-            .tokens
-            .iter()
-            .find(|t| t.system.is_none() && t.kind == kind && t.name == name && t.value == value)
-        {
+        let mut values = BTreeMap::new();
+        for (mode, raw) in modes {
+            if !self.modes.iter().skip(1).any(|m| m.id == *mode) {
+                return Err("Mode not found".into());
+            }
+            let v = self.parse_value(kind, raw)?;
+            if v != value {
+                values.insert(mode.clone(), v);
+            }
+        }
+        if let Some(t) = self.tokens.iter().find(|t| {
+            t.system.is_none()
+                && t.kind == kind
+                && t.name == name
+                && t.value == value
+                && t.modes == values
+        }) {
             return Ok(t.id.clone());
         }
         let id = crate::project::new_id();
@@ -584,6 +858,7 @@ impl TokenSet {
             name,
             kind,
             value,
+            modes: values,
             description: description.filter(|d| !d.is_empty()).map(String::from),
             system: None,
         });
@@ -605,6 +880,7 @@ impl TokenSet {
             name,
             kind,
             value: kind.default_value(),
+            modes: BTreeMap::new(),
             description: None,
             system: None,
         });
@@ -654,6 +930,60 @@ impl TokenSet {
         }
     }
 
+    /// Set token `id`'s value in one of this file's modes from user or agent input. None, or
+    /// the first mode's value, clears it so the mode follows the first.
+    pub fn update_in_mode(
+        &mut self,
+        id: &str,
+        mode: &str,
+        raw: Option<&str>,
+    ) -> Result<(), String> {
+        let t = self.get(id).ok_or("Token not found")?;
+        if let Some(why) = self.locked(id) {
+            return Err(why);
+        }
+        let at = self
+            .modes
+            .iter()
+            .position(|m| m.id == mode)
+            .ok_or("Mode not found")?;
+        if at == 0 {
+            let raw = raw.ok_or("The first mode's value can't be cleared.")?;
+            return self.update(id, None, Some(raw), None);
+        }
+        let value = raw.map(|r| self.parse_value(t.kind, r)).transpose()?;
+        if let Some(TokenValue::Alias(target)) = &value
+            && self.would_cycle(id, target, Some(&self.modes[at].name))
+        {
+            return Err(format!(
+                "Circular token reference \"{}\".",
+                raw.unwrap_or_default()
+            ));
+        }
+        self.write_in_mode(id, mode, value);
+        Ok(())
+    }
+
+    /// Set a literal for one mode directly, like [`set_value`](Self::set_value).
+    pub fn set_value_in(&mut self, id: &str, mode: &str, value: TokenValue) {
+        if self.modes.first().is_some_and(|m| m.id == mode) {
+            return self.set_value(id, value);
+        }
+        if self.locked(id).is_none() && self.modes.iter().any(|m| m.id == mode) {
+            self.write_in_mode(id, mode, Some(value));
+        }
+    }
+
+    fn write_in_mode(&mut self, id: &str, mode: &str, value: Option<TokenValue>) {
+        let Some(t) = self.tokens.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        match value {
+            Some(v) if v != t.value => t.modes.insert(mode.to_string(), v),
+            _ => t.modes.remove(mode),
+        };
+    }
+
     /// Remove tokens. A surviving alias to a removed token takes on the value it showed, so
     /// nothing in the project changes appearance. A design system's tokens stay.
     pub fn delete(&mut self, ids: &[String]) {
@@ -668,18 +998,52 @@ impl TokenSet {
     fn remove(&mut self, ids: &[String]) {
         let gone: HashSet<&str> = ids.iter().map(String::as_str).collect();
         self.flatten_style_aliases(&gone);
-        let flat: Vec<(usize, TokenValue)> = self
+        let flat: Vec<Token> = self
             .tokens
             .iter()
-            .enumerate()
-            .filter(|(_, t)| !gone.contains(t.id.as_str()))
-            .filter(|(_, t)| matches!(&t.value, TokenValue::Alias(a) if gone.contains(a.as_str())))
-            .filter_map(|(i, t)| Some((i, self.resolve(&t.id)?)))
+            .filter(|t| !gone.contains(t.id.as_str()))
+            .map(|t| self.flattened(t, |a| gone.contains(a)))
             .collect();
-        for (i, v) in flat {
-            self.tokens[i].value = v;
+        self.tokens = flat;
+    }
+
+    /// `t` with each value that aliases a token `gone` names replaced by the value it shows
+    /// in that mode. Modes that followed the first value keep showing what they did.
+    fn flattened(&self, t: &Token, gone: impl Fn(&str) -> bool) -> Token {
+        let hit = |v: &TokenValue| matches!(v, TokenValue::Alias(a) if gone(a));
+        if !hit(&t.value) && !t.modes.values().any(hit) {
+            return t.clone();
         }
-        self.tokens.retain(|t| !gone.contains(t.id.as_str()));
+        let flat = |v: &TokenValue, mode: Option<&Mode>| match v {
+            TokenValue::Alias(a) if gone(a) => self
+                .resolve_in(a, mode.map(|m| m.name.as_str()))
+                .unwrap_or_else(|| t.kind.default_value()),
+            v => v.clone(),
+        };
+        let modes = self.modes_of(t);
+        let mut out = t.clone();
+        out.value = flat(&t.value, modes.first());
+        out.modes = (modes.iter().skip(1))
+            .filter_map(|m| {
+                let v = flat(t.modes.get(&m.id).unwrap_or(&t.value), Some(m));
+                (v != out.value).then(|| (m.id.clone(), v))
+            })
+            .collect();
+        out
+    }
+
+    /// `t`'s mode values keyed by the ids of the modes in `to` with the same names. Values
+    /// for modes `to` lacks, or for its first mode, go.
+    fn rekeyed(&self, t: &Token, to: &[Mode]) -> BTreeMap<String, TokenValue> {
+        let from = self.modes_of(t);
+        t.modes
+            .iter()
+            .filter_map(|(id, v)| {
+                let name = &from.iter().find(|m| m.id == *id)?.name;
+                let m = to.iter().skip(1).find(|m| m.name == *name)?;
+                Some((m.id.clone(), v.clone()))
+            })
+            .collect()
     }
 
     /// Copy tokens, each new one right after the last token of its kind in `ids`. Returns the
@@ -703,14 +1067,15 @@ impl TokenSet {
         out
     }
 
-    /// `t` as a local token. A design system's token keeps its CSS name.
+    /// `t` as a local token. A design system's token keeps its CSS name, and its values for
+    /// modes this file has by name.
     fn local_copy(&self, t: &Token) -> Token {
+        if t.system.is_none() {
+            return t.clone();
+        }
         Token {
-            name: if t.system.is_some() {
-                self.slug(t)
-            } else {
-                t.name.clone()
-            },
+            name: self.slug(t),
+            modes: self.rekeyed(t, &self.modes),
             system: None,
             ..t.clone()
         }
@@ -739,16 +1104,24 @@ impl TokenSet {
             if !ids.contains(&t.id) {
                 continue;
             }
-            clip.tokens.push(self.local_copy(t));
-            if let TokenValue::Alias(a) = &t.value
-                && !ids.contains(a)
-            {
-                if let Some(v) = self.resolve(a) {
-                    clip.resolved.insert(a.clone(), v);
-                }
-                if let Some(target) = self.get(a) {
-                    clip.targets
-                        .insert(a.clone(), (target.kind, self.slug(target)));
+            let mut c = self.local_copy(t);
+            c.modes = (c.modes.into_iter())
+                .filter_map(|(id, v)| {
+                    Some((self.modes.iter().find(|m| m.id == id)?.name.clone(), v))
+                })
+                .collect();
+            clip.tokens.push(c);
+            for v in std::iter::once(&t.value).chain(t.modes.values()) {
+                if let TokenValue::Alias(a) = v
+                    && !ids.contains(a)
+                {
+                    if let Some(v) = self.resolve(a) {
+                        clip.resolved.insert(a.clone(), v);
+                    }
+                    if let Some(target) = self.get(a) {
+                        clip.targets
+                            .insert(a.clone(), (target.kind, self.slug(target)));
+                    }
                 }
             }
         }
@@ -766,7 +1139,7 @@ impl TokenSet {
             .collect();
         let mut out = Vec::new();
         for t in &clip.tokens {
-            let value = match &t.value {
+            let value_of = |v: &TokenValue| match v {
                 TokenValue::Alias(a) => match ids.get(a.as_str()) {
                     Some(new) => TokenValue::Alias(new.clone()),
                     None => self.pasted_target(clip, a).unwrap_or_else(|| {
@@ -778,6 +1151,13 @@ impl TokenSet {
                 },
                 v => v.clone(),
             };
+            let value = value_of(&t.value);
+            let modes = (t.modes.iter())
+                .filter_map(|(name, v)| {
+                    let m = self.modes.iter().skip(1).find(|m| m.name == *name)?;
+                    Some((m.id.clone(), value_of(v)))
+                })
+                .collect();
             let name = if self.name_taken(t.kind, &t.name) {
                 self.unused_name(t.kind, &t.name)
             } else {
@@ -787,6 +1167,7 @@ impl TokenSet {
                 id: ids[t.id.as_str()].clone(),
                 name,
                 value,
+                modes,
                 ..t.clone()
             });
             out.push(ids[t.id.as_str()].clone());
@@ -803,9 +1184,33 @@ impl TokenSet {
         Some(TokenValue::Alias(t.id.clone()))
     }
 
-    /// A token's value as CSS.
+    /// A token's value as CSS, in its first mode.
     pub fn css_value(&self, t: &Token) -> String {
         self.value_css(t.kind, &t.value)
+    }
+
+    /// A token's value as CSS in the mode named `mode`.
+    pub fn css_value_in(&self, t: &Token, mode: Option<&str>) -> String {
+        self.value_css(t.kind, self.value_in(t, mode))
+    }
+
+    /// `t`'s own values in the modes after its first, as (mode name, CSS).
+    pub fn own_mode_values(&self, t: &Token) -> Vec<(String, String)> {
+        (self.modes_of(t).iter().skip(1))
+            .filter_map(|m| Some((m.name.clone(), self.value_css(t.kind, t.modes.get(&m.id)?))))
+            .collect()
+    }
+
+    /// Tokens that show something else in the mode named `mode` than in the default one. An
+    /// alias whose target changes counts: CSS resolves `var()` where the variable is set.
+    fn varies_in<'a>(&self, tokens: &[&'a Token], mode: &str) -> Vec<&'a Token> {
+        let m = Some(mode);
+        (tokens.iter().copied())
+            .filter(|t| {
+                self.value_in(t, m) != self.value_in(t, None)
+                    || self.resolve_in(&t.id, m) != self.resolve_in(&t.id, None)
+            })
+            .collect()
     }
 
     /// A value of a token of `kind` as CSS. An alias becomes `var(--target)`.
@@ -828,13 +1233,41 @@ impl TokenSet {
         }
     }
 
-    /// A stylesheet of `tokens`: `:root { ... }`, or `@theme { ... }` for Tailwind v4.
+    /// A stylesheet of `tokens`: `:root { ... }`, or `@theme { ... }` for Tailwind v4. Each
+    /// other mode adds a `[data-theme="dark"] { ... }` block of the tokens that differ in it.
+    /// Then the default mode also answers to its own `data-theme`, so a light frame inside a
+    /// dark one turns light again.
     pub fn stylesheet(&self, tokens: &[&Token], tailwind: bool) -> String {
-        let mut s = String::from(if tailwind { "@theme {\n" } else { ":root {\n" });
-        for t in tokens {
-            s.push_str(&format!("  {}: {};\n", self.css_name(t), self.css_value(t)));
+        let block = |selector: &str, list: &[&Token], mode: Option<&str>| {
+            let mut s = format!("{selector} {{\n");
+            for t in list {
+                let v = self.css_value_in(t, mode);
+                s.push_str(&format!("  {}: {v};\n", self.css_name(t)));
+            }
+            s.push_str("}\n");
+            s
+        };
+        let theme = |name: &str| format!("[data-theme=\"{}\"]", css_slug(name));
+        let others: Vec<(&str, Vec<&Token>)> = (self.choices().into_iter().skip(1))
+            .map(|m| (m.name.as_str(), self.varies_in(tokens, &m.name)))
+            .filter(|(_, list)| !list.is_empty())
+            .collect();
+        let first = theme(self.default_mode());
+        let root = match (tailwind, others.is_empty()) {
+            (true, _) => "@theme".to_string(),
+            (false, true) => ":root".to_string(),
+            (false, false) => format!(":root,\n{first}"),
+        };
+        let mut s = block(&root, tokens, None);
+        if tailwind && !others.is_empty() {
+            let varied: Vec<&Token> = (tokens.iter().copied())
+                .filter(|t| others.iter().any(|(_, l)| l.iter().any(|o| o.id == t.id)))
+                .collect();
+            s.push_str(&block(&first, &varied, None));
         }
-        s.push_str("}\n");
+        for (name, list) in &others {
+            s.push_str(&block(&theme(name), list, Some(name)));
+        }
         s
     }
 
@@ -842,20 +1275,25 @@ impl TokenSet {
     /// one variable also gets a [`css::TOKEN_MARKER`] entry, which binds the node's property
     /// when `css::apply` reaches it. Unknown variables fall back to their default, if any.
     pub fn expand(&self, styles: &mut Vec<(String, String)>) {
-        self.expand_styles(styles);
+        self.expand_in(styles, None);
+    }
+
+    /// [`expand`](Self::expand) with each token's value in the mode named `mode`.
+    pub fn expand_in(&self, styles: &mut Vec<(String, String)>, mode: Option<&str>) {
+        self.expand_styles(styles, mode);
         let mut bound = Vec::new();
         for (k, v) in styles.iter_mut() {
             if k.starts_with(css::TOKEN_MARKER) {
                 continue;
             }
             if let Some(t) = var_name(v).and_then(|n| self.by_css_name(n))
-                && let Some(lit) = self.resolve(&t.id)
+                && let Some(lit) = self.resolve_in(&t.id, mode)
             {
                 bound.push((format!("{}{k}", css::TOKEN_MARKER), t.id.clone()));
                 *v = self.literal_css(t.kind, lit);
                 continue;
             }
-            *v = self.expand_text(v);
+            *v = self.expand_text(v, mode);
         }
         styles.extend(bound);
     }
@@ -876,7 +1314,7 @@ impl TokenSet {
     }
 
     /// Replace every `var(...)` inside a longer value such as `1px solid var(--line)`.
-    fn expand_text(&self, v: &str) -> String {
+    fn expand_text(&self, v: &str, mode: Option<&str>) -> String {
         let mut out = String::new();
         let mut rest = v;
         while let Some(i) = rest.find("var(") {
@@ -889,7 +1327,7 @@ impl TokenSet {
             let call = &tail[..=end];
             let lit = var_name(call)
                 .and_then(|n| self.by_css_name(n))
-                .and_then(|t| Some(self.literal_css(t.kind, self.resolve(&t.id)?)));
+                .and_then(|t| Some(self.literal_css(t.kind, self.resolve_in(&t.id, mode)?)));
             match (lit, call[4..end].split_once(',')) {
                 (Some(l), _) => out.push_str(&l),
                 (None, Some((_, fallback))) => out.push_str(fallback.trim()),
@@ -906,11 +1344,13 @@ impl TokenSet {
     /// What changed between `before` and `self`.
     pub fn diff(&self, before: &TokenSet) -> Vec<TokenEdit> {
         let systems = diff_list(&before.systems, &self.systems);
+        let modes = diff_list(&before.modes, &self.modes);
         let tokens = diff_list(&before.tokens, &self.tokens);
         let styles = diff_list(&before.styles, &self.styles);
         systems
             .into_iter()
             .map(TokenEdit::System)
+            .chain(modes.into_iter().map(TokenEdit::Mode))
             .chain(tokens.into_iter().map(TokenEdit::Token))
             .chain(styles.into_iter().map(|e| TokenEdit::Style(Box::new(e))))
             .collect()
@@ -924,6 +1364,11 @@ impl TokenSet {
             _ => None,
         });
         apply_list(&mut self.systems, systems, forward);
+        let modes = edits.iter().filter_map(|e| match e {
+            TokenEdit::Mode(e) => Some(e),
+            _ => None,
+        });
+        apply_list(&mut self.modes, modes, forward);
         let tokens = edits.iter().filter_map(|e| match e {
             TokenEdit::Token(e) => Some(e),
             _ => None,
@@ -942,31 +1387,28 @@ impl TokenSet {
     /// system's tokens replaced by the values they show, so systems never depend on each
     /// other.
     pub fn publishable(&self) -> Vec<Token> {
+        let elsewhere = |a: &str| self.get(a).is_none_or(|x| x.system.is_some());
         self.tokens
             .iter()
             .filter(|t| t.system.is_none())
-            .map(|t| {
-                let mut t = t.clone();
-                if let TokenValue::Alias(a) = &t.value
-                    && self.get(a).is_none_or(|x| x.system.is_some())
-                {
-                    t.value = self.resolve(a).unwrap_or_else(|| t.kind.default_value());
-                }
-                t
-            })
+            .map(|t| self.flattened(t, elsewhere))
             .collect()
     }
 
     /// `published` as this project's read-only copies.
     fn linked(system: &str, published: &[Token]) -> Vec<Token> {
+        let value = |v: &TokenValue| match v {
+            TokenValue::Alias(a) => TokenValue::Alias(linked_id(system, a)),
+            v => v.clone(),
+        };
         published
             .iter()
             .map(|t| Token {
                 id: linked_id(system, &t.id),
-                value: match &t.value {
-                    TokenValue::Alias(a) => TokenValue::Alias(linked_id(system, a)),
-                    v => v.clone(),
-                },
+                value: value(&t.value),
+                modes: (t.modes.iter())
+                    .map(|(m, v)| (linked_id(system, m), value(v)))
+                    .collect(),
                 system: Some(system.to_string()),
                 ..t.clone()
             })
@@ -1077,8 +1519,14 @@ impl TokenSet {
     }
 
     /// Turn a design system's tokens into local ones that keep their CSS names, so bindings
-    /// and `var()` references keep working.
+    /// and `var()` references keep working. Its modes this file lacks become the file's, under
+    /// the same ids so frames that picked them keep them.
     pub fn detach_system(&mut self, id: &str) {
+        let missing: Vec<Mode> = (self.system(id).into_iter().flat_map(|l| &l.modes))
+            .filter(|m| !self.modes.iter().any(|x| x.name == m.name))
+            .cloned()
+            .collect();
+        self.modes.extend(missing);
         let local: Vec<Token> = self
             .tokens
             .iter()
@@ -1597,6 +2045,7 @@ mod tests {
             release: 1,
             description: None,
             notes: None,
+            modes: Vec::new(),
         };
         let mut s = TokenSet::default();
         s.attach(link, &src.publishable(), &[]).unwrap();
@@ -1744,6 +2193,101 @@ mod tests {
         assert_eq!(s, before);
         s.apply_edits(&edits, true);
         assert_eq!(s.len(), 1);
+    }
+
+    const WHITE: TokenValue = TokenValue::Color(Color::WHITE);
+    const BLACK: TokenValue = TokenValue::Color(Color::BLACK);
+
+    /// Light and Dark, with `--bg` white or black, `--surface` aliasing it and `--line` one
+    /// value for both.
+    fn themed() -> (TokenSet, String, String, String) {
+        let mut s = TokenSet::default();
+        let dark = vec![("dark".to_string(), "#000000".to_string())];
+        let bg = (s.create_in_modes(TokenKind::Color, "bg", "#ffffff", &dark, None)).unwrap();
+        let surface = s
+            .create(TokenKind::Color, "surface", "var(--bg)", None)
+            .unwrap();
+        let line = s.create(TokenKind::Color, "line", "#888888", None).unwrap();
+        (s, bg, surface, line)
+    }
+
+    #[test]
+    fn aliases_resolve_in_the_same_mode() {
+        let (s, bg, surface, line) = themed();
+        assert_eq!(s.resolve_in(&bg, Some("Dark")), Some(BLACK));
+        assert_eq!(s.resolve_in(&surface, Some("Dark")), Some(BLACK));
+        assert_eq!(s.resolve_in(&surface, None), Some(WHITE));
+        let grey = s.resolve(&line);
+        assert_eq!(
+            s.resolve_in(&line, Some("Dark")),
+            grey,
+            "one value serves every mode"
+        );
+    }
+
+    #[test]
+    fn cycles_are_checked_per_mode() {
+        let (mut s, bg, _, line) = themed();
+        s.update_in_mode(&line, "dark", Some("var(--bg)")).unwrap();
+        // In Dark, --bg -> --line -> --bg.
+        let err = s
+            .update_in_mode(&bg, "dark", Some("var(--line)"))
+            .unwrap_err();
+        assert!(err.contains("Circular"), "{err}");
+        // Light --bg aliasing --line is fine: Dark keeps its own value.
+        s.update(&bg, None, Some("var(--line)"), None).unwrap();
+    }
+
+    #[test]
+    fn stylesheets_add_a_block_for_each_other_mode() {
+        let (s, ..) = themed();
+        let css = s.stylesheet(&s.sorted(), false);
+        assert!(
+            css.starts_with(":root,\n[data-theme=\"light\"] {\n"),
+            "{css}"
+        );
+        let (_, dark) = css
+            .split_once("[data-theme=\"dark\"] {\n")
+            .expect("a dark block");
+        assert!(dark.contains("--bg: #000000;"), "{css}");
+        assert!(
+            dark.contains("--surface: var(--bg);"),
+            "an alias whose target changes is set again where the mode applies: {css}"
+        );
+        assert!(!dark.contains("--line"), "{css}");
+        let one = TokenSet::default().with_modes(Mode::single());
+        assert!(one.stylesheet(&[], false).starts_with(":root {"));
+    }
+
+    #[test]
+    fn removing_the_first_mode_keeps_what_the_others_show() {
+        let (mut s, bg, ..) = themed();
+        let dim = s.add_mode();
+        assert_eq!(s.modes()[2].name, "Mode 3");
+        s.delete_mode("light").unwrap();
+        assert_eq!(s.get(&bg).unwrap().value, BLACK, "Dark is the default now");
+        assert_eq!(s.resolve_in(&bg, Some("Mode 3")), Some(WHITE));
+        assert_eq!(s.get(&bg).unwrap().modes.get(&dim), Some(&WHITE));
+        s.delete_mode(&dim).unwrap();
+        assert!(s.delete_mode("dark").is_err(), "a file keeps one mode");
+    }
+
+    #[test]
+    fn deleting_an_alias_target_keeps_each_mode() {
+        let (mut s, bg, surface, _) = themed();
+        s.delete(std::slice::from_ref(&bg));
+        assert_eq!(s.resolve_in(&surface, Some("Dark")), Some(BLACK));
+        assert_eq!(s.resolve(&surface), Some(WHITE));
+    }
+
+    #[test]
+    fn pasted_tokens_match_modes_by_name() {
+        let (s, bg, ..) = themed();
+        let clip = s.copy(std::slice::from_ref(&bg));
+        let mut other =
+            TokenSet::default().with_modes(vec![Mode::new("l2", "Light"), Mode::new("d2", "Dark")]);
+        let new = other.paste(&clip);
+        assert_eq!(other.resolve_in(&new[0], Some("Dark")), Some(BLACK));
     }
 
     #[test]

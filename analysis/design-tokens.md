@@ -79,8 +79,9 @@ from static reading and the docs. Nothing was confirmed against a running copy.
 | Fractional sort keys, reorderable | Creation order, duplicates after their source | No reordering yet |
 | `lineHeight` also accepts px | Multiple or percent only | Sketch stores line height as a multiple |
 
-Not carried over: theme modes and token libraries (not public features in Paper), overwrite on
-paste, drag to reorder, and reading tokens from a pasted stylesheet. `fontFamily`,
+Sketch adds theme modes, which Paper doesn't have publicly: a value per mode on each token,
+and a mode per frame. Not carried over: token libraries (not a public feature in Paper),
+overwrite on paste, drag to reorder, and reading tokens from a pasted stylesheet. `fontFamily`,
 `breakpoint` and `container` tokens are stored and exported but bind to nothing, because Sketch
 has one typeface and no breakpoints. Inline `<span>` styles in `write_html` take the token's
 value without a binding, because a text run has no binding map.

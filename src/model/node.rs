@@ -434,6 +434,10 @@ pub struct Node {
     /// The text style this text layer uses. Its fields keep the resolved values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_style_ref: Option<super::text_styles::TextStyleRef>,
+    /// The token mode this frame and its children show, by mode id (`TokenSet::choices`).
+    /// Bound fields hold their token's value in that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// One anchor of a vector path, with optional bezier handles (node-local, absolute).
@@ -512,6 +516,7 @@ impl Node {
             instance: None,
             tokens: BTreeMap::new(),
             text_style_ref: None,
+            mode: None,
         }
     }
 

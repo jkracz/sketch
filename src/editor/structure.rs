@@ -11,9 +11,9 @@ use crate::model::{
 use std::collections::{BTreeSet, HashSet};
 
 /// Property groups an instance can override (and that sync copies from the main component).
-pub const OVERRIDE_KEYS: [&str; 11] = [
+pub const OVERRIDE_KEYS: [&str; 12] = [
     "fills", "stroke", "radius", "opacity", "text", "font", "visible", "name", "size", "position",
-    "layout",
+    "layout", "mode",
 ];
 
 /// Map an inspector field name to the override key it changes.
@@ -31,6 +31,7 @@ pub fn override_key(field: &str) -> &'static str {
         }
         "visible" => "visible",
         "name" => "name",
+        "mode" => "mode",
         _ => "layout",
     }
 }
@@ -92,6 +93,9 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     }
     if !ov("visible") {
         inst.visible = main.visible;
+    }
+    if !ov("mode") {
+        inst.mode = main.mode.clone();
     }
     if !ov("name") && !is_root {
         inst.name = main.name.clone();
@@ -262,7 +266,15 @@ impl Editor {
                 }
             }
         }
-        // 3. Auto layout from the outermost auto-layout ancestor of each candidate.
+        // 3. Token bindings: drop hand-edited ones, then write values in each layer's mode,
+        // before layout so spacing and font size tokens lay out.
+        self.drop_broken_bindings();
+        self.check_text_style_refs();
+        for id in self.resync_modes() {
+            cands.insert(id);
+            cands.extend(self.doc.ancestors(id));
+        }
+        // 4. Auto layout from the outermost auto-layout ancestor of each candidate.
         let mut roots: BTreeSet<(usize, NodeId)> = BTreeSet::new();
         for id in cands.iter().copied() {
             let Some(n) = self.doc.get(id) else { continue };
@@ -302,15 +314,13 @@ impl Editor {
                 layout::layout_frame(&mut tx, r);
             }
         }
-        // 4. Arrows bound to anything that moved follow it.
+        // 5. Arrows bound to anything that moved follow it.
         let touched: HashSet<NodeId> = self
             .rec
             .as_ref()
             .map(|(r, _)| r.touched().iter().copied().collect())
             .unwrap_or_default();
         self.reroute_connectors(&touched);
-        self.drop_broken_bindings();
-        self.check_text_style_refs();
     }
 
     /// Record that `prop` was explicitly changed on nodes inside instances.
