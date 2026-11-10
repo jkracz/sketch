@@ -7,7 +7,7 @@
 
 use crate::editor::Editor;
 use crate::model::{
-    Mode, SystemLink, TextStyleDef, Token, TokenSet,
+    EffectStyleDef, Mode, SystemLink, TextStyleDef, Token, TokenSet,
     text_styles::style_slug,
     tokens::{css_slug, linked_id},
 };
@@ -47,6 +47,9 @@ pub struct Published {
     /// Local text styles, flattened the same way (`TokenSet::publishable_styles`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_styles: Vec<TextStyleDef>,
+    /// Local effect styles, flattened the same way (`TokenSet::publishable_effect_styles`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_styles: Vec<EffectStyleDef>,
     /// The source's modes. Tokens key their other values by these ids. Empty for a system
     /// published before modes existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -83,7 +86,12 @@ impl Published {
         // The system's own mode order, so its first mode is the default here too.
         let mut s = TokenSet::default().with_modes(self.modes.clone());
         // A fresh set can't clash or share a prefix, so this can't fail.
-        let _ = s.attach(self.link(), &self.tokens, &self.text_styles);
+        let _ = s.attach(
+            self.link(),
+            &self.tokens,
+            &self.text_styles,
+            &self.effect_styles,
+        );
         s
     }
 }
@@ -345,10 +353,9 @@ pub fn publish(
     }
     let tokens = ed.tokens.publishable();
     let text_styles = ed.tokens.publishable_styles();
-    if tokens.is_empty() && text_styles.is_empty() {
-        return Err(
-            "Add at least one token or text style before publishing a design system.".into(),
-        );
+    let effect_styles = ed.tokens.publishable_effect_styles();
+    if tokens.is_empty() && text_styles.is_empty() && effect_styles.is_empty() {
+        return Err("Add at least one token or style before publishing a design system.".into());
     }
     let release = old
         .as_ref()
@@ -369,6 +376,7 @@ pub fn publish(
         published: now_ms(),
         tokens,
         text_styles,
+        effect_styles,
         modes: ed.tokens.modes().to_vec(),
     };
     let report = report(store, old.as_ref(), system);
@@ -378,8 +386,8 @@ pub fn publish(
     Ok(report)
 }
 
-/// Tokens and text styles a publish would add, change and remove, as CSS names and classes
-/// with `prefix`.
+/// Tokens and styles a publish would add, change and remove, as CSS names and classes with
+/// `prefix`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
     pub added: Vec<String>,
@@ -398,6 +406,7 @@ pub fn changes(
     prefix: &str,
     tokens: &[Token],
     styles: &[TextStyleDef],
+    effects: &[EffectStyleDef],
 ) -> Changes {
     let mut c = Changes::default();
     let old_tokens = old.map(|o| o.tokens.as_slice()).unwrap_or_default();
@@ -415,6 +424,14 @@ pub fn changes(
         styles,
         |s| s.id.as_str(),
         |s| format!(".{prefix}-{}", style_slug(&s.name)),
+    );
+    let old_effects = old.map(|o| o.effect_styles.as_slice()).unwrap_or_default();
+    diff_into(
+        &mut c,
+        old_effects,
+        effects,
+        |s| s.id.as_str(),
+        |s| format!("--{prefix}-{}", style_slug(&s.name)),
     );
     c
 }
@@ -452,7 +469,13 @@ fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishR
         added,
         changed,
         removed,
-    } = changes(old, &system.prefix, &system.tokens, &system.text_styles);
+    } = changes(
+        old,
+        &system.prefix,
+        &system.tokens,
+        &system.text_styles,
+        &system.effect_styles,
+    );
     let users = users(store, &system.id);
     PublishReport {
         system,
@@ -471,6 +494,7 @@ pub fn has_unpublished_changes(store: &Store, ed: &Editor) -> bool {
         Some(p) => {
             p.tokens != ed.tokens.publishable()
                 || p.text_styles != ed.tokens.publishable_styles()
+                || p.effect_styles != ed.tokens.publishable_effect_styles()
                 || p.modes != ed.tokens.modes()
                 || p.link() != *l
         }
@@ -894,10 +918,11 @@ mod tests {
             published: 0,
             tokens: a.publishable(),
             text_styles: Vec::new(),
+            effect_styles: Vec::new(),
             modes: Vec::new(),
         };
         let mut used = TokenSet::default();
-        used.attach(p.link(), &p.tokens, &[]).unwrap();
+        used.attach(p.link(), &p.tokens, &[], &[]).unwrap();
         let id = crate::model::tokens::linked_id("abc", &p.tokens[0].id);
         assert!(used.get(&id).is_some());
         assert!(TokenSet::default().get(&id).is_none());

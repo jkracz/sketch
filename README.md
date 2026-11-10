@@ -181,7 +181,8 @@ borders, radii, opacity and blend modes; `<img>` takes local paths or `data:` UR
 is imported as vectors. `update_styles` takes the same CSS as JSON, plus the hand-drawn keys
 `sketch`, `roughness`, `fillStyle`, `strokeStyle`. A style that is exactly `var(--token)` binds
 the property to that design token. `class="heading-l"` in `write_html`, or `textStyle` in
-`update_styles`, applies a text style. `data-theme="dark"` on a frame in `write_html`, or
+`update_styles`, applies a text style. `box-shadow: var(--elevation-2)`, or `effectStyle` in
+`update_styles`, applies an effect style. `data-theme="dark"` on a frame in `write_html`, or
 `mode` in `update_styles`, picks a token mode. Node ids look like `3fa9c1:14` (page and
 node); `pageId` lets an agent work on another page without switching the user's view.
 
@@ -282,16 +283,35 @@ the layer overrides that field and keeps the style; the panel lists overrides an
 applies the style again. Editing a style updates every layer that uses it, on all pages, as
 one undo step. Deleting a style leaves the layers looking the same.
 
+#### Effect styles
+
+An effect style names a list of shadows and blurs, like `Elevation/2`. A shadow's color is a
+value or a color token. Add one from **+** in the Tokens tab (it copies the selected layer's
+effects), click it to edit its effects, and use **Apply to selection** or the right-click menu
+to apply or delete it.
+
+The Effects section of the Design panel shows the style a layer uses and lists its effects.
+Pick another style there, make one from the layer's effects, or detach it to edit the effects
+on the layer. Detaching keeps the effects and the color tokens. Editing a style updates every
+layer that uses it, on all pages, as one undo step. Deleting a style leaves the layers
+looking the same.
+
+A style's name becomes a CSS variable that holds its shadows (`--elevation-2`), and **Copy
+all as CSS** writes one per style. CSS has no single value for shadows and blurs together, so
+a style with blurs also writes `--elevation-2-blur` for `filter` and
+`--elevation-2-backdrop-blur` for `backdrop-filter`.
+
 #### Design systems
 
-A project can publish its tokens and text styles as a design system that other projects use. In the Tokens
+A project can publish its tokens, text styles and effect styles as a design system that other projects use. In the Tokens
 tab's **⋯** menu, **Publish as design system** sets a name, a CSS prefix, a description and
 usage notes. The dialog lists what will change before you publish. **Use design system**
 adds another project's system, with its modes: a frame's mode applies to the system's tokens
 by name, and the system's other modes join the list a frame picks from. Its tokens show under their own heading, read-only, named
 with the prefix (`--brand-primary`), and bind like any token. To customize one, alias it
 from a local token, or **Detach** the system to make its tokens local. Its text styles work
-the same way, with prefixed classes (`brand-heading-l`).
+the same way, with prefixed classes (`brand-heading-l`), and so do its effect styles, with
+prefixed variables (`--brand-elevation-2`).
 
 Publishing again makes a new version, and files that use the system move to it when they
 open, as one undo step. A layer bound to a token or style the new version dropped keeps its
@@ -349,7 +369,7 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 | Strokes: width, align, dash, caps, joins | ✓ | ✓ | ✓ | ✅ |
 | Corner radius (per corner), polygons, stars | ✓ | ✓ | – | ✅ |
 | Opacity, blend modes | ✓ | ✓ | ✓ (opacity) | ✅ ⚠️ canvas renders 5 modes exactly, all 16 exact in SVG |
-| Effects: drop shadow, inner shadow, layer blur, background blur | ✓ | ✓ | – | ✅ Several per layer, reorder and hide, shadow color from a token. ⚠️ Canvas and PNG only |
+| Effects: drop shadow, inner shadow, layer blur, background blur | ✓ | ✓ | – | ✅ Several per layer, reorder and hide, shadow color from a token, named effect styles. ⚠️ Canvas and PNG only |
 | Rich text (per-range bold/italic/size/colour) | ✓ | ✓ | – | ✅ Plus underline, strikethrough, line height, letter spacing |
 | Align / distribute | ✓ | ✓ | ✓ | ✅ ⌥A/D/W/S/H/V, ⌥⇧H/V |
 | Smart guides, spacing, measurement | ✓ | ✓ | – | ✅ Edge/center snap, equal spacing, ⌥-hover distances |

@@ -439,6 +439,9 @@ pub struct Node {
     /// The text style this text layer uses. Its fields keep the resolved values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_style_ref: Option<super::text_styles::TextStyleRef>,
+    /// The effect style this layer uses, by id. `style.effects` keeps the resolved effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_style: Option<String>,
     /// The token mode this frame and its children show, by mode id (`TokenSet::choices`).
     /// Bound fields hold their token's value in that mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -521,6 +524,7 @@ impl Node {
             instance: None,
             tokens: BTreeMap::new(),
             text_style_ref: None,
+            effect_style: None,
             mode: None,
         }
     }

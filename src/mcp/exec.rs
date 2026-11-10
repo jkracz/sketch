@@ -14,9 +14,9 @@ use crate::editor::{Editor, hit};
 use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::model::{
-    AutoLayout, Binding, Color, Direction, Document, Head, ImageMode, Node, NodeId, NodeKind,
-    Paint, PathPoint, Route, Sizing, StyleField, StyleInput, SubPath, TextAlign, TextStyleDef,
-    Token, TokenKind, TokenProp, TokenSet,
+    AutoLayout, Binding, Color, Direction, Document, EffectStyleDef, EffectVar, Head, ImageMode,
+    Node, NodeId, NodeKind, Paint, PathPoint, Route, Sizing, StyleField, StyleInput, SubPath,
+    TextAlign, TextStyleDef, Token, TokenKind, TokenProp, TokenSet,
 };
 use crate::project::{Entry, Folder, Project, Store};
 use crate::render::gpu::Headless;
@@ -1100,18 +1100,22 @@ fn token_input(v: &Value) -> Result<String, String> {
     }
 }
 
-/// A shadow's color as CSS: the variable that owns it, or the color itself.
+/// Use the layer's color token, then its style's token, then the literal color.
 fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
+    let styled = || {
+        let s = tokens.effect_style(n.effect_style.as_ref()?)?;
+        tokens.effect_style_color_token(s, i)
+    };
     (n.tokens.get(&TokenProp::EffectColor(i)))
         .and_then(|id| tokens.get(id))
+        .or_else(styled)
         .map_or_else(
             || css::color_css(c),
             |t| format!("var({})", tokens.css_name(t)),
         )
 }
 
-/// In computed styles, show a bound property as the variable that owns it, and a text
-/// layer's style as `textStyle` with the fields it overrides.
+/// Export token variables and style references alongside text overrides.
 fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     if let Some(r) = &n.text_style_ref
         && let Some(s) = tokens.style(&r.id)
@@ -1124,6 +1128,22 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     }
     if let Some(v) = css::shadows_css(n, |i, c| shadow_color(tokens, n, i, c)) {
         st.insert(css::shadow_key(n).into(), json!(v));
+    }
+    if let Some(s) = n.effect_style.as_ref().and_then(|s| tokens.effect_style(s)) {
+        st.insert(EFFECT_STYLE_TYPE.into(), json!(tokens.effect_style_slug(s)));
+        let text = matches!(n.kind, NodeKind::Text { .. });
+        for var in EffectVar::ALL {
+            let key = match var {
+                EffectVar::Shadows if text && !tokens.effect_style_fits_text(s) => continue,
+                EffectVar::Shadows => css::shadow_key(n),
+                EffectVar::Blur => "filter",
+                EffectVar::BackdropBlur => "backdropFilter",
+            };
+            if st.contains_key(key) {
+                let name = tokens.effect_var_name(s, var);
+                st.insert(key.into(), json!(format!("var({name})")));
+            }
+        }
     }
     for (prop, id) in &n.tokens {
         if matches!(prop, TokenProp::EffectColor(_)) {
@@ -1155,26 +1175,41 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     }
 }
 
-/// The `types` argument: the token types it names (None for every type), and whether it
-/// takes text styles (`textStyle`, or no `types`).
-fn token_kinds(a: &Args) -> Result<(Option<Vec<TokenKind>>, bool), String> {
-    if a.get("types").is_none() {
-        return Ok((None, true));
-    }
-    let names = a.strs("types")?;
+/// What the `types` argument asks for. Without it, everything.
+struct Types {
+    /// None for every token type.
+    kinds: Option<Vec<TokenKind>>,
+    text_styles: bool,
+    effect_styles: bool,
+}
+
+fn token_kinds(a: &Args) -> Result<Types, String> {
+    let names = match a.get("types") {
+        Some(_) => a.strs("types")?,
+        None => Vec::new(),
+    };
     if names.is_empty() {
-        return Ok((None, true));
+        return Ok(Types {
+            kinds: None,
+            text_styles: true,
+            effect_styles: true,
+        });
     }
-    let styles = names.iter().any(|n| n == TEXT_STYLE_TYPE);
+    let style = |n: &&String| [TEXT_STYLE_TYPE, EFFECT_STYLE_TYPE].contains(&n.as_str());
     let kinds: Option<Vec<TokenKind>> = names
         .iter()
-        .filter(|n| *n != TEXT_STYLE_TYPE)
+        .filter(|n| !style(n))
         .map(|k| TokenKind::from_key(k))
         .collect();
-    Ok((Some(kinds.ok_or("unknown token type in `types`")?), styles))
+    Ok(Types {
+        kinds: Some(kinds.ok_or("unknown token type in `types`")?),
+        text_styles: names.iter().any(|n| n == TEXT_STYLE_TYPE),
+        effect_styles: names.iter().any(|n| n == EFFECT_STYLE_TYPE),
+    })
 }
 
 const TEXT_STYLE_TYPE: &str = "textStyle";
+const EFFECT_STYLE_TYPE: &str = "effectStyle";
 
 /// `tokens`' text styles, filtered by `types` and by `namePattern` against `.class`.
 fn chosen_styles<'a>(
@@ -1182,7 +1217,7 @@ fn chosen_styles<'a>(
     a: &Args,
     keep: impl Fn(&TextStyleDef) -> bool,
 ) -> Result<Vec<&'a TextStyleDef>, String> {
-    if !token_kinds(a)?.1 {
+    if !token_kinds(a)?.text_styles {
         return Ok(Vec::new());
     }
     let pattern = a.str("namePattern");
@@ -1219,13 +1254,42 @@ fn style_json(tokens: &TokenSet, s: &TextStyleDef) -> Value {
     v
 }
 
+fn chosen_effect_styles<'a>(
+    tokens: &'a TokenSet,
+    a: &Args,
+    keep: impl Fn(&EffectStyleDef) -> bool,
+) -> Result<Vec<&'a EffectStyleDef>, String> {
+    if !token_kinds(a)?.effect_styles {
+        return Ok(Vec::new());
+    }
+    let pattern = a.str("namePattern");
+    Ok(tokens
+        .effect_styles()
+        .iter()
+        .filter(|s| keep(s))
+        .filter(|s| pattern.is_none_or(|p| glob(p, &tokens.effect_style_var(s))))
+        .collect())
+}
+
+fn effect_style_json(tokens: &TokenSet, s: &EffectStyleDef) -> Value {
+    let mut v = json!({
+        "name": s.name,
+        "var": tokens.effect_style_var(s),
+        "css": tokens.effect_style_short(s),
+    });
+    if let Some(d) = &s.description {
+        v["description"] = json!(d);
+    }
+    v
+}
+
 /// `tokens` in listing order, filtered by `types` and `namePattern`.
 fn chosen_tokens<'a>(
     tokens: &'a TokenSet,
     a: &Args,
     keep: impl Fn(&Token) -> bool,
 ) -> Result<Vec<&'a Token>, String> {
-    let kinds = token_kinds(a)?.0;
+    let kinds = token_kinds(a)?.kinds;
     let pattern = a.str("namePattern");
     Ok(tokens
         .sorted()
@@ -1256,6 +1320,8 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
     };
     let chosen = chosen_tokens(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
     let styles = chosen_styles(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
+    let effects =
+        chosen_effect_styles(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
     // One line per design system the file uses, so its tokens can be loaded on demand.
     let others: Vec<Value> = match &scope {
         Some(None) => tokens
@@ -1279,6 +1345,12 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
                 if styles > 0 {
                     v["textStyles"] = json!(styles);
                 }
+                let effects = (tokens.effect_styles().iter())
+                    .filter(|s| ours(s.system.as_deref()))
+                    .count();
+                if effects > 0 {
+                    v["effectStyles"] = json!(effects);
+                }
                 v
             })
             .collect(),
@@ -1296,6 +1368,12 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
                 let list: Vec<Value> = styles.iter().map(|s| style_json(tokens, s)).collect();
                 v["textStyles"] = json!(list);
             }
+            if !effects.is_empty() {
+                let list: Vec<Value> = (effects.iter())
+                    .map(|s| effect_style_json(tokens, s))
+                    .collect();
+                v["effectStyles"] = json!(list);
+            }
             if !others.is_empty() {
                 v["designSystems"] = json!(others);
                 v["hint"] = json!(
@@ -1305,7 +1383,7 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
             text(v)
         }
         f @ ("css" | "tailwind") => {
-            let mut css = tokens.stylesheet(&chosen, f == "tailwind");
+            let mut css = tokens.stylesheet_with(&chosen, &effects, f == "tailwind");
             css.push_str(&tokens.style_sheet(&styles, f == "tailwind"));
             for o in &others {
                 css.push_str(&format!(
@@ -1587,6 +1665,22 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
             s
         })
         .collect();
+    let effects = tokens
+        .effect_styles()
+        .iter()
+        .filter(|s| s.system.as_deref() == Some(l.id.as_str()))
+        .map(|s| {
+            let mut s = EffectStyleDef {
+                id: strip(&s.id),
+                system: None,
+                ..s.clone()
+            };
+            for e in &mut s.effects {
+                e.color_token = e.color_token.as_deref().map(strip);
+            }
+            s
+        })
+        .collect();
     Published {
         format: design_systems::FORMAT.into(),
         version: design_systems::VERSION,
@@ -1600,6 +1694,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
         published: 0,
         tokens: list,
         text_styles: styles,
+        effect_styles: effects,
         modes: (l.modes.iter())
             .map(|m| crate::model::Mode {
                 id: strip(&m.id),
@@ -1624,6 +1719,9 @@ fn list_design_systems(host: &mut dyn Host) -> ToolResult {
             });
             if !p.text_styles.is_empty() {
                 v["textStyles"] = json!(p.text_styles.len());
+            }
+            if !p.effect_styles.is_empty() {
+                v["effectStyles"] = json!(p.effect_styles.len());
             }
             if let Some(d) = &p.description {
                 v["description"] = json!(d);
@@ -1650,16 +1748,20 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     let set = p.token_set();
     let chosen = chosen_tokens(&set, a, |_| true)?;
     let styles = chosen_styles(&set, a, |_| true)?;
+    let effects = chosen_effect_styles(&set, a, |_| true)?;
     let filtered = a.get("types").is_some() || a.get("namePattern").is_some();
-    let too_many = !filtered && chosen.len() + styles.len() > MAX_SYSTEM_TOKENS;
+    let total = chosen.len() + styles.len() + effects.len();
+    let too_many = !filtered && total > MAX_SYSTEM_TOKENS;
     let counts = || {
         let mut c = type_counts(chosen.iter().copied());
         if !styles.is_empty() {
             c[TEXT_STYLE_TYPE] = json!(styles.len());
         }
+        if !effects.is_empty() {
+            c[EFFECT_STYLE_TYPE] = json!(effects.len());
+        }
         c
     };
-    let total = chosen.len() + styles.len();
     let usage = if used {
         "The open file uses this system: bind its tokens with var(--name).".to_string()
     } else {
@@ -1704,6 +1806,14 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
                         .collect::<Vec<_>>()
                 );
             }
+            if !effects.is_empty() {
+                v["effectStyles"] = json!(
+                    effects
+                        .iter()
+                        .map(|s| effect_style_json(&set, s))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         return text(v);
     }
@@ -1716,7 +1826,7 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             ))]);
         }
         let tailwind = format == "tailwind";
-        let mut css = set.stylesheet(&chosen, tailwind);
+        let mut css = set.stylesheet_with(&chosen, &effects, tailwind);
         css.push_str(&set.style_sheet(&styles, tailwind));
         return Ok(vec![Out::Text(css)]);
     }
@@ -1778,6 +1888,23 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             for note in set.style_mode_notes(s) {
                 out.push_str(&format!(" /* {note} */"));
             }
+            if let Some(d) = &s.description {
+                out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
+            }
+            out.push('\n');
+        }
+    }
+    if !effects.is_empty() {
+        out.push_str(
+            "\n## Effect styles\nApply with box-shadow: var(--name) in write_html or effectStyle in \
+             update_styles.\n",
+        );
+        for s in &effects {
+            out.push_str(&format!(
+                "{} {{ {} }}",
+                set.effect_style_var(s),
+                set.effect_style_short(s)
+            ));
             if let Some(d) = &s.description {
                 out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
             }
@@ -2163,6 +2290,18 @@ fn jsx_node(
     let ind = "  ".repeat(depth);
     let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
     show_token_vars(tokens, n, &mut st);
+    // Keep effectStyle when variables cannot carry it, so write_html can restore the style.
+    let style_var = |v: &Value| {
+        let name = (v.as_str()).and_then(|s| s.strip_prefix("var(")?.strip_suffix(')'));
+        name.is_some_and(|n| tokens.effect_style_by_var(n).is_some())
+    };
+    let mut written = ["boxShadow", "textShadow", "filter", "backdropFilter"]
+        .into_iter()
+        .filter_map(|k| st.get(k))
+        .peekable();
+    if written.peek().is_some() && written.all(style_var) {
+        st.remove(EFFECT_STYLE_TYPE);
+    }
     if root {
         for k in ["position", "left", "top"] {
             st.remove(k);
@@ -2640,7 +2779,8 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
         .unwrap_or(16.0);
     let mut out: Styles = parent.clone();
     for (k, v) in own {
-        if INHERITED.contains(&k.as_str()) || k == css::STYLE_MARKER {
+        let shadow_style = k.strip_prefix(css::EFFECT_STYLE_MARKER) == Some("textShadow");
+        if INHERITED.contains(&k.as_str()) || k == css::STYLE_MARKER || shadow_style {
             let v = if k == "fontSize" {
                 css::length(v, pfs).map_or(v.clone(), |px| format!("{px}px"))
             } else {
@@ -2976,17 +3116,12 @@ impl Builder<'_, '_> {
             }
             _ if text_only(el) && has_text(el) && !(is_flex(&own) && has_element_children(el)) => {
                 let boxy = own.iter().any(|(k, v)| {
+                    let effect = k.strip_prefix(css::EFFECT_STYLE_MARKER).unwrap_or(k);
                     k.starts_with("background")
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
                         || k == "display" && v.contains("flex")
-                        || matches!(
-                            k.as_str(),
-                            "boxShadow"
-                                | "backdropFilter"
-                                | "WebkitBackdropFilter"
-                                | "webkitBackdropFilter"
-                        ) && v != "none"
+                        || (effect == "boxShadow" || css::is_backdrop_filter(effect)) && v != "none"
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -3823,7 +3958,7 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
-                    let effects = n.style.effects.clone();
+                    let effects = (n.style.effects.clone(), n.effect_style.clone());
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
                     // Like the inspector, a bindable field edited on an instance layer stops
                     // following the main component.
@@ -3831,18 +3966,16 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         .filter(|k| !applied.ignored.iter().any(|i| i == k))
                         .filter_map(|k| match k {
                             "border" => Some(TokenProp::Stroke.field()),
-                            "boxShadow"
-                            | "textShadow"
-                            | "filter"
-                            | "backdropFilter"
-                            | "WebkitBackdropFilter"
-                            | "webkitBackdropFilter" => Some("effects"),
+                            "boxShadow" | "textShadow" | "filter" | "effectStyle" => {
+                                Some("effects")
+                            }
+                            k if css::is_backdrop_filter(k) => Some("effects"),
                             k => TokenProp::from_css_key(k, &n).map(TokenProp::field),
                         })
                         .map(crate::editor::structure::override_key)
                         .collect();
                     // A filter can apply in part and still be reported as ignored.
-                    if n.style.effects != effects {
+                    if (&n.style.effects, &n.effect_style) != (&effects.0, &effects.1) {
                         edited.push("effects");
                     }
                     if let Some(l) = &mut n.instance {

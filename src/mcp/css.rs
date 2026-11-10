@@ -515,8 +515,11 @@ pub fn shadow_key(n: &Node) -> &'static str {
 
 /// Indices in CSS shadow order. Text excludes inner shadows because `text-shadow` has no `inset`.
 pub fn shadow_slots(n: &Node) -> Vec<usize> {
-    let text = matches!(n.kind, NodeKind::Text { .. });
-    (n.style.effects.iter().enumerate())
+    slots(&n.style.effects, matches!(n.kind, NodeKind::Text { .. }))
+}
+
+fn slots(effects: &[Effect], text: bool) -> Vec<usize> {
+    (effects.iter().enumerate())
         .filter(|(_, e)| e.visible && e.kind.is_shadow())
         .filter(|(_, e)| !text || e.kind == EffectKind::DropShadow)
         .map(|(i, _)| i)
@@ -589,6 +592,7 @@ fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
 }
 
 fn replace_effects(n: &mut Node, new: Vec<Effect>, replaced: impl Fn(&Effect) -> bool) {
+    n.effect_style = None;
     edit_effects(n, |list| {
         list.retain(|(e, _)| !replaced(e));
         list.splice(0..0, new.into_iter().map(|e| (e, None)));
@@ -605,6 +609,7 @@ fn apply_blur(n: &mut Node, kind: EffectKind, v: &str, fs: f64) -> bool {
         blur,
         ..Effect::new(kind)
     });
+    n.effect_style = None;
     edit_effects(n, |list| {
         list.retain(|(e, _)| e.kind != kind);
         list.extend(new.map(|e| (e, None)));
@@ -615,9 +620,18 @@ fn apply_blur(n: &mut Node, kind: EffectKind, v: &str, fs: f64) -> bool {
 /// The color callback receives the effect index, which may differ from its CSS list position.
 pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<String> {
     let text = matches!(n.kind, NodeKind::Text { .. });
-    let list: Vec<String> = (shadow_slots(n).into_iter())
+    shadow_list_css(&n.style.effects, text, color)
+}
+
+/// The visible shadows of `effects` as a `box-shadow` value, or a `text-shadow` one for `text`.
+pub fn shadow_list_css(
+    effects: &[Effect],
+    text: bool,
+    color: impl Fn(usize, Color) -> String,
+) -> Option<String> {
+    let list: Vec<String> = (slots(effects, text).into_iter())
         .map(|i| {
-            let e = &n.style.effects[i];
+            let e = &effects[i];
             let mut parts = Vec::new();
             if e.kind == EffectKind::InnerShadow {
                 parts.push("inset".to_string());
@@ -651,7 +665,12 @@ pub fn shape_filter_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Opt
 }
 
 fn blur_css(n: &Node, kind: EffectKind) -> Option<String> {
-    let r = blur_sigma(&n.style.effects, kind);
+    blur_list_css(&n.style.effects, kind)
+}
+
+/// The visible blurs of `kind` in `effects` as one `blur()`.
+pub fn blur_list_css(effects: &[Effect], kind: EffectKind) -> Option<String> {
+    let r = blur_sigma(effects, kind);
     (r > 0.0).then(|| format!("blur({})", px(r)))
 }
 
@@ -662,6 +681,15 @@ fn blur_css(n: &Node, kind: EffectKind) -> Option<String> {
 pub const TOKEN_MARKER: &str = "--token:";
 /// Carries the style id from `TokenSet::expand_styles`; text children inherit it.
 pub const STYLE_MARKER: &str = "--token:textStyle";
+/// `<marker><cssKey>` holds the style id, a space and resolved effects as JSON.
+pub const EFFECT_STYLE_MARKER: &str = "--token:effectStyle:";
+
+pub fn is_backdrop_filter(key: &str) -> bool {
+    matches!(
+        key,
+        "backdropFilter" | "WebkitBackdropFilter" | "webkitBackdropFilter"
+    )
+}
 
 /// Where the node sits, for properties whose meaning depends on the parent.
 #[derive(Debug, Clone, Copy, Default)]
@@ -841,6 +869,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let fs = n.kind.font_size().unwrap_or(16.0);
     // A stroke color gives a zero width 1px, unless a token owns the width.
     let mut shadows_set = false;
+    let mut named_style = None;
     let width_bound = n.tokens.contains_key(&TokenProp::StrokeWidth)
         || styles.iter().any(|(k, _)| {
             k.strip_prefix(TOKEN_MARKER)
@@ -859,6 +888,13 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     id: v.to_string(),
                     overrides: Default::default(),
                 });
+            }
+            continue;
+        }
+        if let Some(key) = k.strip_prefix(EFFECT_STYLE_MARKER) {
+            match key {
+                "effectStyle" => named_style = Some(v),
+                _ => apply_effect_style(n, key, v, &mut a),
             }
             continue;
         }
@@ -1291,9 +1327,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
             }
             "filter" => apply_blur(n, EffectKind::LayerBlur, v, fs),
-            "backdropFilter" | "WebkitBackdropFilter" | "webkitBackdropFilter" => {
-                apply_blur(n, EffectKind::BackgroundBlur, v, fs)
-            }
+            k if is_backdrop_filter(k) => apply_blur(n, EffectKind::BackgroundBlur, v, fs),
             "mixBlendMode" => match BlendMode::ALL.iter().find(|b| b.css() == lower) {
                 Some(b) => {
                     n.style.blend = *b;
@@ -1362,7 +1396,28 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
+    // Named styles win over literals so computed styles apply back without losing effects.
+    if let Some(v) = named_style {
+        apply_effect_style(n, "effectStyle", v, &mut a);
+    }
     a
+}
+
+fn apply_effect_style(n: &mut Node, key: &str, v: &str, a: &mut Applied) {
+    let text = matches!(n.kind, NodeKind::Text { .. });
+    let style = v
+        .split_once(' ')
+        .and_then(|(id, json)| Some((id, serde_json::from_str::<Vec<Effect>>(json).ok()?)));
+    match (key, style) {
+        // `text-shadow` is inherited, so boxes take it without using it.
+        ("textShadow", _) if !text => {}
+        ("boxShadow", _) if text => a.ignored.push(key.into()),
+        (_, Some((id, effects))) => {
+            edit_effects(n, |l| *l = effects.into_iter().map(|e| (e, None)).collect());
+            n.effect_style = Some(id.to_string());
+        }
+        (_, None) => a.ignored.push(key.into()),
+    }
 }
 
 fn set_dash(n: &mut Node, style: &str) {

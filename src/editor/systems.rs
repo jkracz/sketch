@@ -12,7 +12,8 @@ pub struct SystemUpdate {
     pub name: String,
     pub from: u32,
     pub to: u32,
-    /// CSS names of tokens, and classes of text styles, the new version no longer has.
+    /// CSS names of tokens and effect styles, and classes of text styles, the new version no
+    /// longer has.
     pub removed: Vec<String>,
     /// Layers, on every page, that were bound to those tokens.
     pub unbound: usize,
@@ -52,7 +53,7 @@ impl Editor {
         }
         let label = format!("Use {} design system", p.name);
         self.edit_tokens(&label, None, |t| {
-            t.attach(p.link(), &p.tokens, &p.text_styles)
+            t.attach(p.link(), &p.tokens, &p.text_styles, &p.effect_styles)
         })
     }
 
@@ -65,7 +66,7 @@ impl Editor {
         }
         let label = format!("Update {} to v{}", p.name, p.release);
         let gone = self.edit_tokens(&label, None, |t| {
-            t.update_system(p.link(), &p.tokens, &p.text_styles)
+            t.update_system(p.link(), &p.tokens, &p.text_styles, &p.effect_styles)
         });
         let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
         Some(SystemUpdate {
@@ -114,6 +115,9 @@ impl Editor {
                             || n.text_style_ref
                                 .as_ref()
                                 .is_some_and(|r| ids.contains(r.id.as_str()))
+                            || n.effect_style
+                                .as_ref()
+                                .is_some_and(|s| ids.contains(s.as_str()))
                     })
                     .count()
             })

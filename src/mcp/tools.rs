@@ -35,11 +35,14 @@ token changes reach it.
 - Text styles name a set of text settings, like Heading/L. get_tokens lists them as classes. \
 Apply one with class=\"heading-l\" in write_html or {\"textStyle\": \"heading-l\"} in \
 update_styles; create_text_styles and set_text_styles manage them.
+- Effect styles name a list of shadows and blurs, like Elevation/2. get_tokens lists them as \
+CSS variables. Apply one with box-shadow: var(--elevation-2) in write_html or \
+{\"effectStyle\": \"elevation-2\"} in update_styles.
 - Design systems are token sets other projects publish. list_design_systems gives a short \
 summary of each; get_design_system loads one system's usage notes and tokens (filter by types or \
 namePattern to load less); use_design_system lets the open file bind them as \
-var(--prefix-name) and its text styles as prefix-name classes. publish_design_system publishes \
-the open file's own tokens and text styles.
+var(--prefix-name), its text styles as prefix-name classes and its effect styles as \
+var(--prefix-name). publish_design_system publishes the open file's own tokens and styles.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
 - Call finish_working_on_nodes when done.";
@@ -57,11 +60,11 @@ fn token_type() -> Value {
     json!({"type": "string", "enum": kinds, "description": "Design token type."})
 }
 
-/// The `types` filter of the listing tools: token types, plus `textStyle`.
+/// The `types` filter of the listing tools: token types, plus `textStyle` and `effectStyle`.
 fn types_filter() -> Value {
     let mut kinds: Vec<&str> = TokenKind::ALL.iter().map(|k| k.key()).collect();
-    kinds.push("textStyle");
-    json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles. Omit for all."})
+    kinds.extend(["textStyle", "effectStyle"]);
+    json!({"type": "array", "items": {"type": "string", "enum": kinds}, "description": "Only these token types; \"textStyle\" for text styles and \"effectStyle\" for effect styles. Omit for all."})
 }
 
 fn style_props(extra: &[(&str, Value)]) -> Value {
@@ -492,6 +495,8 @@ pub fn definitions() -> Vec<Value> {
              clones an existing node.\n\
              - class=\"heading-l\" applies that text style (see get_tokens); inline styles \
              after it override single fields. Text inside the element inherits it.\n\
+             - box-shadow: var(--elevation-2) applies that effect style (see get_tokens), with \
+             all its shadows and blurs. On text, use text-shadow.\n\
              - data-theme=\"dark\" on a frame picks a token mode for it and its children \
              (see get_tokens); var() takes each token's value in that mode.\n\
              Returns the ids of the created top-level layers and the styles that were ignored.",
@@ -537,7 +542,10 @@ pub fn definitions() -> Vec<Value> {
             "update_styles",
             "Update styles on one or more nodes (camelCase CSS, like React.CSSProperties). Setting \
              left/top on an artboard moves it. textStyle: \"heading-l\" applies a text style to \
-             text layers; keys after it override single fields. mode: \"Dark\" makes frames and \
+             text layers; keys after it override single fields. effectStyle: \"elevation-2\" gives a \
+             layer an effect style's shadows and blurs, as does boxShadow: \"var(--elevation-2)\". It \
+             wins over shadow and blur values in the same update; setting one by value without it \
+             detaches the style. mode: \"Dark\" makes frames and \
              their children show tokens in that mode (\"inherit\" clears it). Hand-drawn keys: sketch, \
              roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
              ignoredStyles.",
@@ -638,12 +646,15 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "get_tokens",
             "Lists the project's design tokens (colors, spacing, typography...), grouped by \
-             type, and its text styles in short form (`class` and one line of CSS). Tokens and \
-             styles belong to the project, so every page shares them. By default only the \
+             type, and its text styles (`class` and one line of CSS) and effect styles (`var` \
+             and one line of CSS) in short form. Tokens and styles belong to the project, so \
+             every page shares them. By default only the \
              file's own, plus one line per design system the file uses; pass `system` to list \
              a design system's. Tokens can have a value per mode (`modes` lists the file's, \
              the first is the default); a token's `modes` holds only values that differ. CSS \
-             puts other modes in `[data-theme=\"dark\"]` blocks.",
+             puts other modes in `[data-theme=\"dark\"]` blocks, and writes each effect style \
+             as a variable (`--elevation-2: 0px 1px 2px …`, plus `--elevation-2-blur` and \
+             `--elevation-2-backdrop-blur` when it has blurs).",
             json!({
                 "system": {"type": "string", "description": "A design system the file uses (id, name or prefix) to list its tokens instead, or \"all\" for every token."},
                 "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
@@ -782,7 +793,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "publish_design_system",
-            "Publishes the open file's own tokens and text styles as a design system other \
+            "Publishes the open file's own tokens, text styles and effect styles as a design system other \
              files can use, or publishes a new version. Files that use it update when they \
              open. Omitted fields keep their last values. The prefix is fixed after the first \
              publish. Not an undo step: publish again to roll back. Returns the changed token \
@@ -860,15 +871,29 @@ overrides that field on the layer; get_computed_styles shows textStyle and
 textStyleOverrides. create_text_styles adds styles and set_text_styles edits or deletes them;
 editing a style updates every layer that uses it.
 
+Effect styles: a style names a list of shadows and blurs, such as Elevation/2. A shadow's color
+is a value or var(--token). get_tokens lists them as a variable and one line of CSS. Give a
+layer the whole list with box-shadow: var(--elevation-2) in write_html (text-shadow on text), or
+{effectStyle: \"elevation-2\"} in update_styles. A style with blurs also writes
+--elevation-2-blur for filter and --elevation-2-backdrop-blur for backdrop-filter; any of the
+three applies the style. get_computed_styles shows effectStyle and the variables, and get_jsx
+writes the variables, or effectStyle where no variable fits (text whose style has spread or
+inset shadows); write_html takes that as effect-style. Vector shapes export as inline SVG with
+their shadows as filter values, without the style. effectStyle wins over
+shadow and blur values set beside it. Setting a shadow or blur by value without it detaches the
+style and keeps the rest.
+Editing a style in the app updates every layer that uses it.
+
 Design systems: a project can publish its tokens for other projects to use. Load only what the
 task needs: list_design_systems gives one summary per system; get_design_system returns one
 system's usage notes and tokens, and takes types and namePattern to narrow them. Follow the
 usage notes. use_design_system adds a system to the open file: its tokens are read-only and
 named with its prefix (--brand-primary), and var() binds to them like any token. Its text
-styles are read-only classes with the same prefix (brand-heading-l). To customize a token, alias
+styles are read-only classes with the same prefix (brand-heading-l), and its effect styles
+read-only variables (--brand-elevation-2). To customize a token, alias
 it from a local token (create_tokens with value var(--brand-primary)). get_tokens lists the
 file's own tokens and one line per system; pass system to see a system's tokens.
-publish_design_system publishes the open file's own tokens and text styles; write notes that say
+publish_design_system publishes the open file's own tokens and styles; write notes that say
 which token or style to use where.
 
 Node ids look like \"3fa9c1:14\" (page prefix and node number). Ids stay valid across calls.";
@@ -895,6 +920,7 @@ font-family, font-size, font-weight, font-style, line-height, letter-spacing, te
 Effects: box-shadow with lists, inset and spread, text-shadow on text, filter: blur(),
 backdrop-filter: blur(). A shadow whose color is var(--token) stays bound to that color token.
 Setting one of these replaces the layer's effects of that kind, and none removes them.
+box-shadow: var(--elevation-2) applies an effect style (see get_tokens).
 Ignored (reported back): margin, grid, transform, filters other than blur(), transitions.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
