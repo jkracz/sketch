@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use sketch_rs::mcp::{Out, exec};
-use sketch_rs::model::{Color, NodeId, TokenProp};
+use sketch_rs::model::{Color, NodeId, NodeKind, TokenProp};
 use sketch_rs::project::Store;
 
 fn store() -> Store {
@@ -452,6 +452,38 @@ fn agents_place_an_instance_by_name_and_its_edits_survive_syncs() {
         rect(&h, label).w > rect(&h, other).w,
         "the longer label keeps its own width"
     );
+
+    // Edits without a token equivalent, and text that resizes, also survive.
+    let hidden = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+               "html": r#"<x-sketch-instance component="Button" style="display:none"/>"#}),
+    );
+    let hidden = node(&hidden["createdNodeIds"][0]);
+    let other_key = &inst[1]["textLayers"][0]["id"];
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [other_key], "styles": {"fontSize": "24px", "fontStyle": "italic"}}]}),
+    );
+    let grown = rect(&h, other);
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [inst[0]["textLayers"][0]["id"]], "styles": {"width": "40px"}}]}),
+    );
+    call(&mut h, "get_basic_info", json!({}));
+    assert!(!h.ed.doc.get(hidden).unwrap().visible);
+    let o = h.ed.doc.get(other).unwrap();
+    assert_eq!(o.kind.font_size(), Some(24.0));
+    assert!(o.text_style.italic, "{:?}", o.text_style);
+    assert_eq!((rect(&h, other).w, rect(&h, other).h), (grown.w, grown.h));
+    assert!(grown.h > 20.0);
+    let NodeKind::Text { auto_width, .. } = h.ed.doc.get(label).unwrap().kind else {
+        panic!()
+    };
+    assert!(!auto_width, "a set width keeps the label wrapping");
 
     let err = try_call(
         &mut h,

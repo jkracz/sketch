@@ -3775,7 +3775,7 @@ impl Builder<'_, '_> {
             n.layout_child.absolute = false;
         }
         let a = css::apply(&mut n, own, &parent.ctx());
-        for k in edited_overrides(own, &a, &before, &n) {
+        for k in edited_overrides(&before, &n) {
             mark_override(&mut n, k);
         }
         if let Some(name) = Self::layer_name(el) {
@@ -4303,7 +4303,7 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
                     let before = n.clone();
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
-                    for k in edited_overrides(&raw, &applied, &before, &n) {
+                    for k in edited_overrides(&before, &n) {
                         mark_override(&mut n, k);
                     }
                     if mode.is_some() && !frame {
@@ -4340,6 +4340,11 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         crate::layout::resize_children(tx, *id, old, new);
                     }
                     fit_text(tx, *id, keep_h);
+                    // A font change can resize text; keep the measured size through syncs.
+                    let n = tx.node_mut(*id).unwrap();
+                    if (n.rect.w, n.rect.h) != (old.w, old.h) {
+                        mark_override(n, "size");
+                    }
                     relayout(tx, Some(*id));
                     out.push((*id, applied.ignored, warn));
                 }
@@ -4445,45 +4450,83 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"updated": n}))
 }
 
-/// The override keys a style edit sets on an instance layer, like the inspector's, so the
-/// next sync from the main keeps the edit. `raw` is the styles as given, `before` and `after`
-/// the layer around `css::apply`.
-fn edited_overrides(
-    raw: &Styles,
-    applied: &css::Applied,
-    before: &Node,
-    after: &Node,
-) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = (raw.iter().map(|(k, _)| k.as_str()))
-        .filter(|k| !applied.ignored.iter().any(|i| i == k))
-        .filter_map(|k| match k {
-            "border" => Some(TokenProp::Stroke.field()),
-            "boxShadow" | "textShadow" | "filter" | "effectStyle" => Some("effects"),
-            k if css::is_backdrop_filter(k) => Some("effects"),
-            k => TokenProp::from_css_key(k, after).map(TokenProp::field),
-        })
-        .map(crate::editor::structure::override_key)
+/// The override groups an edit changed on an instance layer, the groups `copy_props` syncs,
+/// so the next sync from the main keeps the edit.
+fn edited_overrides(before: &Node, after: &Node) -> Vec<&'static str> {
+    let (b, a) = (&before.style, &after.style);
+    let text = |n: &Node| match &n.kind {
+        NodeKind::Text {
+            text,
+            font_size,
+            auto_width,
+            align,
+        } => Some((text.clone(), (*font_size, *auto_width, *align))),
+        _ => None,
+    };
+    let (bt, at) = (text(before), text(after));
+    let changed = [
+        ("fills", b.fills != a.fills),
+        (
+            "stroke",
+            (
+                b.stroke,
+                b.stroke_width,
+                b.stroke_align,
+                &b.dash,
+                b.cap,
+                b.join,
+            ) != (
+                a.stroke,
+                a.stroke_width,
+                a.stroke_align,
+                &a.dash,
+                a.cap,
+                a.join,
+            ),
+        ),
+        (
+            "radius",
+            (b.corner_radius, b.radii) != (a.corner_radius, a.radii),
+        ),
+        ("opacity", (b.opacity, b.blend) != (a.opacity, a.blend)),
+        (
+            "effects",
+            (&b.effects, &before.effect_style) != (&a.effects, &after.effect_style),
+        ),
+        (
+            "text",
+            bt.as_ref().map(|t| &t.0) != at.as_ref().map(|t| &t.0),
+        ),
+        (
+            "font",
+            bt.map(|t| t.1) != at.map(|t| t.1)
+                || (&before.text_style, &before.text_style_ref)
+                    != (&after.text_style, &after.text_style_ref),
+        ),
+        ("visible", before.visible != after.visible),
+        ("mode", before.mode != after.mode),
+        (
+            "size",
+            (before.rect.w, before.rect.h) != (after.rect.w, after.rect.h),
+        ),
+        (
+            "position",
+            (before.rect.x, before.rect.y) != (after.rect.x, after.rect.y),
+        ),
+        (
+            "layout",
+            (before.layout, before.layout_child) != (after.layout, after.layout_child),
+        ),
+    ];
+    let mut out: Vec<&'static str> = (changed.into_iter())
+        .filter_map(|(k, c)| c.then_some(k))
         .collect();
-    // A filter can apply in part and still be reported as ignored.
-    if (&after.style.effects, &after.effect_style) != (&before.style.effects, &before.effect_style)
-    {
-        out.push("effects");
-    }
-    // Only a size style counts, since a font change can also resize text.
-    let sized = (raw.iter()).any(|(k, _)| {
-        matches!(
-            k.as_str(),
-            "width" | "height" | "minWidth" | "maxWidth" | "minHeight" | "maxHeight"
-        )
-    });
-    if sized && (before.rect.w, before.rect.h) != (after.rect.w, after.rect.h) {
-        out.push("size");
-    }
-    if (before.rect.x, before.rect.y) != (after.rect.x, after.rect.y) {
-        out.push("position");
-    }
-    if (before.layout, before.layout_child) != (after.layout, after.layout_child) {
-        out.push("layout");
+    // A token bound or unbound changes its group even when the value stays.
+    for p in TokenProp::ALL {
+        let k = crate::editor::structure::override_key(p.field());
+        if before.tokens.get(&p) != after.tokens.get(&p) && !out.contains(&k) {
+            out.push(k);
+        }
     }
     out
 }
