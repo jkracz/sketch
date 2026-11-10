@@ -1890,7 +1890,7 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
         );
         for s in &effects {
             out.push_str(&format!(
-                "{}: {};",
+                "{} {{ {} }}",
                 set.effect_style_var(s),
                 set.effect_style_short(s)
             ));

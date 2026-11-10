@@ -336,7 +336,7 @@ fn design_systems_carry_styles_with_the_prefix() {
     let text = text.as_str().unwrap();
     assert!(text.contains("## Effect styles"), "{text}");
     assert!(
-        text.contains("--acme-elevation-2: box-shadow: 0px 1px 2px var(--acme-shade)"),
+        text.contains("--acme-elevation-2 { box-shadow: 0px 1px 2px var(--acme-shade)"),
         "{text}"
     );
     let json = call(
