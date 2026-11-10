@@ -6,9 +6,14 @@
 
 use super::node::{Node, NodeKind};
 use super::paint::LetterSpacing;
-use super::tokens::{Keyed, TokenKind, TokenProp, TokenSet, TokenValue, css_slug, linked_id};
+use super::tokens::{Keyed, Mode, TokenKind, TokenProp, TokenSet, TokenValue, css_slug, linked_id};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+/// Other modes' values for one field, by mode id.
+pub type ModeValues = BTreeMap<String, TokenValue>;
+
+static NO_MODES: ModeValues = BTreeMap::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +59,18 @@ impl StyleField {
         })
     }
 
+    /// The token kind the field takes. Italic has none.
+    pub fn kind(self) -> Option<TokenKind> {
+        Some(match self {
+            StyleField::Family => TokenKind::FontFamily,
+            StyleField::Size => TokenKind::FontSize,
+            StyleField::Weight => TokenKind::FontWeight,
+            StyleField::Italic => return None,
+            StyleField::LineHeight => TokenKind::LineHeight,
+            StyleField::LetterSpacing => TokenKind::LetterSpacing,
+        })
+    }
+
     /// The camelCase CSS property, as the MCP tools take it.
     pub fn css_key(self) -> &'static str {
         match self {
@@ -88,6 +105,11 @@ pub struct TextStyleDef {
     /// The design system this style comes from, by id, like `Token::system`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// Values for the other modes of the style's file or design system, by field and then
+    /// mode id, like `Token::modes`. Flattening an alias to a token fills them, so the style
+    /// keeps showing what the token did in each mode. Setting a field clears its entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<StyleField, ModeValues>,
 }
 
 impl Keyed for TextStyleDef {
@@ -97,17 +119,65 @@ impl Keyed for TextStyleDef {
 }
 
 impl TextStyleDef {
-    /// The token-like fields with the kind each takes. Italic isn't one.
-    pub fn values_mut(&mut self) -> impl Iterator<Item = (TokenKind, &mut TokenValue)> {
-        [
-            (TokenKind::FontFamily, Some(&mut self.family)),
-            (TokenKind::FontSize, Some(&mut self.size)),
-            (TokenKind::FontWeight, Some(&mut self.weight)),
-            (TokenKind::LineHeight, self.line_height.as_mut()),
-            (TokenKind::LetterSpacing, Some(&mut self.letter_spacing)),
-        ]
-        .into_iter()
-        .filter_map(|(k, v)| Some((k, v?)))
+    /// The first value of a token-like field. Italic isn't one, nor is a `normal` line height.
+    pub fn value(&self, f: StyleField) -> Option<&TokenValue> {
+        match f {
+            StyleField::Family => Some(&self.family),
+            StyleField::Size => Some(&self.size),
+            StyleField::Weight => Some(&self.weight),
+            StyleField::Italic => None,
+            StyleField::LineHeight => self.line_height.as_ref(),
+            StyleField::LetterSpacing => Some(&self.letter_spacing),
+        }
+    }
+
+    /// The other modes' values of field `f`.
+    pub fn mode_values(&self, f: StyleField) -> &ModeValues {
+        self.modes.get(&f).unwrap_or(&NO_MODES)
+    }
+
+    /// Visit each token-like field with its kind, first value and other modes' values.
+    pub fn each_field(&mut self, mut f: impl FnMut(TokenKind, &mut TokenValue, &mut ModeValues)) {
+        let TextStyleDef {
+            family,
+            size,
+            weight,
+            line_height,
+            letter_spacing,
+            modes,
+            ..
+        } = self;
+        let fields = [
+            (StyleField::Family, Some(family)),
+            (StyleField::Size, Some(size)),
+            (StyleField::Weight, Some(weight)),
+            (StyleField::LineHeight, line_height.as_mut()),
+            (StyleField::LetterSpacing, Some(letter_spacing)),
+        ];
+        for (field, v) in fields {
+            let (Some(v), Some(kind)) = (v, field.kind()) else {
+                continue;
+            };
+            f(kind, v, modes.entry(field).or_default());
+        }
+        modes.retain(|_, m| !m.is_empty());
+    }
+
+    /// Every value of the token-like fields, other modes' too.
+    pub fn values_mut(&mut self) -> Vec<&mut TokenValue> {
+        let TextStyleDef {
+            family,
+            size,
+            weight,
+            line_height,
+            letter_spacing,
+            modes,
+            ..
+        } = self;
+        let mut out: Vec<&mut TokenValue> = vec![family, size, weight, letter_spacing];
+        out.extend(line_height.as_mut());
+        out.extend(modes.values_mut().flat_map(|m| m.values_mut()));
+        out
     }
 
     fn values(&self) -> impl Iterator<Item = &TokenValue> {
@@ -120,6 +190,17 @@ impl TextStyleDef {
         ]
         .into_iter()
         .flatten()
+        .chain(self.modes.values().flat_map(|m| m.values()))
+    }
+
+    /// Rename the mode ids that other modes' values are keyed by.
+    pub fn rekey_modes(&mut self, f: impl Fn(&str) -> String) {
+        for m in self.modes.values_mut() {
+            *m = std::mem::take(m)
+                .into_iter()
+                .map(|(id, v)| (f(&id), v))
+                .collect();
+        }
     }
 
     pub fn uses_any(&self, ids: &HashSet<&str>) -> bool {
@@ -285,6 +366,26 @@ impl TokenSet {
         ))
     }
 
+    /// The modes `s` keeps values for: its design system's, or this file's.
+    pub fn style_modes(&self, s: &TextStyleDef) -> &[Mode] {
+        match &s.system {
+            Some(id) => self.system(id).map_or(&[], |l| &l.modes),
+            None => self.modes(),
+        }
+    }
+
+    /// Field `f`'s own value in the mode named `mode`, aliases unfollowed. None for italic
+    /// and a `normal` line height.
+    pub fn style_value_in<'a>(
+        &self,
+        s: &'a TextStyleDef,
+        f: StyleField,
+        mode: Option<&str>,
+    ) -> Option<&'a TokenValue> {
+        let v = s.value(f)?;
+        Some(self.pick(self.style_modes(s), v, s.mode_values(f), mode))
+    }
+
     /// Follow every alias to a literal in the default mode. None when an alias is broken.
     pub fn resolve_style(&self, id: &str) -> Option<ResolvedStyle> {
         self.resolve_style_in(id, None)
@@ -293,27 +394,27 @@ impl TokenSet {
     /// Follow every alias to a literal in the mode named `mode`.
     pub fn resolve_style_in(&self, id: &str, mode: Option<&str>) -> Option<ResolvedStyle> {
         let s = self.style(id)?;
-        let literal = |v: &TokenValue| match v {
+        let literal = |f: StyleField| match self.style_value_in(s, f, mode)? {
             TokenValue::Alias(a) => self.resolve_in(a, mode),
             v => Some(v.clone()),
         };
-        let num = |v: &TokenValue| match literal(v)? {
+        let num = |f: StyleField| match literal(f)? {
             TokenValue::Number(n) => Some(n),
             _ => None,
         };
         Some(ResolvedStyle {
-            family: match literal(&s.family)? {
+            family: match literal(StyleField::Family)? {
                 TokenValue::Text(f) => f,
                 _ => return None,
             },
-            size: num(&s.size)?,
-            weight: num(&s.weight)?,
+            size: num(StyleField::Size)?,
+            weight: num(StyleField::Weight)?,
             italic: s.italic,
             line_height: match &s.line_height {
-                Some(v) => Some(num(v)?),
+                Some(_) => Some(num(StyleField::LineHeight)?),
                 None => None,
             },
-            letter_spacing: match literal(&s.letter_spacing)? {
+            letter_spacing: match literal(StyleField::LetterSpacing)? {
                 TokenValue::Number(px) => LetterSpacing::Px(px),
                 TokenValue::Em(em) => LetterSpacing::Em { em },
                 _ => return None,
@@ -360,6 +461,33 @@ impl TokenSet {
         }
     }
 
+    /// `s`'s own values in the modes after its first, as (mode name, [(field, CSS)]).
+    pub fn style_mode_values(&self, s: &TextStyleDef) -> Vec<(String, Vec<(StyleField, String)>)> {
+        (self.style_modes(s).iter().skip(1))
+            .filter_map(|m| {
+                let fields: Vec<(StyleField, String)> = (StyleField::ALL.into_iter())
+                    .filter_map(|f| {
+                        let v = s.mode_values(f).get(&m.id)?;
+                        Some((f, self.value_css(f.kind()?, v)))
+                    })
+                    .collect();
+                (!fields.is_empty()).then(|| (m.name.clone(), fields))
+            })
+            .collect()
+    }
+
+    /// [`style_mode_values`](Self::style_mode_values) as one line: `Dark: font-size: 48px`.
+    pub fn style_mode_notes(&self, s: &TextStyleDef) -> Vec<String> {
+        (self.style_mode_values(s).into_iter())
+            .map(|(m, fields)| {
+                let list: Vec<String> = (fields.iter())
+                    .map(|(f, v)| format!("{}: {v}", css_kebab(f.css_key())))
+                    .collect();
+                format!("{m}: {}", list.join("; "))
+            })
+            .collect()
+    }
+
     /// The style as one line of CSS: `font: 700 32px/120% Inter; letter-spacing: -0.02em`.
     pub fn style_short(&self, s: &TextStyleDef) -> String {
         let v = |f| self.style_value_css(s, f);
@@ -386,22 +514,46 @@ impl TokenSet {
         out
     }
 
-    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks.
+    /// One class per style, `.heading-l { ... }`, or Tailwind v4 `@utility` blocks. A style
+    /// with its own values in other modes adds `[data-theme="dark"] .heading-l { ... }`, nested
+    /// as `[data-theme="dark"] & { ... }` in a utility.
     pub fn style_sheet(&self, styles: &[&TextStyleDef], tailwind: bool) -> String {
         let mut out = String::new();
+        let decls = |fields: &[(StyleField, String)], indent: &str| {
+            (fields.iter())
+                .map(|(f, v)| format!("{indent}{}: {v};\n", css_kebab(f.css_key())))
+                .collect::<String>()
+        };
         for s in styles {
             let class = self.style_class(s);
+            let theme = |m: &str| format!("[data-theme=\"{}\"]", css_slug(m));
+            let modes = self.style_mode_values(s);
             // Tailwind utility names must start with a letter.
-            if tailwind && class.starts_with(|c: char| c.is_ascii_lowercase()) {
-                out.push_str(&format!("@utility {class} {{\n"));
-            } else {
-                out.push_str(&format!(".{} {{\n", selector_escape(&class)));
+            let utility = tailwind && class.starts_with(|c: char| c.is_ascii_lowercase());
+            let selector = format!(".{}", selector_escape(&class));
+            match utility {
+                true => out.push_str(&format!("@utility {class} {{\n")),
+                false => out.push_str(&format!("{selector} {{\n")),
             }
-            for f in StyleField::ALL {
-                let key = css_kebab(f.css_key());
-                out.push_str(&format!("  {key}: {};\n", self.style_value_css(s, f)));
+            let all: Vec<(StyleField, String)> = (StyleField::ALL.into_iter())
+                .map(|f| (f, self.style_value_css(s, f)))
+                .collect();
+            out.push_str(&decls(&all, "  "));
+            if utility {
+                for (m, fields) in &modes {
+                    out.push_str(&format!("  {} & {{\n", theme(m)));
+                    out.push_str(&decls(fields, "    "));
+                    out.push_str("  }\n");
+                }
             }
             out.push_str("}\n");
+            if !utility {
+                for (m, fields) in &modes {
+                    out.push_str(&format!("{} {selector} {{\n", theme(m)));
+                    out.push_str(&decls(fields, "  "));
+                    out.push_str("}\n");
+                }
+            }
         }
         out
     }
@@ -442,6 +594,7 @@ impl TokenSet {
         let mut one = |f: StyleField, raw: &Option<String>| -> Result<(), String> {
             let Some(raw) = raw else { return Ok(()) };
             let v = self.parse_style_field(f, raw)?;
+            s.modes.remove(&f);
             match f {
                 StyleField::Family => s.family = v.unwrap_or(s.family.clone()),
                 StyleField::Size => s.size = v.unwrap_or(s.size.clone()),
@@ -501,6 +654,7 @@ impl TokenSet {
             letter_spacing: TokenValue::Number(0.0),
             description: None,
             system: None,
+            modes: BTreeMap::new(),
         }
     }
 
@@ -592,37 +746,29 @@ impl TokenSet {
     }
 
     /// Before tokens go: style fields that alias them take on the values they showed.
+    /// Before tokens go: style fields that alias them take on the values they showed, in
+    /// every mode.
     pub(super) fn flatten_style_aliases(&mut self, gone: &HashSet<&str>) {
-        let mut styles = std::mem::take(&mut self.styles);
-        for s in &mut styles {
-            for (kind, v) in s.values_mut() {
-                if let TokenValue::Alias(a) = v
-                    && gone.contains(a.as_str())
-                {
-                    *v = self.resolve(a).unwrap_or_else(|| kind.default_value());
-                }
-            }
-        }
-        self.styles = styles;
+        self.styles = (self.styles.iter())
+            .map(|s| self.flattened_style(s, |a| gone.contains(a)))
+            .collect();
+    }
+
+    fn flattened_style(&self, s: &TextStyleDef, gone: impl Fn(&str) -> bool) -> TextStyleDef {
+        let list = self.style_modes(s);
+        let mut out = s.clone();
+        out.each_field(|kind, v, modes| self.flatten_value(kind, list, v, modes, &gone));
+        out
     }
 
     /// Styles as a design system publishes them: the local ones, with aliases to another
-    /// system's tokens replaced by the values they show.
+    /// system's tokens replaced by the values they show in each mode.
     pub fn publishable_styles(&self) -> Vec<TextStyleDef> {
+        let elsewhere = |a: &str| self.get(a).is_none_or(|t| t.system.is_some());
         self.styles
             .iter()
             .filter(|s| s.system.is_none())
-            .map(|s| {
-                let mut s = s.clone();
-                for (kind, v) in s.values_mut() {
-                    if let TokenValue::Alias(a) = v
-                        && self.get(a).is_none_or(|t| t.system.is_some())
-                    {
-                        *v = self.resolve(a).unwrap_or_else(|| kind.default_value());
-                    }
-                }
-                s
-            })
+            .map(|s| self.flattened_style(s, elsewhere))
             .collect()
     }
 
@@ -636,11 +782,12 @@ impl TokenSet {
                     system: Some(system.to_string()),
                     ..s.clone()
                 };
-                for (_, v) in s.values_mut() {
+                for v in s.values_mut() {
                     if let TokenValue::Alias(a) = v {
                         *a = linked_id(system, a);
                     }
                 }
+                s.rekey_modes(|m| linked_id(system, m));
                 s
             })
             .collect()
@@ -686,18 +833,25 @@ impl TokenSet {
         gone
     }
 
-    /// Turn a system's styles into local ones that keep their classes.
+    /// Turn a system's styles into local ones that keep their classes, with other modes'
+    /// values moved to this file's modes of the same names. Runs while the system is linked.
     pub(super) fn detach_styles(&mut self, system: &str) {
-        let classes: Vec<(String, String)> = self
+        let classes: Vec<TextStyleDef> = self
             .styles
             .iter()
             .filter(|s| s.system.as_deref() == Some(system))
-            .map(|s| (s.id.clone(), self.style_class(s)))
+            .map(|s| {
+                let list = self.style_modes(s);
+                let mut local = s.clone();
+                local.each_field(|_, v, modes| (*v, *modes) = self.localized(list, v, modes));
+                local.name = self.style_class(s);
+                local.system = None;
+                local
+            })
             .collect();
         for s in &mut self.styles {
-            if let Some((_, class)) = classes.iter().find(|(id, _)| *id == s.id) {
-                s.name = class.clone();
-                s.system = None;
+            if let Some(l) = classes.iter().find(|l| l.id == s.id) {
+                *s = l.clone();
             }
         }
     }
@@ -826,6 +980,166 @@ mod tests {
         s.delete(&[size]);
         assert_eq!(s.style(&id).unwrap().size, TokenValue::Number(32.0));
         assert!(s.resolve_style(&id).is_some());
+    }
+
+    /// A style whose size aliases `--size`, 12px in Light and 48px in Dark.
+    fn moded() -> (TokenSet, String, String) {
+        let mut s = TokenSet::default();
+        let dark = vec![("dark".to_string(), "48px".to_string())];
+        let size = s
+            .create_in_modes(TokenKind::FontSize, "size", "12px", &dark, None)
+            .unwrap();
+        let id = s
+            .create_style("Body", &input(&[(StyleField::Size, "var(--size)")]), None)
+            .unwrap();
+        (s, id, size)
+    }
+
+    fn sizes(s: &TokenSet, id: &str) -> (f64, f64) {
+        let size = |m| s.resolve_style_in(id, Some(m)).unwrap().size;
+        (size("Light"), size("Dark"))
+    }
+
+    #[test]
+    fn deleting_a_token_keeps_each_modes_value() {
+        let (mut s, id, size) = moded();
+        s.delete(&[size]);
+        let st = s.style(&id).unwrap();
+        assert_eq!(st.size, TokenValue::Number(12.0));
+        assert_eq!(
+            st.mode_values(StyleField::Size).get("dark"),
+            Some(&TokenValue::Number(48.0))
+        );
+        assert_eq!(sizes(&s, &id), (12.0, 48.0));
+    }
+
+    #[test]
+    fn setting_a_field_sets_every_mode() {
+        let (mut s, id, size) = moded();
+        s.delete(&[size]);
+        s.update_style(&id, None, &input(&[(StyleField::Size, "20px")]), None)
+            .unwrap();
+        assert!(s.style(&id).unwrap().modes.is_empty());
+        assert_eq!(sizes(&s, &id), (20.0, 20.0));
+    }
+
+    #[test]
+    fn deleting_the_first_mode_keeps_style_values() {
+        let (mut s, id, size) = moded();
+        s.add_mode();
+        s.delete(&[size]);
+        s.delete_mode("light").unwrap();
+        let st = s.style(&id).unwrap();
+        assert_eq!(st.size, TokenValue::Number(48.0));
+        let third = s.modes()[1].name.clone();
+        let size = |m: &str| s.resolve_style_in(&id, Some(m)).unwrap().size;
+        assert_eq!((size("Dark"), size(&third)), (48.0, 12.0));
+    }
+
+    fn link(id: &str, modes: &[Mode]) -> crate::model::SystemLink {
+        crate::model::SystemLink {
+            id: id.into(),
+            name: id.into(),
+            prefix: id.into(),
+            release: 1,
+            description: None,
+            notes: None,
+            modes: (modes.iter())
+                .map(|m| Mode::new(&linked_id(id, &m.id), &m.name))
+                .collect(),
+        }
+    }
+
+    /// `src`'s tokens and styles, as a file using its system `id` holds them.
+    fn using(src: &TokenSet, id: &str) -> TokenSet {
+        let mut s = TokenSet::default();
+        let l = link(id, src.modes());
+        s.attach(l, &src.publishable(), &src.publishable_styles())
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn publishing_keeps_each_modes_value_of_another_systems_token() {
+        let (src, _, _) = moded();
+        let mut mid = TokenSet::default();
+        mid.attach(link("a", src.modes()), &src.publishable(), &[])
+            .unwrap();
+        let id = mid
+            .create_style("Body", &input(&[(StyleField::Size, "var(--a-size)")]), None)
+            .unwrap();
+        let published = mid.publishable_styles();
+        assert_eq!(published[0].size, TokenValue::Number(12.0));
+        assert_eq!(
+            published[0].mode_values(StyleField::Size).get("dark"),
+            Some(&TokenValue::Number(48.0))
+        );
+
+        let used = using(&mid, "b");
+        assert_eq!(sizes(&used, &linked_id("b", &id)), (12.0, 48.0));
+    }
+
+    #[test]
+    fn removing_a_system_keeps_each_modes_value() {
+        let (src, _, _) = moded();
+        let mut s = TokenSet::default();
+        s.attach(link("a", src.modes()), &src.publishable(), &[])
+            .unwrap();
+        let id = s
+            .create_style("Body", &input(&[(StyleField::Size, "var(--a-size)")]), None)
+            .unwrap();
+        s.remove_system("a");
+        assert_eq!(sizes(&s, &id), (12.0, 48.0));
+    }
+
+    #[test]
+    fn detaching_moves_style_values_to_local_modes() {
+        let (mut src, id, size) = moded();
+        src.delete(&[size]);
+        let mut s = using(&src, "a");
+        s.detach_system("a");
+        let id = linked_id("a", &id);
+        let st = s.style(&id).unwrap();
+        assert!(st.system.is_none());
+        assert!(
+            (st.modes.values().flat_map(|m| m.keys()))
+                .all(|m| s.modes().iter().any(|x| x.id == *m)),
+            "{st:?}"
+        );
+        assert_eq!(sizes(&s, &id), (12.0, 48.0));
+    }
+
+    #[test]
+    fn style_sheets_set_other_modes_values() {
+        let (mut s, id, size) = moded();
+        s.delete(&[size]);
+        let st = s.style(&id).unwrap();
+        let css = s.style_sheet(&[st], false);
+        assert!(css.contains(".body {\n"), "{css}");
+        assert!(css.contains("  font-size: 12px;\n"), "{css}");
+        assert!(
+            css.contains("[data-theme=\"dark\"] .body {\n  font-size: 48px;\n}\n"),
+            "{css}"
+        );
+        let tw = s.style_sheet(&[st], true);
+        assert!(
+            tw.contains("  [data-theme=\"dark\"] & {\n    font-size: 48px;\n  }\n}\n"),
+            "{tw}"
+        );
+        assert_eq!(s.style_mode_notes(st), vec!["Dark: font-size: 48px"]);
+    }
+
+    #[test]
+    fn styles_saved_before_mode_values_load() {
+        let json = r#"{"id":"a","name":"Body","family":{"text":"Inter"},"size":{"number":16},
+            "weight":{"number":400},"letter_spacing":{"number":0}}"#;
+        let st: TextStyleDef = serde_json::from_str(json).unwrap();
+        assert!(st.modes.is_empty());
+        let (mut s, id, size) = moded();
+        s.delete(&[size]);
+        let st = s.style(&id).unwrap();
+        let back: TextStyleDef = serde_json::from_str(&serde_json::to_string(st).unwrap()).unwrap();
+        assert_eq!(&back, st);
     }
 
     #[test]

@@ -233,6 +233,9 @@ fn small(ui: &Ui, s: impl Into<String>) -> RichText {
 fn locked_fields(ui: &mut Ui, ed: &mut Editor, s: &TextStyleDef) {
     ui.add_space(3.0);
     ui.label(small(ui, ed.tokens.style_short(s)));
+    for note in ed.tokens.style_mode_notes(s) {
+        ui.label(small(ui, note));
+    }
     if let Some(d) = &s.description {
         ui.label(small(ui, d.clone()));
     }
@@ -282,6 +285,7 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
     }
 
     let mut responses = Vec::new();
+    let by_mode = ed.tokens.style_mode_values(s);
     for (i, f) in TEXT_FIELDS.into_iter().enumerate() {
         let r = ui
             .horizontal(|ui| {
@@ -306,6 +310,20 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
             d.error = res.err();
         }
         responses.push(r);
+        // Values kept from a flattened token. Typing a value sets every mode.
+        let others: Vec<String> = (by_mode.iter())
+            .filter_map(|(m, fields)| {
+                let (_, v) = fields.iter().find(|(x, _)| *x == f)?;
+                Some(format!("{m}: {v}"))
+            })
+            .collect();
+        if !others.is_empty() {
+            ui.horizontal(|ui| {
+                label(ui, "");
+                ui.label(small(ui, others.join(", ")))
+                    .on_hover_text("Typing a value sets it for every mode.");
+            });
+        }
     }
 
     ui.horizontal(|ui| {

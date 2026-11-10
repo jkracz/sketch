@@ -529,12 +529,23 @@ impl TokenSet {
     /// `t`'s own value in the mode named `mode` (None for the default), aliases unfollowed.
     /// A design system without a mode of that name gives its first value.
     pub fn value_in<'a>(&self, t: &'a Token, mode: Option<&str>) -> &'a TokenValue {
+        self.pick(self.modes_of(t), &t.value, &t.modes, mode)
+    }
+
+    /// The value for the mode named `mode` from a first value and other modes' values keyed
+    /// by the ids in `list`, as tokens and style fields hold them.
+    pub(super) fn pick<'a>(
+        &self,
+        list: &[Mode],
+        value: &'a TokenValue,
+        modes: &'a BTreeMap<String, TokenValue>,
+        mode: Option<&str>,
+    ) -> &'a TokenValue {
         let name = mode.unwrap_or(self.default_mode());
-        self.modes_of(t)
-            .iter()
+        list.iter()
             .find(|m| same_mode(&m.name, name))
-            .and_then(|m| t.modes.get(&m.id))
-            .unwrap_or(&t.value)
+            .and_then(|m| modes.get(&m.id))
+            .unwrap_or(value)
     }
 
     /// Add Dark if absent, otherwise a numbered mode. Return its id.
@@ -591,19 +602,25 @@ impl TokenSet {
             return Err("A file needs at least one mode.".into());
         }
         let rest: Vec<String> = self.modes[1..].iter().map(|m| m.id.clone()).collect();
-        for t in self.tokens.iter_mut().filter(|t| t.system.is_none()) {
-            t.modes.remove(id);
+        let drop = |value: &mut TokenValue, modes: &mut BTreeMap<String, TokenValue>| {
+            modes.remove(id);
             if at == 0 {
-                let old = t.value.clone();
-                if let Some(v) = t.modes.remove(&rest[0]) {
-                    t.value = v;
+                let old = value.clone();
+                if let Some(v) = modes.remove(&rest[0]) {
+                    *value = v;
                 }
                 for m in &rest[1..] {
-                    if !t.modes.contains_key(m) && old != t.value {
-                        t.modes.insert(m.clone(), old.clone());
+                    if !modes.contains_key(m) && old != *value {
+                        modes.insert(m.clone(), old.clone());
                     }
                 }
             }
+        };
+        for t in self.tokens.iter_mut().filter(|t| t.system.is_none()) {
+            drop(&mut t.value, &mut t.modes);
+        }
+        for s in self.styles.iter_mut().filter(|s| s.system.is_none()) {
+            s.each_field(|_, v, modes| drop(v, modes));
         }
         self.modes.remove(at);
         Ok(())
@@ -1029,26 +1046,45 @@ impl TokenSet {
 
     /// Replace aliases to removed tokens with literals, preserving each mode's appearance.
     fn flattened(&self, t: &Token, gone: impl Fn(&str) -> bool) -> Token {
+        let mut out = t.clone();
+        self.flatten_value(
+            t.kind,
+            self.modes_of(t),
+            &mut out.value,
+            &mut out.modes,
+            &gone,
+        );
+        out
+    }
+
+    /// Replace aliases to removed tokens in a first value and the values of the other modes
+    /// in `list`, preserving each mode's appearance.
+    pub(super) fn flatten_value(
+        &self,
+        kind: TokenKind,
+        list: &[Mode],
+        value: &mut TokenValue,
+        modes: &mut BTreeMap<String, TokenValue>,
+        gone: &impl Fn(&str) -> bool,
+    ) {
         let hit = |v: &TokenValue| matches!(v, TokenValue::Alias(a) if gone(a));
-        if !hit(&t.value) && !t.modes.values().any(hit) {
-            return t.clone();
+        if !hit(value) && !modes.values().any(hit) {
+            return;
         }
         let flat = |v: &TokenValue, mode: Option<&Mode>| match v {
             TokenValue::Alias(a) if gone(a) => self
                 .resolve_in(a, mode.map(|m| m.name.as_str()))
-                .unwrap_or_else(|| t.kind.default_value()),
+                .unwrap_or_else(|| kind.default_value()),
             v => v.clone(),
         };
-        let modes = self.modes_of(t);
-        let mut out = t.clone();
-        out.value = flat(&t.value, modes.first());
-        out.modes = (modes.iter().skip(1))
+        let first = flat(value, list.first());
+        *modes = (list.iter().skip(1))
             .filter_map(|m| {
-                let v = flat(t.modes.get(&m.id).unwrap_or(&t.value), Some(m));
-                (v != out.value).then(|| (m.id.clone(), v))
+                let v = flat(modes.get(&m.id).unwrap_or(value), Some(m));
+                (v != first).then(|| (m.id.clone(), v))
             })
             .collect();
-        out
+        *value = first;
     }
 
     /// Copy tokens, each new one right after the last token of its kind in `ids`. Returns the
@@ -1125,12 +1161,7 @@ impl TokenSet {
         if t.system.is_none() {
             return t.clone();
         }
-        let first = self.modes.first().map(|m| m.name.as_str());
-        let value = self.value_in(t, first).clone();
-        let modes = (self.modes.iter().skip(1))
-            .map(|m| (m.id.clone(), self.value_in(t, Some(&m.name)).clone()))
-            .filter(|(_, v)| *v != value)
-            .collect();
+        let (value, modes) = self.localized(self.modes_of(t), &t.value, &t.modes);
         Token {
             name: self.slug(t),
             value,
@@ -1138,6 +1169,28 @@ impl TokenSet {
             system: None,
             ..t.clone()
         }
+    }
+
+    /// A first value and other modes' values keyed by the ids in `list`, rekeyed to this
+    /// file's modes by name.
+    pub(super) fn localized(
+        &self,
+        list: &[Mode],
+        value: &TokenValue,
+        modes: &BTreeMap<String, TokenValue>,
+    ) -> (TokenValue, BTreeMap<String, TokenValue>) {
+        let first = self.modes.first().map(|m| m.name.as_str());
+        let base = self.pick(list, value, modes, first).clone();
+        let rest = (self.modes.iter().skip(1))
+            .map(|m| {
+                (
+                    m.id.clone(),
+                    self.pick(list, value, modes, Some(&m.name)).clone(),
+                )
+            })
+            .filter(|(_, v)| *v != base)
+            .collect();
+        (base, rest)
     }
 
     fn unused_name(&self, kind: TokenKind, name: &str) -> String {
