@@ -70,7 +70,7 @@ impl Editor {
     }
 
     /// Run after `drop_broken_bindings` so only surviving token bindings become overrides.
-    /// Keep values from any mode until `resync_modes` applies the layer's current mode.
+    /// Like there, values from the modes in `kept_modes` count as the style's.
     pub(super) fn check_text_style_refs(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut changes: Vec<(NodeId, Option<TextStyleRef>)> = Vec::new();
@@ -82,8 +82,13 @@ impl Editor {
                 changes.push((*id, None));
                 continue;
             }
-            let styles: Vec<_> = (self.tokens.choices().iter())
-                .filter_map(|m| self.tokens.resolve_style_in(&r.id, Some(&m.name)))
+            let modes = self.kept_modes(*id).unwrap_or_else(|| {
+                (self.tokens.choices().iter())
+                    .map(|m| Some(m.name.as_str()))
+                    .collect()
+            });
+            let styles: Vec<_> = (modes.into_iter())
+                .filter_map(|m| self.tokens.resolve_style_in(&r.id, m))
                 .collect();
             if styles.is_empty() {
                 continue;

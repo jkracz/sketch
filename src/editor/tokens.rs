@@ -89,20 +89,24 @@ impl Editor {
     /// by hand, so it is now a plain value. Runs for every edit path. Bindings to tokens that
     /// don't exist (deleted, or pasted from another project) go too.
     ///
-    /// Accept values from any mode until [`Editor::resync_modes`] updates moved layers
-    /// and synced instances to their current mode.
+    /// A layer whose mode changed keeps the old mode's value until [`Editor::resync_modes`]
+    /// writes the new one, so that value counts too (see [`Editor::kept_modes`]).
     pub(super) fn drop_broken_bindings(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut broken: Vec<(NodeId, TokenProp)> = Vec::new();
         for id in rec.touched() {
             let Some(n) = self.doc.get(*id) else { continue };
+            let modes = self.kept_modes(*id);
             for (prop, token) in &n.tokens {
                 let kept = self
                     .tokens
                     .get(token)
                     .filter(|t| t.kind == prop.kind())
-                    .is_some_and(|t| {
-                        (self.tokens.resolve_any(&t.id).iter()).any(|v| prop.holds(n, v))
+                    .is_some_and(|t| match &modes {
+                        Some(modes) => (modes.iter())
+                            .filter_map(|m| self.tokens.resolve_in(&t.id, *m))
+                            .any(|v| prop.holds(n, &v)),
+                        None => (self.tokens.resolve_any(&t.id).iter()).any(|v| prop.holds(n, v)),
                     });
                 if !kept {
                     broken.push((*id, *prop));
@@ -118,6 +122,30 @@ impl Editor {
                 n.tokens.remove(&prop);
             }
         }
+    }
+
+    /// The modes whose token values a touched layer may hold without counting as edited: the
+    /// one it shows and the one it showed before the open transaction. None allows any mode,
+    /// for new layers and instance layers, which copy values from layers in other modes.
+    pub(super) fn kept_modes(&self, id: NodeId) -> Option<Vec<Option<&str>>> {
+        let (rec, _) = self.rec.as_ref()?;
+        if self.doc.get(id)?.instance.is_some() {
+            return None;
+        }
+        let mut before = None;
+        let mut cur = Some(id);
+        while let Some(c) = cur {
+            let n = match rec.before(c) {
+                Some(b) => b.as_ref()?,
+                None => self.doc.get(c)?,
+            };
+            if let Some(name) = n.mode.as_deref().and_then(|m| self.tokens.mode_name(m)) {
+                before = Some(name);
+                break;
+            }
+            cur = n.parent;
+        }
+        Some(vec![self.tokens.mode_at(&self.doc, id), before])
     }
 
     /// Sync bound fields on every page. These derived values need no undo step; undo resyncs them.
@@ -588,6 +616,19 @@ mod tests {
         );
         e.undo();
         assert_eq!(fill(&e, rect), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn setting_another_modes_value_by_hand_detaches() {
+        let (mut e, _, rect, _) = themed();
+        e.edit("paint", |tx| {
+            tx.node_mut(rect)
+                .unwrap()
+                .style
+                .set_fill(Some(Color::BLACK));
+        });
+        assert_eq!(fill(&e, rect), Some(Color::BLACK));
+        assert!(e.doc.get(rect).unwrap().tokens.is_empty());
     }
 
     #[test]

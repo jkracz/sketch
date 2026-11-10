@@ -283,7 +283,7 @@ fn mode_menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, m: &Mode) {
     let last = ed.tokens.modes().len() < 2;
     if ui
         .add_enabled(!last, egui::Button::new("Remove mode"))
-        .on_hover_text("Its values go. Frames that picked it show the first mode.")
+        .on_hover_text("Its values go. Frames that picked it follow the frame they sit in.")
         .clicked()
     {
         if let Err(e) = ed.edit_tokens("Remove mode", None, |t| t.delete_mode(&m.id)) {

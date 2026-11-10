@@ -2873,16 +2873,25 @@ impl Builder<'_, '_> {
                     None
                 }
             });
-        let Some((mode, name)) = theme.flatten() else {
+        let wrapper = matches!(el.tag.as_str(), "html" | "body");
+        let Some((mode, name)) = theme.flatten().filter(|_| !wrapper) else {
+            if wrapper {
+                self.warnings.push(format!(
+                    "data-theme on <{}> is ignored. Put it on a frame.",
+                    el.tag
+                ));
+            }
             return self.element_in_mode(el, inherited, parent, index);
         };
         let outer = self.mode.replace(name);
         let made = self.element_in_mode(el, inherited, parent, index);
         self.mode = outer;
-        if let Some(n) = made.and_then(|id| self.tx.node_mut(id))
-            && matches!(n.kind, NodeKind::Frame { .. })
-        {
-            n.mode = Some(mode);
+        match made.and_then(|id| self.tx.node_mut(id)) {
+            Some(n) if matches!(n.kind, NodeKind::Frame { .. }) => n.mode = Some(mode),
+            _ => self.warnings.push(format!(
+                "data-theme on <{}> is ignored: only frames hold a mode, and it isn't one.",
+                el.tag
+            )),
         }
         made
     }
