@@ -504,6 +504,38 @@ mod tests {
     }
 
     #[test]
+    fn border_width_tokens_set_the_stroke_width() {
+        let (mut e, id, _) = editor_with_rect();
+        let width = |e: &Editor| e.doc.get(id).unwrap().style.stroke_width;
+        let bound = |e: &Editor| {
+            let n = e.doc.get(id).unwrap();
+            n.tokens.contains_key(&TokenProp::StrokeWidth)
+        };
+        let t = e
+            .edit_tokens("add", None, |s| {
+                s.create(TokenKind::BorderWidth, "thick", "4px", None)
+            })
+            .unwrap();
+        e.bind_token(&[id], TokenProp::StrokeWidth, &t);
+        assert_eq!(width(&e), 4.0);
+        e.edit_tokens("edit", None, |s| s.update(&t, None, Some("2px"), None))
+            .unwrap();
+        assert_eq!(width(&e), 2.0);
+        assert!(bound(&e));
+
+        // A width typed by hand is a plain value again.
+        e.edit("stroke width", |tx| {
+            tx.node_mut(id).unwrap().style.stroke_width = 3.0
+        });
+        assert!(!bound(&e));
+
+        e.bind_token(&[id], TokenProp::StrokeWidth, &t);
+        e.detach_token(&[id], TokenProp::StrokeWidth);
+        assert!(!bound(&e));
+        assert_eq!(width(&e), 2.0, "detaching keeps the value");
+    }
+
+    #[test]
     fn font_size_tokens_refit_text() {
         let mut e = Editor::default();
         let id = e.edit("add", |tx| {

@@ -31,11 +31,12 @@ pub enum TokenKind {
     Container,
     Spacing,
     Radius,
+    BorderWidth,
 }
 
 impl TokenKind {
     /// Listing order: grouped by kind, then in creation order within a kind.
-    pub const ALL: [TokenKind; 11] = [
+    pub const ALL: [TokenKind; 12] = [
         TokenKind::Color,
         TokenKind::FontFamily,
         TokenKind::FontSize,
@@ -47,6 +48,7 @@ impl TokenKind {
         TokenKind::Container,
         TokenKind::Spacing,
         TokenKind::Radius,
+        TokenKind::BorderWidth,
     ];
 
     pub fn label(self) -> &'static str {
@@ -62,6 +64,7 @@ impl TokenKind {
             TokenKind::Container => "Container",
             TokenKind::Spacing => "Spacing",
             TokenKind::Radius => "Radius",
+            TokenKind::BorderWidth => "Border width",
         }
     }
 
@@ -79,6 +82,7 @@ impl TokenKind {
             TokenKind::Container => "container",
             TokenKind::Spacing => "spacing",
             TokenKind::Radius => "radius",
+            TokenKind::BorderWidth => "borderWidth",
         }
     }
 
@@ -100,6 +104,7 @@ impl TokenKind {
             TokenKind::Container => TokenValue::Number(1200.0),
             TokenKind::Spacing => TokenValue::Number(8.0),
             TokenKind::Radius => TokenValue::Number(8.0),
+            TokenKind::BorderWidth => TokenValue::Number(1.0),
         }
     }
 }
@@ -784,7 +789,9 @@ impl TokenSet {
             },
             TokenKind::FontSize => Some(size()?).filter(|v| *v > 0.0).ok_or_else(bad)?,
             TokenKind::Breakpoint | TokenKind::Container | TokenKind::Spacing => size()?,
-            TokenKind::Radius => Some(size()?).filter(|v| *v >= 0.0).ok_or_else(bad)?,
+            TokenKind::Radius | TokenKind::BorderWidth => {
+                Some(size()?).filter(|v| *v >= 0.0).ok_or_else(bad)?
+            }
         };
         // Unit conversion can overflow, and JSON has no infinity: saving one would write
         // null, which stops the project from opening.
@@ -1643,6 +1650,7 @@ pub enum TokenProp {
     /// The top fill layer.
     Fill,
     Stroke,
+    StrokeWidth,
     Radius,
     Opacity,
     FontFamily,
@@ -1656,9 +1664,10 @@ pub enum TokenProp {
 }
 
 impl TokenProp {
-    pub const ALL: [TokenProp; 11] = [
+    pub const ALL: [TokenProp; 12] = [
         TokenProp::Fill,
         TokenProp::Stroke,
+        TokenProp::StrokeWidth,
         TokenProp::Radius,
         TokenProp::Opacity,
         TokenProp::FontFamily,
@@ -1674,6 +1683,7 @@ impl TokenProp {
     pub fn kind(self) -> TokenKind {
         match self {
             TokenProp::Fill | TokenProp::Stroke => TokenKind::Color,
+            TokenProp::StrokeWidth => TokenKind::BorderWidth,
             TokenProp::Radius => TokenKind::Radius,
             TokenProp::Opacity => TokenKind::Opacity,
             TokenProp::FontFamily => TokenKind::FontFamily,
@@ -1690,6 +1700,7 @@ impl TokenProp {
         match self {
             TokenProp::Fill => "fills",
             TokenProp::Stroke => "stroke",
+            TokenProp::StrokeWidth => "stroke width",
             TokenProp::Radius => "radius",
             TokenProp::Opacity => "opacity",
             TokenProp::FontFamily => "font",
@@ -1707,6 +1718,7 @@ impl TokenProp {
             TokenProp::Fill if matches!(n.kind, NodeKind::Text { .. }) => "color",
             TokenProp::Fill => "backgroundColor",
             TokenProp::Stroke => "borderColor",
+            TokenProp::StrokeWidth => "borderWidth",
             TokenProp::Radius => "borderRadius",
             TokenProp::Opacity => "opacity",
             TokenProp::FontFamily => "fontFamily",
@@ -1729,6 +1741,7 @@ impl TokenProp {
             "backgroundColor" | "background" if sticky => TokenProp::Fill,
             "backgroundColor" | "background" | "fill" if !text => TokenProp::Fill,
             "borderColor" | "stroke" => TokenProp::Stroke,
+            "borderWidth" | "strokeWidth" => TokenProp::StrokeWidth,
             "borderRadius" => TokenProp::Radius,
             "opacity" => TokenProp::Opacity,
             "fontFamily" if text => TokenProp::FontFamily,
@@ -1746,7 +1759,11 @@ impl TokenProp {
     pub fn applies_to(self, n: &Node) -> bool {
         let is_text = matches!(n.kind, NodeKind::Text { .. });
         match self {
-            TokenProp::Fill | TokenProp::Stroke | TokenProp::Radius | TokenProp::Opacity => true,
+            TokenProp::Fill
+            | TokenProp::Stroke
+            | TokenProp::StrokeWidth
+            | TokenProp::Radius
+            | TokenProp::Opacity => true,
             TokenProp::FontSize => n.kind.font_size().is_some(),
             TokenProp::FontFamily
             | TokenProp::FontWeight
@@ -1761,6 +1778,7 @@ impl TokenProp {
         match (self, v) {
             (TokenProp::Fill, TokenValue::Color(c)) => n.style.fill() == Some(*c),
             (TokenProp::Stroke, TokenValue::Color(c)) => n.style.stroke == Some(*c),
+            (TokenProp::StrokeWidth, TokenValue::Number(w)) => n.style.stroke_width == *w,
             (TokenProp::Radius, TokenValue::Number(r)) => n.style.corner_radii() == [*r; 4],
             (TokenProp::Opacity, TokenValue::Number(o)) => n.style.opacity == *o,
             (TokenProp::FontFamily, TokenValue::Text(f)) => {
@@ -1793,6 +1811,7 @@ impl TokenProp {
                 _ => n.style.fills.push(Paint::solid(*c)),
             },
             (TokenProp::Stroke, TokenValue::Color(c)) => n.style.stroke = Some(*c),
+            (TokenProp::StrokeWidth, TokenValue::Number(w)) => n.style.stroke_width = *w,
             (TokenProp::Radius, TokenValue::Number(r)) => {
                 n.style.corner_radius = *r;
                 n.style.radii = None;
@@ -1915,6 +1934,8 @@ mod tests {
         let n = TokenValue::Number;
         assert_eq!(s.parse_value(TokenKind::Spacing, "8px"), Ok(n(8.0)));
         assert_eq!(s.parse_value(TokenKind::Spacing, "1rem"), Ok(n(16.0)));
+        assert_eq!(s.parse_value(TokenKind::BorderWidth, "1.5px"), Ok(n(1.5)));
+        assert_eq!(s.parse_value(TokenKind::BorderWidth, "0"), Ok(n(0.0)));
         assert_eq!(s.parse_value(TokenKind::Opacity, "50%"), Ok(n(0.5)));
         assert_eq!(s.parse_value(TokenKind::Opacity, "0.25"), Ok(n(0.25)));
         assert_eq!(s.parse_value(TokenKind::LineHeight, "150%"), Ok(n(1.5)));
@@ -1935,6 +1956,8 @@ mod tests {
             (TokenKind::Color, "nope"),
             (TokenKind::Opacity, "1.5"),
             (TokenKind::Radius, "-4px"),
+            (TokenKind::BorderWidth, "-1px"),
+            (TokenKind::BorderWidth, "thin"),
             (TokenKind::FontSize, "0"),
             (TokenKind::LetterSpacing, "1e308em"),
             (TokenKind::LetterSpacing, "em"),

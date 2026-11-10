@@ -222,6 +222,60 @@ fn large_systems_return_counts_until_filtered() {
 }
 
 #[test]
+fn border_width_tokens_publish_and_bind_in_other_files() {
+    let store = store();
+    let mut src = exec::SessionHost::new(store.clone());
+    src.session.create(&mut src.ed, "Acme").unwrap();
+    call(
+        &mut src,
+        "create_tokens",
+        json!({"tokens": [{"type": "borderWidth", "name": "--hairline", "value": "1px"}]}),
+    );
+    call(&mut src, "publish_design_system", json!({}));
+
+    let mut app = consumer(&store);
+    let list = call(&mut app, "list_design_systems", json!({}));
+    assert_eq!(list["systems"][0]["tokens"], json!({"borderWidth": 1}));
+    call(&mut app, "use_design_system", json!({"id": "acme"}));
+    let css = call(&mut app, "get_design_system", json!({"id": "acme"}));
+    assert!(
+        css.as_str().unwrap().contains("--acme-hairline: 1px;"),
+        "{css}"
+    );
+    let r = call(
+        &mut app,
+        "create_artboard",
+        json!({"name": "Card", "styles": {
+            "width": "200px", "height": "100px",
+            "border": "4px solid #000000", "borderWidth": "var(--acme-hairline)",
+        }}),
+    );
+    let id = node(&r["id"]);
+    let n = app.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.stroke_width, 1.0);
+    assert!(n.tokens.contains_key(&TokenProp::StrokeWidth));
+    call(&mut app, "finish_working_on_nodes", json!({}));
+    let dir = app.session.project.as_ref().unwrap().dir.clone();
+
+    call(
+        &mut src,
+        "set_tokens",
+        json!({"tokens": [{"name": "--hairline", "value": "0.5px"}]}),
+    );
+    let r = call(&mut src, "publish_design_system", json!({}));
+    assert_eq!(r["changed"], json!(["--acme-hairline"]));
+
+    let mut reopened = exec::SessionHost::new(store.clone());
+    reopened.session.open(&mut reopened.ed, &dir).unwrap();
+    let n = reopened.ed.doc.get(id).unwrap();
+    assert_eq!(
+        n.style.stroke_width, 0.5,
+        "the new version reaches the layer"
+    );
+    assert!(n.tokens.contains_key(&TokenProp::StrokeWidth));
+}
+
+#[test]
 fn modes_publish_and_frames_pick_them_by_name() {
     let store = store();
     let mut src = exec::SessionHost::new(store.clone());

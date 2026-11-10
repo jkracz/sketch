@@ -1427,8 +1427,9 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             }
         }
     }
+    // A bound zero still shows, so readers can see the token that owns it.
     if let Some(s) = n.style.stroke
-        && n.style.stroke_width > 0.0
+        && (n.style.stroke_width > 0.0 || n.tokens.contains_key(&TokenProp::StrokeWidth))
     {
         let kind = if n.style.dash.is_empty() {
             "solid"

@@ -1118,13 +1118,21 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
         let key = prop.css_key(n);
         if st.contains_key(key) {
             st.insert(key.into(), json!(var));
-        } else if *prop == TokenProp::Stroke
-            && let Some((rest, _)) = st
-                .get("border")
-                .and_then(Value::as_str)
-                .and_then(|b| b.rsplit_once(' '))
-        {
-            let border = format!("{rest} {var}");
+            continue;
+        }
+        // Computed styles write the stroke as `border: <width> <style> <color>`.
+        let part = match prop {
+            TokenProp::StrokeWidth => 0,
+            TokenProp::Stroke => 2,
+            _ => continue,
+        };
+        let Some(border) = st.get("border").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut parts: Vec<&str> = border.splitn(3, ' ').collect();
+        if parts.len() == 3 {
+            parts[part] = &var;
+            let border = parts.join(" ");
             st.insert("border".into(), json!(border));
         }
     }

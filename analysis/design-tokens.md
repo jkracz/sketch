@@ -80,7 +80,8 @@ from static reading and the docs. Nothing was confirmed against a running copy.
 | `lineHeight` also accepts px | Multiple or percent only | Sketch stores line height as a multiple |
 
 Sketch adds theme modes, which Paper doesn't have publicly: a value per mode on each token,
-and a mode per frame. Not carried over: token libraries (not a public feature in Paper),
+and a mode per frame. It also adds a twelfth type, `borderWidth`, which binds a layer's stroke
+width. Not carried over: token libraries (not a public feature in Paper),
 overwrite on paste, drag to reorder, and reading tokens from a pasted stylesheet. `fontFamily`,
 `breakpoint` and `container` tokens are stored and exported but bind to nothing, because Sketch
 has one typeface and no breakpoints. Inline `<span>` styles in `write_html` take the token's
