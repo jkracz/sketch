@@ -2875,7 +2875,7 @@ impl Builder<'_, '_> {
             });
         let wrapper = matches!(el.tag.as_str(), "html" | "body");
         let Some((mode, name)) = theme.flatten().filter(|_| !wrapper) else {
-            if wrapper {
+            if wrapper && el.attr("data-theme").is_some() {
                 self.warnings.push(format!(
                     "data-theme on <{}> is ignored. Put it on a frame.",
                     el.tag

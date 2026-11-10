@@ -667,3 +667,17 @@ fn modes_reach_layers_stylesheets_and_agents() {
         Some(Color::WHITE)
     );
 }
+
+#[test]
+fn full_documents_without_data_theme_write_without_warnings() {
+    let mut h = host();
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<html><body><div style=\"width: 10px; height: 10px\"></div></body></html>",
+        }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+}

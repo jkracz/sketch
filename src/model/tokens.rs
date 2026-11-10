@@ -270,8 +270,9 @@ pub(super) fn var_name(s: &str) -> Option<&str> {
 pub struct TokenClip {
     /// Their `modes` are keyed by mode name, to match the modes of another project.
     pub tokens: Vec<Token>,
-    /// Resolved values of alias targets outside the copied set, keyed by token id.
-    resolved: HashMap<String, TokenValue>,
+    /// Resolved values of alias targets outside the copied set, keyed by token id, then
+    /// by mode name in the source's order.
+    resolved: HashMap<String, Vec<(String, TokenValue)>>,
     /// Kind and CSS name (without dashes) of those targets, to find the same token in
     /// another project.
     targets: HashMap<String, (TokenKind, String)>,
@@ -1109,9 +1110,10 @@ impl TokenSet {
                 if let TokenValue::Alias(a) = v
                     && !ids.contains(a)
                 {
-                    if let Some(v) = self.resolve(a) {
-                        clip.resolved.insert(a.clone(), v);
-                    }
+                    let values = (self.modes.iter())
+                        .filter_map(|m| Some((m.name.clone(), self.resolve_in(a, Some(&m.name))?)))
+                        .collect();
+                    clip.resolved.insert(a.clone(), values);
                     if let Some(target) = self.get(a) {
                         clip.targets
                             .insert(a.clone(), (target.kind, self.slug(target)));
@@ -1133,24 +1135,24 @@ impl TokenSet {
             .collect();
         let mut out = Vec::new();
         for t in &clip.tokens {
-            let value_of = |v: &TokenValue| match v {
+            // An alias to a target left behind becomes the value it showed in that mode.
+            let value_of = |v: &TokenValue, mode: &str| match v {
                 TokenValue::Alias(a) => match ids.get(a.as_str()) {
                     Some(new) => TokenValue::Alias(new.clone()),
                     None => self.pasted_target(clip, a).unwrap_or_else(|| {
-                        clip.resolved
-                            .get(a)
-                            .cloned()
-                            .unwrap_or_else(|| t.kind.default_value())
+                        let values = clip.resolved.get(a).map_or(&[][..], |v| v.as_slice());
+                        (values.iter().find(|(m, _)| m == mode).or(values.first()))
+                            .map_or_else(|| t.kind.default_value(), |(_, v)| v.clone())
                     }),
                 },
                 v => v.clone(),
             };
-            let value = value_of(&t.value);
-            let modes = (t.modes.iter())
-                .filter_map(|(name, v)| {
-                    let m = self.modes.iter().skip(1).find(|m| m.name == *name)?;
-                    Some((m.id.clone(), value_of(v)))
-                })
+            let own = |m: &Mode| t.modes.get(&m.name).unwrap_or(&t.value);
+            let first = self.modes.first().map_or("", |m| m.name.as_str());
+            let value = value_of(&t.value, first);
+            let modes = (self.modes.iter().skip(1))
+                .map(|m| (m.id.clone(), value_of(own(m), &m.name)))
+                .filter(|(_, v)| *v != value)
                 .collect();
             let name = if self.name_taken(t.kind, &t.name) {
                 self.unused_name(t.kind, &t.name)
@@ -2274,6 +2276,16 @@ mod tests {
         s.delete(std::slice::from_ref(&bg));
         assert_eq!(s.resolve_in(&surface, Some("Dark")), Some(BLACK));
         assert_eq!(s.resolve(&surface), Some(WHITE));
+    }
+
+    #[test]
+    fn a_pasted_alias_without_its_target_keeps_each_mode() {
+        let (s, _, surface, _) = themed();
+        let clip = s.copy(std::slice::from_ref(&surface));
+        let mut other = TokenSet::default();
+        let new = other.paste(&clip);
+        assert_eq!(other.resolve(&new[0]), Some(WHITE));
+        assert_eq!(other.resolve_in(&new[0], Some("Dark")), Some(BLACK));
     }
 
     #[test]
