@@ -582,3 +582,23 @@ pub fn mask_op(n: &Node, wr: Rect) -> Option<DrawOp> {
         ),
     })
 }
+
+/// The node's filled shape grown by `d` on every side, or shrunk when `d` is negative, as one
+/// opaque op. This is what a shadow with spread is cast from. An ellipse stays an ellipse, as
+/// in CSS, and other outlines grow with round corners. None for layers without an area.
+pub fn spread_op(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<DrawOp> {
+    let DrawOp::Fill { path, even_odd, .. } = mask_op(n, wr)? else {
+        return None;
+    };
+    let grown = wr.inflate(d);
+    let path = match n.kind {
+        NodeKind::Ellipse if grown.w > 0.0 && grown.h > 0.0 => vector::ellipse(grown),
+        NodeKind::Ellipse => VPath::new(),
+        _ => vector::offset(&path, even_odd, d, tol),
+    };
+    Some(DrawOp::Fill {
+        path,
+        paint: PaintSpec::Solid([1.0; 4]),
+        even_odd: false,
+    })
+}

@@ -34,7 +34,8 @@ pub struct FxParams {
     pub rect: [f32; 4],
     /// The uv range that holds valid texels, as min then max.
     pub clamp: [f32; 4],
-    /// Composite: premultiplied color. Blur: uv step per tap, sigma in taps, tap radius.
+    /// Composite: premultiplied color, or for content its opacity in every channel.
+    /// Blur: uv step per tap, sigma in taps, tap radius.
     pub color: [f32; 4],
     /// Composite without a mask: the target px rect to cover. Blur: px origin of the output.
     pub quad: [f32; 4],
@@ -218,7 +219,7 @@ fn fs_paint(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = clamp((p.xy - fx.rect.xy) * fx.rect.zw, fx.clamp.xy, fx.clamp.zw);
     let t = textureSampleLevel(tex, samp, uv, 0.0);
     if (fx.params.x < 0.5) {
-        return t;
+        return t * fx.color.a;
     }
     if (fx.params.x < 1.5) {
         return fx.color * t.a;

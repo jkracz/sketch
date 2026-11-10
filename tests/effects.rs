@@ -321,6 +321,143 @@ fn a_background_blur_blurs_what_is_behind_the_layer_only() {
 }
 
 #[test]
+fn spread_grows_and_shrinks_the_shadow_of_a_shape() {
+    let Some(g) = gpu() else { return };
+    // An ellipse 200 wide and 100 tall, centered on (400, 250).
+    let oval = |effects| {
+        node(
+            NodeKind::Ellipse,
+            Rect::new(300.0, 200.0, 200.0, 100.0),
+            WHITE,
+            effects,
+        )
+    };
+    let (mut e, id) = scene(oval(vec![shadow(DropShadow, 0.0, 0.0, 0.0, 15.0, RED)]));
+    let img = render_canvas(g, &e);
+    let at = |x, y| px(&img, v2(x, y));
+    assert!(close(at(510.0, 250.0), RED, 2), "10px past the right end");
+    assert!(close(at(400.0, 190.0), RED, 2), "and past the top");
+    assert!(
+        close(at(520.0, 250.0), WHITE, 2),
+        "but no further than the spread"
+    );
+    // It is still an ellipse: the corner of its grown box stays clear.
+    assert!(close(at(505.0, 195.0), WHITE, 2));
+
+    // An inner shadow's spread pushes it inward from the edge.
+    let inner = |spread| vec![shadow(InnerShadow, 0.0, 0.0, 0.0, spread, BLUE)];
+    e.edit("inner", |tx| {
+        tx.node_mut(id).unwrap().style.effects = inner(20.0)
+    });
+    let img = render_canvas(g, &e);
+    assert!(
+        close(px(&img, v2(490.0, 250.0)), BLUE, 2),
+        "a 20px band inside"
+    );
+    assert!(close(px(&img, v2(470.0, 250.0)), WHITE, 2));
+    assert!(
+        close(px(&img, v2(510.0, 250.0)), WHITE, 2),
+        "nothing outside"
+    );
+
+    // Other outlines grow with round corners.
+    let star = node(
+        NodeKind::Star {
+            points: 4,
+            inner: 0.3,
+        },
+        Rect::new(300.0, 150.0, 200.0, 200.0),
+        WHITE,
+        vec![shadow(DropShadow, 0.0, 0.0, 0.0, 12.0, RED)],
+    );
+    let (e, _) = scene(star);
+    let img = render_canvas(g, &e);
+    assert!(
+        close(px(&img, v2(508.0, 250.0)), RED, 2),
+        "past the right tip"
+    );
+    assert!(close(px(&img, v2(516.0, 250.0)), WHITE, 2));
+    assert!(
+        close(px(&img, v2(400.0, 250.0)), WHITE, 2),
+        "the star covers the rest"
+    );
+}
+
+#[test]
+fn a_background_blur_fades_with_the_layer_and_survives_its_layer_blur() {
+    let Some(g) = gpu() else { return };
+    let mut e = editor(800.0, 500.0);
+    let page = page(&mut e);
+    for i in 0..10 {
+        let r = Rect::new(300.0 + i as f64 * 20.0, 100.0, 10.0, 300.0);
+        e.add_node(node(NodeKind::Rect, r, BLACK, vec![]), Some(page));
+    }
+    let mut glass = node(
+        NodeKind::Rect,
+        Rect::new(320.0, 180.0, 160.0, 140.0),
+        WHITE,
+        vec![blur(BackgroundBlur, 12.0)],
+    );
+    glass.style.fills.clear();
+    let glass = e.add_node(glass, Some(page));
+    // On a stripe, then on the gap next to it.
+    let stripe_and_gap = |e: &Editor| {
+        let img = render_canvas(g, e);
+        (
+            luma(px(&img, v2(385.0, 250.0))),
+            luma(px(&img, v2(395.0, 250.0))),
+        )
+    };
+    let (stripe, gap) = stripe_and_gap(&e);
+    assert!(
+        (stripe - 128).abs() < 25 && (gap - 128).abs() < 25,
+        "{stripe} {gap}"
+    );
+
+    let set_opacity =
+        |e: &mut Editor, o: f64| inspector::apply(e, "opacity", &[glass], |n| n.style.opacity = o);
+    set_opacity(&mut e, 0.0);
+    assert_eq!(stripe_and_gap(&e), (0, 255), "a clear layer blurs nothing");
+    set_opacity(&mut e, 0.5);
+    let (stripe, gap) = stripe_and_gap(&e);
+    assert!(
+        (stripe - 64).abs() < 20 && (gap - 191).abs() < 20,
+        "{stripe} {gap}"
+    );
+
+    // With a layer blur as well, the layer still blurs what is behind it.
+    set_opacity(&mut e, 1.0);
+    inspector::apply(&mut e, "effects", &[glass], |n| {
+        n.style.effects.push(blur(LayerBlur, 4.0))
+    });
+    let (stripe, gap) = stripe_and_gap(&e);
+    assert!(
+        (stripe - 128).abs() < 25 && (gap - 128).abs() < 25,
+        "{stripe} {gap}"
+    );
+}
+
+#[test]
+fn many_huge_background_blurs_fit_in_a_frame() {
+    let Some(g) = gpu() else { return };
+    let mut e = editor(800.0, 500.0);
+    let page = page(&mut e);
+    for _ in 0..8 {
+        let glass = node(
+            NodeKind::Rect,
+            Rect::new(0.0, 0.0, 800.0, 500.0),
+            Color::rgba(255, 255, 255, 40),
+            vec![blur(BackgroundBlur, 1000.0)],
+        );
+        e.add_node(glass, Some(page));
+    }
+    e.camera.zoom = 256.0;
+    e.camera.pan = v2(400.0, 250.0);
+    let img = render_canvas(g, &e);
+    assert!(luma(px(&img, v2(400.0, 250.0))) > 250);
+}
+
+#[test]
 fn effects_scale_with_the_zoom() {
     let Some(g) = gpu() else { return };
     let (mut e, _) = scene(card(vec![
@@ -359,6 +496,19 @@ fn png_export_makes_room_for_shadows() {
         "black, part clear: {under:?}"
     );
     assert_eq!(img.get_pixel(0, 0).0[3], 0);
+
+    // A group's shadow comes from its children, and needs room too.
+    let a = e.add_node(card(vec![]), Some(e.doc.root[0]));
+    e.select(vec![id, a]);
+    key(&mut e, Key::Char('g'), Modifiers::cmd());
+    let group = e.selection[0];
+    inspector::apply(&mut e, "effects", &[id], |n| n.style.effects.clear());
+    inspector::apply(&mut e, "effects", &[group], |n| {
+        n.style.effects = vec![shadow(DropShadow, 100.0, 0.0, 0.0, 0.0, BLACK)];
+    });
+    let img = png::render(g, &e.doc, Some(&[group]), 1.0, None).unwrap();
+    assert_eq!(img.dimensions(), (300, 100));
+    assert_eq!(img.get_pixel(250, 50).0, [0, 0, 0, 255]);
 
     // The project thumbnail draws them too.
     let thumb = sketch_rs::session::render_thumbnail(g, &e.doc)

@@ -160,6 +160,7 @@ struct BlurPlan {
     bounds: Rect,
     sigma: f64,
     offset: V2,
+    spread: f64,
     paint: PlanPaint,
     clip: Option<Rect>,
 }
@@ -174,6 +175,7 @@ struct BackdropPlan {
     mask: Range<u32>,
     bounds: Rect,
     sigma: f64,
+    opacity: f64,
     clip: Option<Rect>,
 }
 
@@ -222,7 +224,7 @@ fn signature(ops: &[Op], out: &mut Vec<u64>) {
             }
             Op::Blur(b) => {
                 out.extend([2, b.sigma.to_bits(), b.offset.x.to_bits()]);
-                out.push(b.offset.y.to_bits());
+                out.extend([b.offset.y.to_bits(), b.spread.to_bits()]);
                 out.extend(rect_bits(&b.bounds));
                 match &b.paint {
                     BlurPaint::Content => out.push(0),
@@ -241,6 +243,7 @@ fn signature(ops: &[Op], out: &mut Vec<u64>) {
             }
             Op::Backdrop(b) => {
                 out.extend([3, pieces(&b.mask), b.sigma.to_bits()]);
+                out.push(b.opacity.to_bits());
                 out.extend(rect_bits(&b.bounds));
                 clip(&b.clip, out);
             }
@@ -343,6 +346,7 @@ impl Builder {
                         bounds: b.bounds,
                         sigma: b.sigma,
                         offset: b.offset,
+                        spread: b.spread,
                         paint,
                         clip: b.clip,
                     });
@@ -354,6 +358,7 @@ impl Builder {
                         mask,
                         bounds: b.bounds,
                         sigma: b.sigma,
+                        opacity: b.opacity,
                         clip: b.clip,
                     });
                     out.push(Step::Backdrop(self.backdrops.len() - 1));
@@ -508,6 +513,9 @@ struct Page {
 
 /// Largest edge of an atlas page.
 const PAGE_EDGE: u32 = 2048;
+
+/// Most times a background blur halves the canvas. Sixteen take any canvas down to a pixel.
+const MAX_HALVINGS: usize = 16;
 
 /// The rects that landed on one page: its size, then each rect's index and position.
 #[derive(Default)]
@@ -988,8 +996,9 @@ impl CanvasRenderer {
         self.sync_images(device, queue, &frame.ops);
         self.sync_world(device, &frame.ops);
         let world = self.world.take().expect("synced above");
-        // Each blur takes a few slots and each background blur a few per halving.
-        let slots = 4 + 4 * world.blurs.len() + 16 * world.backdrops.len();
+        // A blur takes its target, two blur passes and the paint. A background blur takes a
+        // slot per halving, two blur passes and the paint.
+        let slots = 4 + 4 * world.blurs.len() + (MAX_HALVINGS + 3) * world.backdrops.len();
         self.slots.begin(device, slots as u32);
         let world_globals = Globals {
             size_px: [size[0] as f32, size[1] as f32],
@@ -1096,6 +1105,11 @@ impl CanvasRenderer {
             };
             let list = carried.iter().chain(&cmds[start..end]);
             self.pass(encoder, &world, list, size, &at);
+            // The pass that paints the last background blur is recorded, so its texture is
+            // free for the next one.
+            if let Some(Cmd::Paint { tex, .. }) = carried {
+                self.pool.release(tex);
+            }
             if !more {
                 break;
             }
@@ -1211,7 +1225,7 @@ impl CanvasRenderer {
                 let job = &jobs[*j];
                 let plan = &world.blurs[job.plan];
                 let (mode, color, mask) = match &plan.paint {
-                    PlanPaint::Content => (MODE_CONTENT, [0.0; 4], None),
+                    PlanPaint::Content => (MODE_CONTENT, [1.0; 4], None),
                     PlanPaint::Tint(c) => (MODE_TINT, premultiplied(*c), None),
                     PlanPaint::Inside { color, mask } => {
                         (MODE_INSIDE, premultiplied(*color), Some(mask.clone()))
@@ -1284,7 +1298,10 @@ impl CanvasRenderer {
             dir,
         };
         // Halve until the blur is narrow enough, so every texel of the canvas still counts.
-        while left > 1.0 + 1e-6 {
+        for _ in 0..MAX_HALVINGS {
+            if left <= 1.0 + 1e-6 || size == [1, 1] {
+                break;
+            }
             let f = left.min(2.0);
             size = size.map(|s| ((s as f64 / f).ceil() as u32).max(1));
             self.blur_pass(enc, to, &[whole(src, size, 0.0, None)]);
@@ -1303,7 +1320,7 @@ impl CanvasRenderer {
         let fx = self.slots.push(&FxParams {
             rect: [x0, y0, size[0] as f64 / (w * aw), size[1] as f64 / (h * ah)].map(|v| v as f32),
             clamp: result.valid_uv(),
-            color: [0.0; 4],
+            color: [plan.opacity as f32; 4],
             quad: [0.0; 4],
             params: [MODE_CONTENT, tw as f32, th as f32, 0.0],
         });
@@ -1312,7 +1329,8 @@ impl CanvasRenderer {
             fx,
             scissor: tgt.scissor(shown).unwrap_or([0, 0, 1, 1]),
             mask: Some(plan.mask.clone()),
-            replace: true,
+            // A see-through layer mixes the blur with what is there.
+            replace: plan.opacity >= 1.0,
             globals: tgt.globals,
         }
     }
@@ -1519,7 +1537,7 @@ fn blur_mode(i: usize, plan: &BlurPlan, tgt: &Target) -> BlurMode {
         PlanPaint::Content if sigma < MIN_SIGMA_PX => return BlurMode::Inline,
         // A shadow that moves and spreads less than a pixel hides under its layer.
         PlanPaint::Tint(_) | PlanPaint::Inside { .. }
-            if 3.0 * sigma + plan.offset.len() * k < 0.5 =>
+            if 3.0 * sigma + (plan.offset.len() + plan.spread) * k < 0.5 =>
         {
             return BlurMode::Skip;
         }
@@ -1621,6 +1639,7 @@ fn emit(
                 if let Some(shown) = shown
                     && tgt.main
                     && b.sigma * tgt.map.k >= MIN_SIGMA_PX
+                    && b.opacity > 0.0
                     && !b.mask.is_empty()
                 {
                     out.push(Cmd::Backdrop { plan: *i, shown });

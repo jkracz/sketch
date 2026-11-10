@@ -142,6 +142,8 @@ pub struct Blur {
     pub sigma: f64,
     /// Where the blurred content lands relative to where it was drawn.
     pub offset: V2,
+    /// How far a shadow's spread moves its edge from the layer's.
+    pub spread: f64,
     pub paint: BlurPaint,
     pub clip: Option<Rect>,
 }
@@ -166,6 +168,8 @@ pub struct Backdrop {
     pub mask: Arc<Vec<Piece>>,
     pub bounds: Rect,
     pub sigma: f64,
+    /// How much of the blur shows: the layer's opacity with its ancestors'.
+    pub opacity: f64,
     pub clip: Option<Rect>,
 }
 
@@ -174,10 +178,19 @@ struct Entry {
     wr: Rect,
     opacity: f64,
     bucket: i32,
+    shapes: Shapes,
+    used: bool,
+}
+
+/// One node's cached triangles.
+#[derive(Clone, Default)]
+struct Shapes {
+    /// What the node paints.
     pieces: Arc<Vec<Piece>>,
     /// The filled shape, for effects that work inside it. Empty unless an effect needs it.
     mask: Arc<Vec<Piece>>,
-    used: bool,
+    /// By effect index, the shape a shadow with spread is cast from.
+    spread: Vec<(usize, Arc<Vec<Piece>>)>,
 }
 
 /// Per-node tessellation cache. A node is re-tessellated only when it (or its world position,
@@ -272,14 +285,8 @@ impl SceneCache {
         out
     }
 
-    /// The node's cached triangles and, when an effect works inside its shape, that shape.
-    fn pieces(
-        &mut self,
-        n: &Node,
-        wr: Rect,
-        w: Walk,
-        tess: &mut Tess,
-    ) -> (Arc<Vec<Piece>>, Arc<Vec<Piece>>) {
+    /// The node's cached triangles, with the shapes its effects need.
+    fn shapes(&mut self, n: &Node, wr: Rect, w: Walk, tess: &mut Tess) -> Shapes {
         let hit = self.entries.get(&n.id).is_some_and(|e| {
             e.bucket == w.bucket && e.wr == wr && e.opacity == w.opacity && e.node == *n
         });
@@ -295,6 +302,21 @@ impl SceneCache {
                 None if masked => pieces.clone(),
                 _ => Arc::default(),
             };
+            // A box spreads its shadow in the shader. Other shapes need the grown outline.
+            let spreads = (n.style.effects.iter().enumerate())
+                .filter(|(_, e)| e.visible && e.kind.is_shadow() && e.spread != 0.0)
+                .filter(|_| draw::box_shape(n, wr).is_none());
+            let spread = spreads
+                .filter_map(|(i, e)| {
+                    // A drop shadow grows by its spread and an inner one shrinks.
+                    let d = match e.kind {
+                        EffectKind::InnerShadow => -e.spread,
+                        _ => e.spread,
+                    };
+                    let op = draw::spread_op(n, wr, d, tess.tol)?;
+                    Some((i, Arc::new(tess.ops(&[op]))))
+                })
+                .collect();
             self.entries.insert(
                 n.id,
                 Entry {
@@ -302,15 +324,18 @@ impl SceneCache {
                     wr,
                     opacity: w.opacity,
                     bucket: w.bucket,
-                    pieces,
-                    mask,
+                    shapes: Shapes {
+                        pieces,
+                        mask,
+                        spread,
+                    },
                     used: true,
                 },
             );
         }
         let e = self.entries.get_mut(&n.id).unwrap();
         e.used = true;
-        (e.pieces.clone(), e.mask.clone())
+        e.shapes.clone()
     }
 
     /// Paint `id` and its children into `out`. Returns the world bounds painted.
@@ -334,14 +359,14 @@ impl SceneCache {
         let reached = bounds.inflate(draw::blur_reach(layer_blur));
         let visible = w.cull.is_none_or(|c| c.intersects(&reached))
             && clip.is_none_or(|c| c.intersects(&reached));
-        let (pieces, mask) = if visible && !n.is_group() {
-            self.pieces(n, wr, w, tess)
+        let shapes = if visible && !n.is_group() {
+            self.shapes(n, wr, w, tess)
         } else {
-            Default::default()
+            Shapes::default()
         };
-        let item = (!pieces.is_empty()).then_some(Item {
+        let item = (!shapes.pieces.is_empty()).then(|| Item {
             id,
-            pieces,
+            pieces: shapes.pieces.clone(),
             clip,
             blend: n.style.blend,
         });
@@ -366,6 +391,17 @@ impl SceneCache {
             }
         }
 
+        // A background blur works on the canvas, so it stays out of the layer's own blur.
+        let backdrop = blur_sigma(&n.style.effects, EffectKind::BackgroundBlur);
+        if visible && backdrop > 0.0 && !shapes.mask.is_empty() {
+            out.push(Op::Backdrop(Backdrop {
+                mask: shapes.mask.clone(),
+                bounds: wr,
+                sigma: backdrop,
+                opacity: w.opacity,
+                clip,
+            }));
+        }
         let mut blurred = Vec::new();
         let local = if layer_blur > 0.0 {
             &mut blurred
@@ -378,6 +414,7 @@ impl SceneCache {
                 wr,
                 opacity: w.opacity,
                 clip,
+                shapes: &shapes,
             };
             let cast: Vec<Op> = match &item {
                 Some(it) => vec![Op::Item(it.clone())],
@@ -388,21 +425,12 @@ impl SceneCache {
             } else {
                 kids_bounds
             };
-            for e in fx.of(EffectKind::DropShadow).rev() {
-                local.extend(fx.drop_shadow(e, &cast, cast_bounds));
-            }
-            let backdrop = blur_sigma(&n.style.effects, EffectKind::BackgroundBlur);
-            if backdrop > 0.0 && !mask.is_empty() {
-                local.push(Op::Backdrop(Backdrop {
-                    mask: mask.clone(),
-                    bounds: wr,
-                    sigma: backdrop,
-                    clip,
-                }));
+            for (i, e) in fx.of(EffectKind::DropShadow).rev() {
+                local.extend(fx.drop_shadow(i, e, &cast, cast_bounds));
             }
             local.extend(item.map(Op::Item));
-            for e in fx.of(EffectKind::InnerShadow).rev() {
-                local.extend(fx.inner_shadow(e, &mask));
+            for (i, e) in fx.of(EffectKind::InnerShadow).rev() {
+                local.extend(fx.inner_shadow(i, e));
             }
         }
         local.append(&mut kids);
@@ -419,6 +447,7 @@ impl SceneCache {
                 bounds,
                 sigma: layer_blur,
                 offset: V2::ZERO,
+                spread: 0.0,
                 paint: BlurPaint::Content,
                 clip,
             }));
@@ -434,17 +463,42 @@ struct Effects<'a> {
     wr: Rect,
     opacity: f64,
     clip: Option<Rect>,
+    shapes: &'a Shapes,
 }
 
 impl<'a> Effects<'a> {
-    fn of(&self, kind: EffectKind) -> impl DoubleEndedIterator<Item = &'a Effect> {
-        (self.n.style.effects.iter()).filter(move |e| e.visible && e.kind == kind)
+    /// The visible effects of `kind`, with their index in the list.
+    fn of(&self, kind: EffectKind) -> impl DoubleEndedIterator<Item = (usize, &'a Effect)> {
+        (self.n.style.effects.iter().enumerate()).filter(move |(_, e)| e.visible && e.kind == kind)
+    }
+
+    /// The shape the shadow at `i` is cast from when it has a spread, as blur content.
+    fn spread(&self, i: usize) -> Option<Vec<Op>> {
+        let (_, pieces) = self.shapes.spread.iter().find(|(at, _)| *at == i)?;
+        let item = Item {
+            id: self.n.id,
+            pieces: pieces.clone(),
+            clip: None,
+            blend: BlendMode::Normal,
+        };
+        Some(if pieces.is_empty() {
+            Vec::new()
+        } else {
+            vec![Op::Item(item)]
+        })
     }
 
     /// A box casts its shadow from the box and leaves it out from under itself, as CSS does.
     /// Any other shape casts it from `cast`, what it paints, like `filter: drop-shadow()`,
-    /// so the shadow shows through a translucent fill and ignores the spread.
-    fn drop_shadow(&self, e: &Effect, cast: &[Op], cast_bounds: Option<Rect>) -> Option<Op> {
+    /// so the shadow shows through a translucent fill. With a spread it casts from its
+    /// outline, grown. Text, lines and groups have no outline to grow and ignore the spread.
+    fn drop_shadow(
+        &self,
+        i: usize,
+        e: &Effect,
+        cast: &[Op],
+        cast_bounds: Option<Rect>,
+    ) -> Option<Op> {
         let offset = v2(e.x, e.y);
         if let Some(b) = draw::box_shape(self.n, self.wr) {
             let layer = b.inflate(draw::stroke_reach(self.n).0)?;
@@ -457,20 +511,26 @@ impl<'a> Effects<'a> {
                 clip: self.clip,
             }));
         }
-        (!cast.is_empty()).then_some(())?;
+        let (content, bounds, opacity) = match self.spread(i) {
+            // The grown outline is opaque, so the layer's opacity goes on the color.
+            Some(grown) => (grown, self.wr.inflate(e.spread.max(0.0)), self.opacity),
+            // What the layer paints already carries its opacity.
+            None => (cast.to_vec(), cast_bounds?, 1.0),
+        };
+        (!content.is_empty()).then_some(())?;
         Some(Op::Blur(Blur {
-            content: cast.to_vec(),
-            bounds: cast_bounds?,
+            content,
+            bounds,
             sigma: e.sigma(),
             offset,
-            // The content already carries the layer's opacity.
-            paint: BlurPaint::Tint(e.color.to_f32(1.0)),
+            spread: e.spread.abs(),
+            paint: BlurPaint::Tint(e.color.to_f32(opacity)),
             clip: self.clip,
         }))
     }
 
     /// Painted over the fill and inside the stroke, like a CSS `inset` shadow.
-    fn inner_shadow(&self, e: &Effect, mask: &Arc<Vec<Piece>>) -> Option<Op> {
+    fn inner_shadow(&self, i: usize, e: &Effect) -> Option<Op> {
         let offset = v2(e.x, e.y);
         let color = e.color.to_f32(self.opacity);
         if let Some(b) = draw::box_shape(self.n, self.wr) {
@@ -489,18 +549,24 @@ impl<'a> Effects<'a> {
                 clip: self.clip,
             }));
         }
+        let mask = &self.shapes.mask;
         (!mask.is_empty()).then_some(())?;
-        Some(Op::Blur(Blur {
-            content: vec![Op::Item(Item {
+        let whole = || {
+            vec![Op::Item(Item {
                 id: self.n.id,
                 pieces: mask.clone(),
                 clip: None,
                 blend: BlendMode::Normal,
-            })],
-            // Room for the shape where it is and where the shadow moves it.
-            bounds: self.wr.union(&self.wr.translate(-offset)),
+            })]
+        };
+        // Room for the shape where it is, where the shadow moves it, and how far it grows.
+        let grown = self.wr.inflate((-e.spread).max(0.0));
+        Some(Op::Blur(Blur {
+            content: self.spread(i).unwrap_or_else(whole),
+            bounds: grown.union(&self.wr.translate(-offset)),
             sigma: e.sigma(),
             offset,
+            spread: e.spread.abs(),
             paint: BlurPaint::Inside {
                 color,
                 mask: mask.clone(),

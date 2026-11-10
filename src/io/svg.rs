@@ -63,7 +63,8 @@ fn bounds(doc: &Document, roots: &[NodeId], effects: bool) -> Option<Rect> {
             let (Some(nd), Some(wr)) = (doc.get(id), doc.world_rect(id)) else {
                 continue;
             };
-            if nd.is_group() || !doc.is_effectively_visible(id) {
+            // A group paints nothing itself, but it can cast a shadow from its children.
+            if (nd.is_group() && !effects) || !doc.is_effectively_visible(id) {
                 continue;
             }
             // Children of clipping frames can't draw outside them.
