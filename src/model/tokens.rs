@@ -278,7 +278,7 @@ fn closing_paren(s: &str) -> Option<usize> {
     None
 }
 
-pub(super) fn var_name(s: &str) -> Option<&str> {
+pub fn var_name(s: &str) -> Option<&str> {
     let inner = s.trim().strip_prefix("var(")?.strip_suffix(')')?;
     Some(inner.split(',').next()?.trim())
 }

@@ -452,6 +452,19 @@ impl TokenSet {
         Ok(())
     }
 
+    /// Unlink `n` from its effect style. It keeps the effects it shows, and shadows whose
+    /// color came from a token stay bound to that token.
+    pub fn detach_effect_style_from(&self, n: &mut Node) {
+        let Some(s) = n.effect_style.take().and_then(|s| self.effect_style(&s)) else {
+            return;
+        };
+        for (i, e) in s.effects.iter().enumerate() {
+            if let Some(t) = e.color_token.as_ref().filter(|t| self.get(t).is_some()) {
+                n.tokens.insert(TokenProp::EffectColor(i), t.clone());
+            }
+        }
+    }
+
     /// Remove styles. A design system's styles stay. Layers that used them keep their effects.
     pub fn delete_effect_styles(&mut self, ids: &[String]) {
         self.effect_styles

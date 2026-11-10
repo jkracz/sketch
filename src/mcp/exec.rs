@@ -305,7 +305,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     | "set_tokens"
                     | "create_text_styles"
                     | "set_text_styles"
-            ) {
+            ) || super::styles::TOOLS.contains(&name)
+            {
                 check_system_vars(host, args)?;
             }
             if name == "write_html" {
@@ -354,6 +355,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "create_component" => components::create_component(ed, &a),
                 "detach_instances" => components::detach_instances(ed, &a),
                 "reset_overrides" => components::reset_overrides(ed, &a),
+                n if super::styles::TOOLS.contains(&n) => super::styles::call(ed, n, &a),
                 "finish_working_on_nodes" => {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
@@ -894,6 +896,9 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     components::describe(ed, page, id, &mut v);
     v["autoLayout"] = json!(n.layout.is_some());
     super::vectors::node_details(ed, page, n, &mut v);
+    if let Some(e) = super::styles::layer_effects_json(&ed.tokens, n) {
+        v["effects"] = e;
+    }
     text(v)
 }
 
@@ -1148,7 +1153,7 @@ fn token_input(v: &Value) -> Result<String, String> {
 }
 
 /// Use the layer's color token, then its style's token, then the literal color.
-fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
+pub(super) fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
     let styled = || {
         let s = tokens.effect_style(n.effect_style.as_ref()?)?;
         tokens.effect_style_color_token(s, i)
@@ -1329,6 +1334,7 @@ fn effect_style_json(tokens: &TokenSet, s: &EffectStyleDef) -> Value {
         "name": s.name,
         "var": tokens.effect_style_var(s),
         "css": tokens.effect_style_short(s),
+        "effects": super::styles::style_effects_json(tokens, s),
     });
     if let Some(d) = &s.description {
         v["description"] = json!(d);
@@ -1419,10 +1425,8 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
         "json" => {
             let list: Vec<Value> = chosen.iter().map(|t| token_json(tokens, t)).collect();
             let mut v = json!({"tokens": list});
-            if tokens.choices().len() > 1 {
-                let names: Vec<&str> = tokens.choices().iter().map(|m| m.name.as_str()).collect();
-                v["modes"] = json!(names);
-            }
+            let names: Vec<&str> = tokens.choices().iter().map(|m| m.name.as_str()).collect();
+            v["modes"] = json!(names);
             if !styles.is_empty() {
                 let list: Vec<Value> = styles.iter().map(|s| style_json(tokens, s)).collect();
                 v["textStyles"] = json!(list);
@@ -4351,7 +4355,9 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
                     let before = n.clone();
+                    let detached = super::styles::detach_styles(&tokens, &mut n, &mut styles);
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
+                    applied.ignored.extend(detached);
                     if mode.is_some() && !frame {
                         applied.ignored.push("mode".into());
                     }

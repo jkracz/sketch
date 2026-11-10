@@ -21,6 +21,7 @@ pub mod library;
 pub mod pages;
 pub mod projects;
 pub mod server;
+pub mod styles;
 pub mod tools;
 pub mod vectors;
 
