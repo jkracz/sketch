@@ -1112,7 +1112,18 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
             st.insert("textStyleOverrides".into(), json!(keys));
         }
     }
+    let shadow_var = |i: usize| {
+        let t = tokens.get(n.tokens.get(&TokenProp::EffectColor(i))?)?;
+        Some(format!("var({})", tokens.css_name(t)))
+    };
+    if let Some(v) = css::shadows_css(n, |i, c| shadow_var(i).unwrap_or_else(|| css::color_css(c)))
+    {
+        st.insert(css::shadow_key(n).into(), json!(v));
+    }
     for (prop, id) in &n.tokens {
+        if matches!(prop, TokenProp::EffectColor(_)) {
+            continue;
+        }
         let Some(t) = tokens.get(id) else { continue };
         let var = format!("var({})", tokens.css_name(t));
         let key = prop.css_key(n);
@@ -2585,6 +2596,7 @@ const INHERITED: &[&str] = &[
     "fontFamily",
     "whiteSpace",
     "textDecoration",
+    "textShadow",
 ];
 
 fn get<'s>(st: &'s Styles, k: &str) -> Option<&'s str> {
@@ -2941,6 +2953,7 @@ impl Builder<'_, '_> {
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
                         || k == "display" && v.contains("flex")
+                        || matches!(k.as_str(), "boxShadow" | "backdropFilter") && v != "none"
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -3783,10 +3796,13 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     let edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
                         .filter(|k| !applied.ignored.iter().any(|i| i == k))
                         .filter_map(|k| match k {
-                            "border" => Some(TokenProp::Stroke),
-                            k => TokenProp::from_css_key(k, &n),
+                            "border" => Some(TokenProp::Stroke.field()),
+                            "boxShadow" | "textShadow" | "filter" | "backdropFilter" => {
+                                Some("effects")
+                            }
+                            k => TokenProp::from_css_key(k, &n).map(TokenProp::field),
                         })
-                        .map(|p| crate::editor::structure::override_key(p.field()))
+                        .map(crate::editor::structure::override_key)
                         .collect();
                     if let Some(l) = &mut n.instance {
                         for k in edited {

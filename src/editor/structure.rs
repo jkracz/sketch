@@ -11,9 +11,9 @@ use crate::model::{
 use std::collections::{BTreeSet, HashSet};
 
 /// Property groups an instance can override (and that sync copies from the main component).
-pub const OVERRIDE_KEYS: [&str; 12] = [
-    "fills", "stroke", "radius", "opacity", "text", "font", "visible", "name", "size", "position",
-    "layout", "mode",
+pub const OVERRIDE_KEYS: [&str; 13] = [
+    "fills", "stroke", "radius", "opacity", "effects", "text", "font", "visible", "name", "size",
+    "position", "layout", "mode",
 ];
 
 /// Map an inspector field name to the override key it changes.
@@ -25,6 +25,7 @@ pub fn override_key(field: &str) -> &'static str {
         "stroke" | "stroke width" | "stroke align" | "dash" | "cap" | "join" => "stroke",
         "radius" | "radii" => "radius",
         "opacity" | "blend" => "opacity",
+        "effects" => "effects",
         "text" => "text",
         "font size" | "font" | "bold" | "italic" | "align" | "line height" | "letter spacing" => {
             "font"
@@ -58,6 +59,13 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     if !ov("opacity") {
         inst.style.opacity = s.opacity;
         inst.style.blend = s.blend;
+    }
+    if !ov("effects") {
+        inst.style.effects = s.effects.clone();
+        let color = |p: &TokenProp| matches!(p, TokenProp::EffectColor(_));
+        inst.tokens.retain(|p, _| !color(p));
+        let bound = main.tokens.iter().filter(|(p, _)| color(p));
+        inst.tokens.extend(bound.map(|(p, t)| (*p, t.clone())));
     }
     inst.style.rough = s.rough;
     match (&main.kind, &mut inst.kind) {

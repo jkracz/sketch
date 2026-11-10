@@ -65,7 +65,7 @@ fn ten_thousand_elements_cache_and_pan_without_rework() {
         cache.last_misses, 0,
         "an unchanged frame tessellates nothing"
     );
-    assert_eq!(f1.items.len(), f2.items.len());
+    assert_eq!(f1.ops.len(), f2.ops.len());
     eprintln!("10k nodes: first frame {first:?}, cached frame {second:?}");
     // The cached frame is far cheaper than the first and well under a 60 fps budget even
     // in an unoptimized test build.

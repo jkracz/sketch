@@ -1,11 +1,13 @@
 //! Document + camera → world-space cached meshes, plus the screen-space overlay.
 
 use super::draw;
+use super::draw::RoundRect;
 use super::mesh::{Batch, MeshBuilder};
 use super::tess::{Piece, Tess};
 use crate::editor::{Editor, hit, snap::Guide};
 use crate::geom::{Camera, Rect, V2, v2};
-use crate::model::{BlendMode, Node};
+use crate::model::effects::blur_sigma;
+use crate::model::{BlendMode, Effect, EffectKind, Node};
 use crate::model::{Color, Document, NodeId, NodeKind, TextAlign};
 use crate::text;
 use lyon::tessellation::{FillRule, LineCap};
@@ -108,12 +110,73 @@ pub struct Item {
     pub blend: BlendMode,
 }
 
+/// One step of painting the document, in paint order.
+#[derive(Clone)]
+pub enum Op {
+    Item(Item),
+    Shadow(BoxShadow),
+    Blur(Blur),
+    Backdrop(Backdrop),
+}
+
+/// The shadow of a rounded box, which the shader computes without drawing the box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxShadow {
+    /// The box that casts the shadow, with the offset and spread applied.
+    pub caster: RoundRect,
+    /// The layer's own box: a drop shadow paints outside it and an inner shadow inside it.
+    pub layer: RoundRect,
+    pub inset: bool,
+    pub sigma: f64,
+    /// Straight alpha.
+    pub color: [f32; 4],
+    pub clip: Option<Rect>,
+}
+
+/// Content painted offscreen, blurred and painted back.
+#[derive(Clone)]
+pub struct Blur {
+    pub content: Vec<Op>,
+    /// World bounds of the content, before `offset`.
+    pub bounds: Rect,
+    pub sigma: f64,
+    /// Where the blurred content lands relative to where it was drawn.
+    pub offset: V2,
+    pub paint: BlurPaint,
+    pub clip: Option<Rect>,
+}
+
+/// What a [`Blur`] paints back.
+#[derive(Clone)]
+pub enum BlurPaint {
+    /// The blurred content (layer blur).
+    Content,
+    /// A color wherever the blurred content is (drop shadow). Straight alpha.
+    Tint([f32; 4]),
+    /// A color inside `mask` wherever the blurred content is not (inner shadow).
+    Inside {
+        color: [f32; 4],
+        mask: Arc<Vec<Piece>>,
+    },
+}
+
+/// Blur what is already painted, inside `mask`.
+#[derive(Clone)]
+pub struct Backdrop {
+    pub mask: Arc<Vec<Piece>>,
+    pub bounds: Rect,
+    pub sigma: f64,
+    pub clip: Option<Rect>,
+}
+
 struct Entry {
     node: Node,
     wr: Rect,
     opacity: f64,
     bucket: i32,
     pieces: Arc<Vec<Piece>>,
+    /// The filled shape, for effects that work inside it. Empty unless an effect needs it.
+    mask: Arc<Vec<Piece>>,
     used: bool,
 }
 
@@ -122,10 +185,10 @@ struct Entry {
 #[derive(Default)]
 pub struct SceneCache {
     entries: HashMap<NodeId, Entry>,
-    /// Item list of the previous frame and what it was built for (doc stamp, zoom bucket,
+    /// Ops of the previous frame and what they were built for (doc stamp, zoom bucket,
     /// culled world rect): reused while the view stays inside that rect.
-    last: Option<(u64, i32, Rect, Vec<Item>)>,
-    /// Tessellations performed during the last `items` call (for tests and profiling).
+    last: Option<(u64, i32, Rect, Arc<Vec<Op>>)>,
+    /// Tessellations performed during the last `ops` call (for tests and profiling).
     pub last_misses: usize,
     /// `fonts::generation` the cached geometry was built with.
     fonts: u64,
@@ -134,6 +197,27 @@ pub struct SceneCache {
 /// Zoom buckets are powers of two: geometry built for 2^b is accurate up to 2^(b+1).
 pub fn zoom_bucket(zoom: f64) -> i32 {
     zoom.max(1e-6).log2().floor() as i32
+}
+
+fn union(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.union(&b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn within(r: Rect, clip: Option<Rect>) -> Option<Rect> {
+    clip.map_or(Some(r), |c| c.intersection(&r))
+}
+
+/// What the walk carries down the tree.
+#[derive(Clone, Copy)]
+struct Walk {
+    origin: V2,
+    clip: Option<Rect>,
+    opacity: f64,
+    bucket: i32,
+    cull: Option<Rect>,
 }
 
 impl SceneCache {
@@ -151,15 +235,15 @@ impl SceneCache {
         }
     }
 
-    /// Items for `roots` (or the whole page) in paint order. `cull` skips subtrees outside a
+    /// Ops for `roots` (or the whole page) in paint order. `cull` skips subtrees outside a
     /// world rect.
-    pub fn items(
+    pub fn ops(
         &mut self,
         doc: &Document,
         roots: Option<&[NodeId]>,
         zoom: f64,
         cull: Option<Rect>,
-    ) -> Vec<Item> {
+    ) -> Vec<Op> {
         self.sync_fonts();
         let bucket = zoom_bucket(zoom);
         let tz = 2f64.powi(bucket);
@@ -171,11 +255,14 @@ impl SceneCache {
         }
         let all = doc.root.clone();
         for id in roots.unwrap_or(&all) {
-            let op = draw::inherited_opacity(doc, *id);
-            let origin = doc.parent_origin(doc.get(*id).and_then(|n| n.parent));
-            self.walk(
-                doc, *id, origin, None, op, bucket, &mut tess, cull, &mut out,
-            );
+            let w = Walk {
+                origin: doc.parent_origin(doc.get(*id).and_then(|n| n.parent)),
+                clip: None,
+                opacity: draw::inherited_opacity(doc, *id),
+                bucket,
+                cull,
+            };
+            self.walk(doc, *id, w, &mut tess, &mut out);
         }
         // Evict entries for deleted or long-unseen nodes when the cache grows large.
         let used = self.entries.values().filter(|e| e.used).count();
@@ -185,80 +272,241 @@ impl SceneCache {
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// The node's cached triangles and, when an effect works inside its shape, that shape.
+    fn pieces(
+        &mut self,
+        n: &Node,
+        wr: Rect,
+        w: Walk,
+        tess: &mut Tess,
+    ) -> (Arc<Vec<Piece>>, Arc<Vec<Piece>>) {
+        let hit = self.entries.get(&n.id).is_some_and(|e| {
+            e.bucket == w.bucket && e.wr == wr && e.opacity == w.opacity && e.node == *n
+        });
+        if !hit {
+            self.last_misses += 1;
+            let pieces = Arc::new(tess.ops(&draw::node_draw(n, wr, w.opacity).ops));
+            let masked = n.style.effects.iter().any(|e| {
+                e.visible && matches!(e.kind, EffectKind::InnerShadow | EffectKind::BackgroundBlur)
+            });
+            let mask = match draw::mask_op(n, wr) {
+                Some(op) if masked => Arc::new(tess.ops(&[op])),
+                // No area of its own: effects work inside what it paints.
+                None if masked => pieces.clone(),
+                _ => Arc::default(),
+            };
+            self.entries.insert(
+                n.id,
+                Entry {
+                    node: n.clone(),
+                    wr,
+                    opacity: w.opacity,
+                    bucket: w.bucket,
+                    pieces,
+                    mask,
+                    used: true,
+                },
+            );
+        }
+        let e = self.entries.get_mut(&n.id).unwrap();
+        e.used = true;
+        (e.pieces.clone(), e.mask.clone())
+    }
+
+    /// Paint `id` and its children into `out`. Returns the world bounds painted.
     fn walk(
         &mut self,
         doc: &Document,
         id: NodeId,
-        origin: V2,
-        clip: Option<Rect>,
-        parent_opacity: f64,
-        bucket: i32,
+        mut w: Walk,
         tess: &mut Tess,
-        cull: Option<Rect>,
-        out: &mut Vec<Item>,
-    ) {
-        let Some(n) = doc.get(id) else { return };
+        out: &mut Vec<Op>,
+    ) -> Option<Rect> {
+        let n = doc.get(id)?;
         if !n.visible {
-            return;
+            return None;
         }
-        let wr = n.rect.translate(origin);
-        let opacity = parent_opacity * n.style.opacity;
-        let bounds = draw::draw_bounds(n, wr);
-        let visible = cull.is_none_or(|c| c.intersects(&bounds))
-            && clip.is_none_or(|c| c.intersects(&bounds));
-        if visible && !n.is_group() {
-            let hit = self.entries.get(&id).is_some_and(|e| {
-                e.bucket == bucket && e.wr == wr && e.opacity == opacity && e.node == *n
-            });
-            if !hit {
-                self.last_misses += 1;
-                let d = draw::node_draw(n, wr, opacity);
-                let pieces = Arc::new(tess.ops(&d.ops));
-                self.entries.insert(
-                    id,
-                    Entry {
-                        node: n.clone(),
-                        wr,
-                        opacity,
-                        bucket,
-                        pieces,
-                        used: true,
-                    },
-                );
-            }
-            let e = self.entries.get_mut(&id).unwrap();
-            e.used = true;
-            if !e.pieces.is_empty() {
-                out.push(Item {
-                    id,
-                    pieces: e.pieces.clone(),
-                    clip,
-                    blend: n.style.blend,
-                });
-            }
-        }
-        if n.children.is_empty() {
-            return;
-        }
-        let child_clip = match n.kind {
-            NodeKind::Frame { clip: true } => {
-                match clip.map_or(Some(wr), |c| c.intersection(&wr)) {
-                    Some(c) => Some(c),
-                    None => return,
-                }
-            }
-            _ => clip,
+        let wr = n.rect.translate(w.origin);
+        let clip = w.clip;
+        w.opacity *= n.style.opacity;
+        let bounds = draw::shadow_bounds(n, wr);
+        let layer_blur = blur_sigma(&n.style.effects, EffectKind::LayerBlur);
+        let reached = bounds.inflate(draw::blur_reach(layer_blur));
+        let visible = w.cull.is_none_or(|c| c.intersects(&reached))
+            && clip.is_none_or(|c| c.intersects(&reached));
+        let (pieces, mask) = if visible && !n.is_group() {
+            self.pieces(n, wr, w, tess)
+        } else {
+            Default::default()
         };
-        if matches!(n.kind, NodeKind::Frame { clip: true })
-            && cull.is_some_and(|c| !c.intersects(&wr))
+        let item = (!pieces.is_empty()).then_some(Item {
+            id,
+            pieces,
+            clip,
+            blend: n.style.blend,
+        });
+
+        // Children first: a group casts its shadows from them.
+        let mut kids = Vec::new();
+        let mut kids_bounds = None;
+        let child_clip = match n.kind {
+            NodeKind::Frame { clip: true } => within(wr, clip)
+                .filter(|_| w.cull.is_none_or(|c| c.intersects(&wr)))
+                .map(Some),
+            _ => Some(clip),
+        };
+        if let Some(child_clip) = child_clip {
+            let down = Walk {
+                origin: wr.min(),
+                clip: child_clip,
+                ..w
+            };
+            for c in &n.children {
+                kids_bounds = union(kids_bounds, self.walk(doc, *c, down, tess, &mut kids));
+            }
+        }
+
+        let mut blurred = Vec::new();
+        let local = if layer_blur > 0.0 {
+            &mut blurred
+        } else {
+            &mut *out
+        };
+        if visible {
+            let fx = Effects {
+                n,
+                wr,
+                opacity: w.opacity,
+                clip,
+            };
+            let cast: Vec<Op> = match &item {
+                Some(it) => vec![Op::Item(it.clone())],
+                None => kids.clone(),
+            };
+            let cast_bounds = if item.is_some() {
+                Some(draw::draw_bounds(n, wr))
+            } else {
+                kids_bounds
+            };
+            for e in fx.of(EffectKind::DropShadow).rev() {
+                local.extend(fx.drop_shadow(e, &cast, cast_bounds));
+            }
+            let backdrop = blur_sigma(&n.style.effects, EffectKind::BackgroundBlur);
+            if backdrop > 0.0 && !mask.is_empty() {
+                local.push(Op::Backdrop(Backdrop {
+                    mask: mask.clone(),
+                    bounds: wr,
+                    sigma: backdrop,
+                    clip,
+                }));
+            }
+            local.extend(item.map(Op::Item));
+            for e in fx.of(EffectKind::InnerShadow).rev() {
+                local.extend(fx.inner_shadow(e, &mask));
+            }
+        }
+        local.append(&mut kids);
+        let painted = union(
+            visible.then_some(bounds).and_then(|b| within(b, clip)),
+            kids_bounds,
+        );
+        if layer_blur > 0.0
+            && !blurred.is_empty()
+            && let Some(bounds) = painted
         {
-            return;
+            out.push(Op::Blur(Blur {
+                content: blurred,
+                bounds,
+                sigma: layer_blur,
+                offset: V2::ZERO,
+                paint: BlurPaint::Content,
+                clip,
+            }));
+            return within(bounds.inflate(draw::blur_reach(layer_blur)), clip);
         }
-        let o = wr.min();
-        for c in &n.children {
-            self.walk(doc, *c, o, child_clip, opacity, bucket, tess, cull, out);
+        painted
+    }
+}
+
+/// One node's shadows as ops.
+struct Effects<'a> {
+    n: &'a Node,
+    wr: Rect,
+    opacity: f64,
+    clip: Option<Rect>,
+}
+
+impl<'a> Effects<'a> {
+    fn of(&self, kind: EffectKind) -> impl DoubleEndedIterator<Item = &'a Effect> {
+        (self.n.style.effects.iter()).filter(move |e| e.visible && e.kind == kind)
+    }
+
+    /// A box casts its shadow from the box and leaves it out from under itself, as CSS does.
+    /// Any other shape casts it from what it paints (`cast`), like `filter: drop-shadow()`,
+    /// so the shadow shows through a translucent fill and ignores the spread.
+    fn drop_shadow(&self, e: &Effect, cast: &[Op], cast_bounds: Option<Rect>) -> Option<Op> {
+        let offset = v2(e.x, e.y);
+        if let Some(b) = draw::box_shape(self.n, self.wr) {
+            let layer = b.inflate(draw::stroke_reach(self.n).0)?;
+            return Some(Op::Shadow(BoxShadow {
+                caster: layer.translate(offset).inflate(e.spread)?,
+                layer,
+                inset: false,
+                sigma: e.sigma(),
+                color: e.color.to_f32(self.opacity),
+                clip: self.clip,
+            }));
         }
+        (!cast.is_empty()).then_some(())?;
+        Some(Op::Blur(Blur {
+            content: cast.to_vec(),
+            bounds: cast_bounds?,
+            sigma: e.sigma(),
+            offset,
+            // The content already carries the layer's opacity.
+            paint: BlurPaint::Tint(e.color.to_f32(1.0)),
+            clip: self.clip,
+        }))
+    }
+
+    /// Painted over the fill and inside the stroke, like a CSS `inset` shadow.
+    fn inner_shadow(&self, e: &Effect, mask: &Arc<Vec<Piece>>) -> Option<Op> {
+        let offset = v2(e.x, e.y);
+        let color = e.color.to_f32(self.opacity);
+        if let Some(b) = draw::box_shape(self.n, self.wr) {
+            let layer = b.inflate(-draw::stroke_reach(self.n).1)?;
+            // A spread that swallows the box leaves shadow everywhere.
+            let caster = layer.translate(offset).inflate(-e.spread);
+            return Some(Op::Shadow(BoxShadow {
+                caster: caster.unwrap_or(RoundRect {
+                    rect: Rect::new(layer.rect.center().x, layer.rect.center().y, 0.0, 0.0),
+                    radii: [0.0; 4],
+                }),
+                layer,
+                inset: true,
+                sigma: e.sigma(),
+                color,
+                clip: self.clip,
+            }));
+        }
+        (!mask.is_empty()).then_some(())?;
+        Some(Op::Blur(Blur {
+            content: vec![Op::Item(Item {
+                id: self.n.id,
+                pieces: mask.clone(),
+                clip: None,
+                blend: BlendMode::Normal,
+            })],
+            // Room for the shape where it is and where the shadow moves it.
+            bounds: self.wr.union(&self.wr.translate(-offset)),
+            sigma: e.sigma(),
+            offset,
+            paint: BlurPaint::Inside {
+                color,
+                mask: mask.clone(),
+            },
+            clip: self.clip,
+        }))
     }
 }
 
@@ -266,7 +514,7 @@ impl SceneCache {
 /// world-space document, and the screen-space overlay (selection, guides, labels).
 pub struct CanvasFrame {
     pub under: Vec<Batch>,
-    pub items: Vec<Item>,
+    pub ops: Arc<Vec<Op>>,
     pub over: Vec<Batch>,
     pub camera: Camera,
     /// Canvas top-left in the render target, logical px.
@@ -635,25 +883,25 @@ pub fn canvas(ed: &Editor, cache: &mut SceneCache, offset: V2, show_grid: bool) 
     let vis = ed.camera.visible_world(ed.viewport);
     let bucket = zoom_bucket(ed.camera.zoom);
     cache.sync_fonts();
-    let items = match &cache.last {
-        Some((stamp, b, cull, items))
+    let ops = match &cache.last {
+        Some((stamp, b, cull, ops))
             if *stamp == ed.doc_stamp && *b == bucket && cull.contains_rect(&vis) =>
         {
             cache.last_misses = 0;
-            items.clone()
+            ops.clone()
         }
         _ => {
             let cull = vis.inflate(vis.w.max(vis.h) * 0.5);
-            let items = cache.items(&ed.doc, None, ed.camera.zoom, Some(cull));
-            cache.last = Some((ed.doc_stamp, bucket, cull, items.clone()));
-            items
+            let ops = Arc::new(cache.ops(&ed.doc, None, ed.camera.zoom, Some(cull)));
+            cache.last = Some((ed.doc_stamp, bucket, cull, ops.clone()));
+            ops
         }
     };
     let mut over = MeshBuilder::default();
     overlay(&mut over, ed, offset);
     CanvasFrame {
         under: under.finish(),
-        items,
+        ops,
         over: over.finish(),
         camera: ed.camera,
         offset,
@@ -673,10 +921,10 @@ pub fn export_frame(
     if let Some(bg) = background {
         under.rect(Rect::new(0.0, 0.0, size_px.x, size_px.y), rgba(bg));
     }
-    let items = SceneCache::default().items(doc, roots, camera.zoom, None);
+    let ops = Arc::new(SceneCache::default().ops(doc, roots, camera.zoom, None));
     CanvasFrame {
         under: under.finish(),
-        items,
+        ops,
         over: Vec::new(),
         camera,
         offset: V2::ZERO,

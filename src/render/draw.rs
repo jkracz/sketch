@@ -6,9 +6,10 @@
 use crate::assets;
 use crate::geom::{Rect, V2, v2};
 use crate::ink;
+use crate::model::effects::blur_sigma;
 use crate::model::{
-    BlendMode, Cap, Color, Document, FillRule, ImageMode, Join, Node, NodeId, NodeKind, Paint,
-    Stop, StrokeAlign,
+    BlendMode, Cap, Color, Document, EffectKind, FillRule, ImageMode, Join, Node, NodeId, NodeKind,
+    Paint, Stop, StrokeAlign,
 };
 use crate::text::{self, FaceId};
 use crate::vector::{self, VPath};
@@ -482,4 +483,102 @@ pub fn draw_bounds(n: &Node, wr: Rect) -> Rect {
         pad = pad.max(4.0);
     }
     wr.inflate(pad)
+}
+
+/// How far a Gaussian of `sigma` visibly reaches.
+pub fn blur_reach(sigma: f64) -> f64 {
+    sigma * 3.0
+}
+
+/// World bounds a node and its drop shadows paint into, before any layer blur. Children are
+/// not included.
+pub fn shadow_bounds(n: &Node, wr: Rect) -> Rect {
+    let own = draw_bounds(n, wr);
+    let mut b = own;
+    for e in &n.style.effects {
+        if e.visible && e.kind == EffectKind::DropShadow {
+            let reach = e.spread.max(0.0) + blur_reach(e.sigma());
+            b = b.union(&own.translate(v2(e.x, e.y)).inflate(reach));
+        }
+    }
+    b
+}
+
+/// How far a layer blur on `n` spreads what it and its children paint.
+pub fn layer_blur_reach(n: &Node) -> f64 {
+    blur_reach(blur_sigma(&n.style.effects, EffectKind::LayerBlur))
+}
+
+/// A rectangle with corner radii (tl, tr, br, bl).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundRect {
+    pub rect: Rect,
+    pub radii: [f64; 4],
+}
+
+impl RoundRect {
+    /// Grow by `d` on every side (shrink when negative), as CSS grows a shadow by its spread:
+    /// round corners follow, square ones stay square. None once nothing is left.
+    pub fn inflate(&self, d: f64) -> Option<RoundRect> {
+        let rect = self.rect.inflate(d);
+        (rect.w > 0.0 && rect.h > 0.0).then(|| RoundRect {
+            rect,
+            radii: (self.radii).map(|r| if r > 0.0 { (r + d).max(0.0) } else { 0.0 }),
+        })
+    }
+
+    pub fn translate(&self, d: V2) -> RoundRect {
+        RoundRect {
+            rect: self.rect.translate(d),
+            radii: self.radii,
+        }
+    }
+}
+
+/// The node's outline when it is a rounded box, which casts shadows the way a CSS box does:
+/// from the box, whatever is painted in it. A circle counts.
+pub fn box_shape(n: &Node, wr: Rect) -> Option<RoundRect> {
+    let max = (wr.w.min(wr.h) * 0.5).max(0.0);
+    let radii = match n.kind {
+        NodeKind::Frame { .. } | NodeKind::Rect => n.style.corner_radii(),
+        NodeKind::Sticky { .. } => [n.style.corner_radius.max(2.0); 4],
+        NodeKind::Ellipse if (wr.w - wr.h).abs() < 1e-6 => [max; 4],
+        _ => return None,
+    };
+    Some(RoundRect {
+        rect: wr,
+        radii: radii.map(|r| r.clamp(0.0, max)),
+    })
+}
+
+/// How far the stroke of a box reaches outside its rect and inside it.
+pub fn stroke_reach(n: &Node) -> (f64, f64) {
+    if n.style.stroke.is_none() || n.style.stroke_width <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let w = n.style.stroke_width;
+    match n.style.stroke_align {
+        StrokeAlign::Inside => (0.0, w),
+        StrokeAlign::Center => (w * 0.5, w * 0.5),
+        StrokeAlign::Outside => (w, 0.0),
+    }
+}
+
+/// The node's filled shape as one opaque op, for effects that work inside it. None for
+/// layers that have no area of their own (text, lines, groups).
+pub fn mask_op(n: &Node, wr: Rect) -> Option<DrawOp> {
+    if !is_area(n) {
+        return None;
+    }
+    Some(DrawOp::Fill {
+        path: shape_path(n, wr)?,
+        paint: PaintSpec::Solid([1.0; 4]),
+        even_odd: matches!(
+            n.kind,
+            NodeKind::Path {
+                fill_rule: FillRule::EvenOdd,
+                ..
+            }
+        ),
+    })
 }

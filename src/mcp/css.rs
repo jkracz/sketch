@@ -8,10 +8,11 @@
 
 use crate::geom::v2;
 use crate::model::TokenProp;
+use crate::model::effects::{blur_sigma, edit_effects};
 use crate::model::rough::{FillStyle, Rough};
 use crate::model::{
-    Align, AutoLayout, BlendMode, Color, Direction, ImageMode, LetterSpacing, Node, NodeKind,
-    Paint, Sizing, Stop, TextAlign,
+    Align, AutoLayout, BlendMode, Color, Direction, Effect, EffectKind, ImageMode, LetterSpacing,
+    Node, NodeKind, Paint, Sizing, Stop, TextAlign,
 };
 use serde_json::{Map, Value};
 
@@ -502,6 +503,149 @@ fn gradient_css(p: &Paint) -> Option<String> {
 pub fn url(s: &str) -> Option<String> {
     let inner = s.trim().strip_prefix("url(")?.strip_suffix(')')?;
     Some(inner.trim().trim_matches(['"', '\'']).to_string())
+}
+
+// ------------------------------------------------------------------------------ effects
+
+/// The CSS property that lists `n`'s shadows. Text casts its shadow from the glyphs.
+pub fn shadow_key(n: &Node) -> &'static str {
+    if matches!(n.kind, NodeKind::Text { .. }) {
+        "textShadow"
+    } else {
+        "boxShadow"
+    }
+}
+
+/// Indices into `style.effects` of the shadows [`shadow_key`] lists, in order: the visible
+/// ones, and for text only drop shadows, since `text-shadow` has no `inset`.
+pub fn shadow_slots(n: &Node) -> Vec<usize> {
+    let text = matches!(n.kind, NodeKind::Text { .. });
+    (n.style.effects.iter().enumerate())
+        .filter(|(_, e)| e.visible && e.kind.is_shadow())
+        .filter(|(_, e)| !text || e.kind == EffectKind::DropShadow)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// One shadow of a `box-shadow` or `text-shadow` list: `[inset] x y [blur [spread]] [color]`
+/// in any order CSS allows. No color means black.
+fn shadow(s: &str, fs: f64, text: bool) -> Option<Effect> {
+    let mut lengths = Vec::new();
+    let (mut inset, mut col) = (false, None);
+    for part in split_ws(s) {
+        if part.eq_ignore_ascii_case("inset") && !inset {
+            inset = true;
+        } else if let Some(l) = length(&part, fs) {
+            lengths.push(l);
+        } else if col.is_none() {
+            col = Some(color(&part)?);
+        } else {
+            return None;
+        }
+    }
+    let max = if text { 3 } else { 4 };
+    if lengths.len() < 2 || lengths.len() > max || (text && inset) {
+        return None;
+    }
+    let at = |i: usize| lengths.get(i).copied().unwrap_or(0.0);
+    Some(Effect {
+        kind: if inset {
+            EffectKind::InnerShadow
+        } else {
+            EffectKind::DropShadow
+        },
+        x: at(0),
+        y: at(1),
+        blur: at(2).max(0.0),
+        spread: at(3),
+        color: col.unwrap_or(Color::BLACK),
+        visible: true,
+    })
+}
+
+/// A whole `box-shadow` or `text-shadow` value. `none` is an empty list.
+pub fn shadows(v: &str, fs: f64, text: bool) -> Option<Vec<Effect>> {
+    if v.trim().eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let list: Option<Vec<Effect>> = (split_top(v, ',').iter())
+        .map(|s| shadow(s, fs, text))
+        .collect();
+    list.filter(|l| !l.is_empty())
+}
+
+/// The `blur()` radius of a `filter` or `backdrop-filter` value (None without one), and
+/// whether that was all the value held.
+fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
+    if v.trim().eq_ignore_ascii_case("none") {
+        return (None, true);
+    }
+    let (mut radius, mut all) = (None, true);
+    for part in split_ws(v) {
+        let blur = func_args(&part.to_ascii_lowercase())
+            .filter(|(name, args)| name == "blur" && args.len() <= 1)
+            .and_then(|(_, args)| args.first().map_or(Some(0.0), |a| length(a, fs)))
+            .filter(|r| *r >= 0.0);
+        match blur {
+            Some(r) => radius = Some(r),
+            None => all = false,
+        }
+    }
+    (radius, all)
+}
+
+/// Put `new` first in place of the effects `replaced` picks.
+fn replace_effects(n: &mut Node, new: Vec<Effect>, replaced: impl Fn(&Effect) -> bool) {
+    edit_effects(n, |list| {
+        list.retain(|(e, _)| !replaced(e));
+        list.splice(0..0, new.into_iter().map(|e| (e, None)));
+    });
+}
+
+/// Set the one blur of `kind` from a `filter` value. False when the value had no `blur()`
+/// we could read, or held other filters, which Sketch drops.
+fn apply_blur(n: &mut Node, kind: EffectKind, v: &str, fs: f64) -> bool {
+    let (radius, all) = blur_filter(v, fs);
+    if radius.is_none() && !all {
+        return false;
+    }
+    let new = radius.filter(|r| *r > 0.0).map(|blur| Effect {
+        blur,
+        ..Effect::new(kind)
+    });
+    edit_effects(n, |list| {
+        list.retain(|(e, _)| e.kind != kind);
+        list.extend(new.map(|e| (e, None)));
+    });
+    all
+}
+
+/// `n`'s shadows as a `box-shadow` or `text-shadow` value. `color` writes the color of the
+/// effect at an index.
+pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<String> {
+    let text = matches!(n.kind, NodeKind::Text { .. });
+    let list: Vec<String> = (shadow_slots(n).into_iter())
+        .map(|i| {
+            let e = &n.style.effects[i];
+            let mut parts = Vec::new();
+            if e.kind == EffectKind::InnerShadow {
+                parts.push("inset".to_string());
+            }
+            parts.extend([px(e.x), px(e.y), px(e.blur)]);
+            if e.spread != 0.0 && !text {
+                parts.push(px(e.spread));
+            }
+            parts.push(color(i, e.color));
+            parts.join(" ")
+        })
+        .collect();
+    (!list.is_empty()).then(|| list.join(", "))
+}
+
+/// The combined visible blur of `kind` as a `blur()` filter.
+fn blur_css(n: &Node, kind: EffectKind) -> Option<String> {
+    let r = blur_sigma(&n.style.effects, kind);
+    (r > 0.0).then(|| format!("blur({})", px(r)))
 }
 
 // ------------------------------------------------------------------------------ apply
@@ -1119,6 +1263,25 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
                 None => false,
             },
+            // `text-shadow` is inherited, so boxes take it without using it.
+            "textShadow" if !matches!(n.kind, NodeKind::Text { .. }) => true,
+            "boxShadow" | "textShadow" if k == shadow_key(n) => {
+                match shadows(v, fs, k == "textShadow") {
+                    Some(list) => {
+                        let text = k == "textShadow";
+                        replace_effects(n, list, |e| {
+                            e.kind == EffectKind::DropShadow
+                                || (e.kind == EffectKind::InnerShadow && !text)
+                        });
+                        true
+                    }
+                    None => false,
+                }
+            }
+            "filter" => apply_blur(n, EffectKind::LayerBlur, v, fs),
+            "backdropFilter" | "WebkitBackdropFilter" | "webkitBackdropFilter" => {
+                apply_blur(n, EffectKind::BackgroundBlur, v, fs)
+            }
             "mixBlendMode" => match BlendMode::ALL.iter().find(|b| b.css() == lower) {
                 Some(b) => {
                     n.style.blend = *b;
@@ -1466,6 +1629,15 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
     if n.style.blend != BlendMode::Normal {
         put("mixBlendMode", n.style.blend.css().into());
     }
+    if let Some(v) = shadows_css(n, |_, c| color_css(c)) {
+        put(shadow_key(n), v);
+    }
+    if let Some(v) = blur_css(n, EffectKind::LayerBlur) {
+        put("filter", v);
+    }
+    if let Some(v) = blur_css(n, EffectKind::BackgroundBlur) {
+        put("backdropFilter", v);
+    }
     if let Some(r) = n.style.rough {
         put("sketch", "true".into());
         put("roughness", format!("{}", r.roughness));
@@ -1574,7 +1746,7 @@ mod tests {
             &parse_inline(
                 "display:flex; flex-direction:column; gap:12px; padding:8px 16px; \
                  justify-content:center; align-items:flex-end; width:320px; height:fit-content; \
-                 background:#ff0000; border:2px dashed #000; border-radius:12px; box-shadow: 0 0 1px red",
+                 background:#ff0000; border:2px dashed #000; border-radius:12px; transform: rotate(3deg)",
             ),
             &Context::default(),
         );
@@ -1589,7 +1761,7 @@ mod tests {
         assert_eq!(n.style.stroke_width, 2.0);
         assert!(!n.style.dash.is_empty());
         assert_eq!(n.style.corner_radius, 12.0);
-        assert_eq!(a.ignored, vec!["boxShadow".to_string()]);
+        assert_eq!(a.ignored, vec!["transform".to_string()]);
         let back = computed(&n, None, true);
         assert_eq!(back["flexDirection"], "column");
         assert_eq!(back["borderRadius"], "12px");
@@ -1611,5 +1783,112 @@ mod tests {
         );
         let r = n.style.rough.unwrap();
         assert_eq!((r.roughness, r.fill_style), (2.0, FillStyle::CrossHatch));
+    }
+
+    fn styled(kind: NodeKind, css: &str) -> (Node, Applied) {
+        let mut n = Node::new(NodeId(1), kind, Rect::new(0.0, 0.0, 100.0, 40.0));
+        let a = apply(&mut n, &parse_inline(css), &Context::default());
+        (n, a)
+    }
+
+    fn text_kind() -> NodeKind {
+        NodeKind::Text {
+            text: "Hi".into(),
+            font_size: 16.0,
+            auto_width: true,
+            align: TextAlign::Left,
+        }
+    }
+
+    #[test]
+    fn box_shadow_lists_become_effects_and_read_back() {
+        let (n, a) = styled(
+            NodeKind::Rect,
+            "box-shadow: 0 4px 8px -2px rgba(0, 0, 0, 0.25), inset 1px 2px #f00, #00f 0 0 4px",
+        );
+        assert!(a.ignored.is_empty(), "{:?}", a.ignored);
+        let e = &n.style.effects;
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].kind, EffectKind::DropShadow);
+        assert_eq!(
+            (e[0].x, e[0].y, e[0].blur, e[0].spread),
+            (0.0, 4.0, 8.0, -2.0)
+        );
+        assert_eq!(e[0].color, Color::rgba(0, 0, 0, 64));
+        assert_eq!(e[1].kind, EffectKind::InnerShadow);
+        assert_eq!((e[1].x, e[1].y, e[1].blur), (1.0, 2.0, 0.0));
+        assert_eq!(e[2].color, Color::rgb(0, 0, 255));
+        let back = computed(&n, None, true);
+        assert_eq!(
+            back["boxShadow"],
+            "0px 4px 8px -2px rgba(0, 0, 0, 0.251), inset 1px 2px 0px #ff0000, 0px 0px 4px #0000ff"
+        );
+        // What we write reads back as the same effects.
+        let (again, _) = styled(
+            NodeKind::Rect,
+            &format!("box-shadow: {}", back["boxShadow"].as_str().unwrap()),
+        );
+        assert_eq!(again.style.effects, n.style.effects);
+    }
+
+    #[test]
+    fn a_new_shadow_list_replaces_the_old_one_and_keeps_blurs() {
+        let (mut n, _) = styled(
+            NodeKind::Rect,
+            "box-shadow: 0 1px 2px #000; filter: blur(4px); backdrop-filter: blur(12px)",
+        );
+        let kinds =
+            |n: &Node| -> Vec<EffectKind> { n.style.effects.iter().map(|e| e.kind).collect() };
+        use EffectKind::*;
+        assert_eq!(kinds(&n), [DropShadow, LayerBlur, BackgroundBlur]);
+        let back = computed(&n, None, true);
+        assert_eq!(back["filter"], "blur(4px)");
+        assert_eq!(back["backdropFilter"], "blur(12px)");
+        let ctx = Context::default();
+        apply(&mut n, &parse_inline("box-shadow: inset 0 0 3px red"), &ctx);
+        assert_eq!(kinds(&n), [InnerShadow, LayerBlur, BackgroundBlur]);
+        apply(
+            &mut n,
+            &parse_inline("box-shadow: none; filter: none"),
+            &ctx,
+        );
+        assert_eq!(kinds(&n), [BackgroundBlur]);
+        // A hidden shadow is not in the CSS.
+        n.style.effects.push(Effect {
+            visible: false,
+            ..Effect::new(DropShadow)
+        });
+        assert!(!computed(&n, None, true).contains_key("boxShadow"));
+    }
+
+    #[test]
+    fn filters_other_than_blur_are_reported() {
+        let (n, a) = styled(NodeKind::Rect, "filter: blur(2px) brightness(1.2)");
+        assert_eq!(n.style.effects.len(), 1, "the blur still applies");
+        assert_eq!(a.ignored, ["filter"]);
+        let (n, a) = styled(NodeKind::Rect, "filter: grayscale(1); box-shadow: 1px red");
+        assert!(n.style.effects.is_empty());
+        assert_eq!(a.ignored, ["filter", "boxShadow"]);
+    }
+
+    #[test]
+    fn text_casts_text_shadows() {
+        let (n, a) = styled(text_kind(), "text-shadow: 1px 2px 3px #000, 0 0 #f00");
+        assert!(a.ignored.is_empty(), "{:?}", a.ignored);
+        assert_eq!(n.style.effects.len(), 2);
+        assert_eq!(n.style.effects[0].blur, 3.0);
+        let back = computed(&n, None, true);
+        assert_eq!(
+            back["textShadow"],
+            "1px 2px 3px #000000, 0px 0px 0px #ff0000"
+        );
+        assert!(!back.contains_key("boxShadow"));
+        // A box shadow on text would be a shadow of its box, which text layers don't have.
+        let (n, a) = styled(text_kind(), "box-shadow: 0 0 4px #000");
+        assert!(n.style.effects.is_empty());
+        assert_eq!(a.ignored, ["boxShadow"]);
+        // Boxes pass `text-shadow` on to their text.
+        let (n, a) = styled(NodeKind::Rect, "text-shadow: 1px 1px #000");
+        assert!(n.style.effects.is_empty() && a.ignored.is_empty());
     }
 }
