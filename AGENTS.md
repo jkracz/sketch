@@ -38,6 +38,11 @@ checkout folders keep the old name.
   headline too.
 - Code ported from another project starts with a comment naming its source
   and gets an entry in `THIRD_PARTY.md`.
+- An agent can do anything a person can do in the app. A change that adds
+  something a person can do in the UI also lets an agent create, edit and
+  delete it over MCP, with the tool descriptions and the guide in
+  `src/mcp/tools.rs` updated to match. Until the MCP side ships, the change
+  isn't done.
 
 ## Checks in this repo
 
