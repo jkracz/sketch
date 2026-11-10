@@ -306,6 +306,9 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &TextStyleDef) {
             })
             .inner;
         d.typed[i] |= r.changed();
+        if r.lost_focus() && !committed(ui, &r) {
+            d.typed[i] = false;
+        }
         let moded = !s.mode_values(f).is_empty();
         if committed(ui, &r)
             && (d.values[i] != ed.tokens.style_value_css(s, f) || (moded && d.typed[i]))
@@ -542,5 +545,39 @@ mod tests {
         assert!(h.ed.tokens.style(&id).unwrap().modes.is_empty());
         let dark = h.ed.tokens.resolve_style_in(&id, Some("Dark")).unwrap();
         assert_eq!(dark.size, 12.0);
+    }
+
+    #[test]
+    fn escape_keeps_other_modes_values() {
+        let mut h = Harness::new();
+        let id = h.ed.edit_tokens("add", None, |t| {
+            let dark = vec![("dark".to_string(), "48px".to_string())];
+            let size = t
+                .create_in_modes(TokenKind::FontSize, "size", "12px", &dark, None)
+                .unwrap();
+            let mut i = StyleInput::default();
+            i.set(StyleField::Size, "var(--size)".into());
+            let id = t.create_style("Body", &i, None).unwrap();
+            t.delete(&[size]);
+            id
+        });
+        h.st.tokens.styles.open(&h.ed, &id);
+        let mut f = |ui: &mut Ui, ed: &mut Editor, st: &mut UiState| {
+            let s = ed.tokens.style(&id).cloned().unwrap();
+            fields(ui, ed, st, &s);
+        };
+        h.step(vec![], &mut f);
+        for _ in 0..3 {
+            h.step(vec![key(egui::Key::Tab)], &mut f);
+            h.step(vec![], &mut f);
+        }
+        h.step(vec![typed("9")], &mut f);
+        h.step(vec![key(egui::Key::Escape)], &mut f);
+        for _ in 0..3 {
+            h.step(vec![], &mut f);
+        }
+        assert!(!h.ed.tokens.style(&id).unwrap().modes.is_empty());
+        let dark = h.ed.tokens.resolve_style_in(&id, Some("Dark")).unwrap();
+        assert_eq!(dark.size, 48.0);
     }
 }
