@@ -280,7 +280,9 @@ impl App {
         if self.session.project.is_some() {
             self.save_project(true);
             if let Err(e) = self.session.close(&mut self.ed) {
+                // Stay on the canvas: the project is still open and keeps autosaving.
                 self.error(format!("Could not save project: {e}"));
+                return;
             }
         } else if !self.confirm_discard() {
             return;
@@ -1493,10 +1495,6 @@ impl crate::mcp::exec::Host for App {
     }
     fn close_project(&mut self) -> Result<(), String> {
         if self.session.project.is_some() {
-            // Saved first, so a failed save leaves the project open and autosaving.
-            self.session
-                .save_all(&mut self.ed)
-                .map_err(|e| format!("could not save the open project: {e}"))?;
             self.session
                 .close(&mut self.ed)
                 .map_err(|e| format!("could not save the open project: {e}"))?;
