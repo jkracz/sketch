@@ -120,12 +120,20 @@ impl Editor {
             self.sync_deep(j, seen);
         }
         let changed = self.with_page(i, |ed| {
+            // New layers stay off ids a redo will recreate.
+            let next_id = ed.doc.next_id;
+            ed.doc.next_id = next_id.max(ed.history.id_ceiling());
             ed.rec = Some((Recording::new("Sync components", &ed.doc), None));
             ed.sync_instances(&roots);
             ed.fixup();
             // Layers can end where they began: a mode the instance overrides is written back.
             let (rec, _) = ed.rec.take().unwrap();
-            (rec.touched().iter()).any(|id| rec.before(*id) != Some(&ed.doc.get(*id).cloned()))
+            let changed =
+                (rec.touched().iter()).any(|id| rec.before(*id) != Some(&ed.doc.get(*id).cloned()));
+            if !changed {
+                ed.doc.next_id = next_id;
+            }
+            changed
         });
         if changed {
             self.pages[i].saved_gen = u64::MAX;
@@ -457,6 +465,26 @@ mod tests {
         e.switch_page(1);
         e.undo();
         e.doc.validate().unwrap();
+        assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
+    }
+
+    #[test]
+    fn a_sync_after_undo_leaves_ids_free_for_redo() {
+        let (mut e, main, _) = two_pages();
+        copy(&mut e, &[main]);
+        let inst = paste_on(&mut e, 1);
+        let r = Node::new(NodeId(0), NodeKind::Rect, Rect::new(0.0, 0.0, 9.0, 9.0));
+        let r = e.add_node(r, None);
+        e.switch_page(0);
+        let extra = Node::new(NodeId(0), NodeKind::Rect, Rect::new(50.0, 10.0, 5.0, 5.0));
+        e.add_node(extra, Some(main));
+        e.switch_page(1);
+        e.undo();
+        e.undo();
+        e.redo();
+        e.redo();
+        e.doc.validate().unwrap();
+        assert!(e.doc.get(r).is_some_and(|n| n.parent.is_none()));
         assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
     }
 

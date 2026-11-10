@@ -223,6 +223,13 @@ pub struct History {
 }
 
 impl History {
+    /// One past the highest id any change can recreate, so layers added outside the history
+    /// (instances synced from another page) never take an id a redo will need.
+    pub fn id_ceiling(&self) -> u64 {
+        let ids = (self.undo.iter().chain(&self.redo)).map(|c| c.next_id.0.max(c.next_id.1));
+        ids.max().unwrap_or(0)
+    }
+
     /// Finalize a recording into a change. Returns false when nothing changed.
     pub fn commit(&mut self, doc: &Document, rec: Recording, coalesce_key: Option<String>) -> bool {
         let entries: Vec<Entry> = rec
