@@ -1089,16 +1089,26 @@ impl TokenSet {
             .collect();
         for m in missing {
             if !self.modes.iter().any(|x| same_mode(&x.name, &m.name)) {
-                // An older stand-in was renamed away from the system mode's name.
-                for x in &mut self.modes {
-                    x.aka.retain(|a| *a != m.id);
-                }
                 self.modes.push(Mode {
                     id: crate::project::new_id(),
-                    name: m.name,
-                    aka: vec![m.id],
+                    name: m.name.clone(),
+                    aka: Vec::new(),
                 });
+                self.stand_in(&m);
             }
+        }
+    }
+
+    /// Make this file's mode named like system mode `m` the one that stands in for it. Only
+    /// one local mode stands in for a given system mode: an older one may have been renamed.
+    fn stand_in(&mut self, m: &Mode) {
+        for x in &mut self.modes {
+            x.aka.retain(|a| *a != m.id);
+        }
+        if let Some(local) =
+            (self.modes.iter_mut()).find(|x| x.id != m.id && same_mode(&x.name, &m.name))
+        {
+            local.aka.push(m.id.clone());
         }
     }
 
@@ -1588,12 +1598,8 @@ impl TokenSet {
             names.extend(self.modes_needed(t));
         }
         self.promote_modes(&names);
-        for m in theirs {
-            if let Some(local) = (self.modes.iter_mut())
-                .find(|x| same_mode(&x.name, &m.name) && !x.aka.contains(&m.id))
-            {
-                local.aka.push(m.id);
-            }
+        for m in &theirs {
+            self.stand_in(m);
         }
         let local: Vec<Token> = self
             .tokens
@@ -2475,6 +2481,30 @@ mod tests {
             Some("Sepia"),
             "the detached copy stands in"
         );
+    }
+
+    #[test]
+    fn one_local_mode_stands_in_for_a_system_mode() {
+        let mut s = using_modes(&["Contrast", "Light"]);
+        let bg = s.by_css_name("--s-bg").unwrap().id.clone();
+        s.duplicate(std::slice::from_ref(&bg));
+        let promoted = s
+            .modes()
+            .iter()
+            .find(|m| m.name == "Contrast")
+            .unwrap()
+            .id
+            .clone();
+        s.rename_mode(&promoted, "Dim").unwrap();
+        let contrast = s.add_mode();
+        s.rename_mode(&contrast, "Contrast").unwrap();
+        s.detach_system("s");
+        assert_eq!(s.mode_name("s/0"), Some("Contrast"));
+        let owners = s
+            .modes()
+            .iter()
+            .filter(|m| m.aka.iter().any(|a| a == "s/0"));
+        assert_eq!(owners.count(), 1);
     }
 
     #[test]
