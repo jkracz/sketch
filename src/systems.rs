@@ -458,7 +458,6 @@ impl Contents {
             && self.components.is_empty()
     }
 
-    /// Whether `p` publishes exactly this.
     fn published_in(&self, p: &Published) -> bool {
         p.tokens == self.tokens
             && p.text_styles == self.text_styles
