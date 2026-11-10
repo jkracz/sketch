@@ -109,6 +109,10 @@ impl Host for SessionHost {
         Ok(())
     }
     fn close_project(&mut self) -> Result<(), String> {
+        // Saved first, so a failed save leaves the project open.
+        self.session
+            .save_all(&mut self.ed)
+            .map_err(|e| e.to_string())?;
         self.session.close(&mut self.ed).map_err(|e| e.to_string())
     }
     fn gpu(&mut self) -> Option<Headless> {
