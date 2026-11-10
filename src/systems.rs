@@ -1,9 +1,13 @@
 //! Published design systems, shared by every project in the store
 //! (`<projects folder>/systems/<id>.json`).
 //!
-//! A project publishes its local tokens as one design system. The registry keeps only the
-//! latest version. Projects that use a system hold a read-only copy of the version they last
-//! saw (see `TokenSet::attach`) and move to a newer one when they open.
+//! A project publishes its local tokens, styles and main components as one design system.
+//! The registry keeps only the latest version, with the images its components use in
+//! `systems/<id>/assets/`. Projects that use a system hold a read-only copy of the version
+//! they last saw (see `TokenSet::attach`) and move to a newer one when they open.
+
+mod components;
+pub use components::{PublishedComponent, component_id};
 
 use crate::editor::Editor;
 use crate::model::{
@@ -54,6 +58,9 @@ pub struct Published {
     /// published before modes existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modes: Vec<Mode>,
+    /// Main components from every page, by name (`components::publishable`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<PublishedComponent>,
 }
 
 impl Published {
@@ -112,8 +119,12 @@ impl Registry {
 
     /// Ids come from `new_id`; anything else could point outside the folder.
     fn path(&self, id: &str) -> Option<PathBuf> {
-        let ok = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric());
-        ok.then(|| self.dir.join(format!("{id}.json")))
+        valid_id(id).then(|| self.dir.join(format!("{id}.json")))
+    }
+
+    /// The images a system's components use, as `<asset id>.<ext>`.
+    pub fn assets_dir(&self, id: &str) -> Option<PathBuf> {
+        valid_id(id).then(|| self.dir.join(id).join("assets"))
     }
 
     pub fn get(&self, id: &str) -> Option<Published> {
@@ -133,21 +144,50 @@ impl Registry {
         out
     }
 
+    /// Write the entry and its components' images. The images go first, so a reader never
+    /// sees an entry whose images are missing; ones it no longer uses go last, best effort.
     pub fn save(&self, p: &Published) -> std::io::Result<()> {
-        let path = self
-            .path(&p.id)
-            .ok_or_else(|| std::io::Error::other("bad design system id"))?;
+        let bad = || std::io::Error::other("bad design system id");
+        let path = self.path(&p.id).ok_or_else(bad)?;
+        let assets = self.assets_dir(&p.id).ok_or_else(bad)?;
+        let used: Vec<String> = p.components.iter().flat_map(|c| c.assets()).collect();
+        crate::assets::save_to_dir(&assets, used.iter().cloned())?;
         std::fs::create_dir_all(&self.dir)?;
         let json = serde_json::to_string_pretty(p).expect("design system serializes");
-        crate::io::atomic::write(&path, json.as_bytes())
+        crate::io::atomic::write(&path, json.as_bytes())?;
+        for e in std::fs::read_dir(&assets).into_iter().flatten().flatten() {
+            let stem = e
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from);
+            // Housekeeping only: failing here must not fail a publish that already saved.
+            if stem.is_none_or(|s| !used.contains(&s))
+                && let Err(err) = std::fs::remove_file(e.path())
+            {
+                log::warn!("{}: {err}", e.path().display());
+            }
+        }
+        Ok(())
     }
 
+    /// Remove the entry and its images. Files that use the system keep their copies.
     pub fn remove(&self, id: &str) -> std::io::Result<()> {
-        match self.path(id) {
-            Some(p) if p.exists() => std::fs::remove_file(p),
+        if let Some(p) = self.path(id).filter(|p| p.exists()) {
+            std::fs::remove_file(p)?;
+        }
+        match self
+            .assets_dir(id)
+            .and_then(|a| a.parent().map(Path::to_path_buf))
+        {
+            Some(d) if d.exists() => std::fs::remove_dir_all(d),
             _ => Ok(()),
         }
     }
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn read(path: &Path) -> Option<Published> {
@@ -351,12 +391,19 @@ pub fn publish(
     if let Some(n) = &notes {
         limit("The notes", n, MAX_NOTES)?;
     }
-    let tokens = ed.tokens.publishable();
-    let text_styles = ed.tokens.publishable_styles();
-    let effect_styles = ed.tokens.publishable_effect_styles();
-    if tokens.is_empty() && text_styles.is_empty() && effect_styles.is_empty() {
-        return Err("Add at least one token or style before publishing a design system.".into());
+    let contents = Contents::of(ed);
+    if contents.is_empty() {
+        return Err(
+            "Add at least one token, style or component before publishing a design system.".into(),
+        );
     }
+    let diff = changes(old.as_ref(), &prefix, &contents);
+    let Contents {
+        tokens,
+        text_styles,
+        effect_styles,
+        components,
+    } = contents;
     let release = old
         .as_ref()
         .map(|o| o.release)
@@ -378,16 +425,52 @@ pub fn publish(
         text_styles,
         effect_styles,
         modes: ed.tokens.modes().to_vec(),
+        components,
     };
-    let report = report(store, old.as_ref(), system);
+    let report = report(store, system, diff);
     reg.save(&report.system).map_err(|e| e.to_string())?;
     ed.published = Some(report.system.link());
     ed.meta_dirty = true;
     Ok(report)
 }
 
-/// Tokens and styles a publish would add, change and remove, as CSS names and classes with
-/// `prefix`.
+/// What the open project would publish now: its local tokens and styles, with aliases to
+/// other systems flattened, and its main components from every page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Contents {
+    pub tokens: Vec<Token>,
+    pub text_styles: Vec<TextStyleDef>,
+    pub effect_styles: Vec<EffectStyleDef>,
+    pub components: Vec<PublishedComponent>,
+}
+
+impl Contents {
+    pub fn of(ed: &Editor) -> Contents {
+        Contents {
+            tokens: ed.tokens.publishable(),
+            text_styles: ed.tokens.publishable_styles(),
+            effect_styles: ed.tokens.publishable_effect_styles(),
+            components: components::publishable(ed),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+            && self.text_styles.is_empty()
+            && self.effect_styles.is_empty()
+            && self.components.is_empty()
+    }
+
+    fn published_in(&self, p: &Published) -> bool {
+        p.tokens == self.tokens
+            && p.text_styles == self.text_styles
+            && p.effect_styles == self.effect_styles
+            && p.components == self.components
+    }
+}
+
+/// Tokens, styles and components a publish would add, change and remove: CSS names and
+/// classes with `prefix`, and "<name> component".
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
     pub added: Vec<String>,
@@ -401,19 +484,13 @@ impl Changes {
     }
 }
 
-pub fn changes(
-    old: Option<&Published>,
-    prefix: &str,
-    tokens: &[Token],
-    styles: &[TextStyleDef],
-    effects: &[EffectStyleDef],
-) -> Changes {
+pub fn changes(old: Option<&Published>, prefix: &str, new: &Contents) -> Changes {
     let mut c = Changes::default();
     let old_tokens = old.map(|o| o.tokens.as_slice()).unwrap_or_default();
     diff_into(
         &mut c,
         old_tokens,
-        tokens,
+        &new.tokens,
         |t| t.id.as_str(),
         |t| format!("--{prefix}-{}", css_slug(&t.name)),
     );
@@ -421,7 +498,7 @@ pub fn changes(
     diff_into(
         &mut c,
         old_styles,
-        styles,
+        &new.text_styles,
         |s| s.id.as_str(),
         |s| format!(".{prefix}-{}", style_slug(&s.name)),
     );
@@ -429,9 +506,17 @@ pub fn changes(
     diff_into(
         &mut c,
         old_effects,
-        effects,
+        &new.effect_styles,
         |s| s.id.as_str(),
         |s| format!("--{prefix}-{}", style_slug(&s.name)),
+    );
+    let old_components = old.map(|o| o.components.as_slice()).unwrap_or_default();
+    diff_into(
+        &mut c,
+        old_components,
+        &new.components,
+        |m| m.id.as_str(),
+        |m| format!("{} component", m.name),
     );
     c
 }
@@ -464,18 +549,12 @@ pub fn users(store: &Store, id: &str) -> usize {
         .count()
 }
 
-fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishReport {
+fn report(store: &Store, system: Published, diff: Changes) -> PublishReport {
     let Changes {
         added,
         changed,
         removed,
-    } = changes(
-        old,
-        &system.prefix,
-        &system.tokens,
-        &system.text_styles,
-        &system.effect_styles,
-    );
+    } = diff;
     let users = users(store, &system.id);
     PublishReport {
         system,
@@ -486,20 +565,21 @@ fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishR
     }
 }
 
-/// Whether the open project's tokens or settings differ from what it last published. False
-/// when it has never published.
+/// Whether the open project's tokens, components or settings differ from what it last
+/// published. False when it has never published.
 pub fn has_unpublished_changes(store: &Store, ed: &Editor) -> bool {
     let Some(l) = &ed.published else { return false };
-    match Registry::in_store(store).get(&l.id) {
-        Some(p) => {
-            p.tokens != ed.tokens.publishable()
-                || p.text_styles != ed.tokens.publishable_styles()
-                || p.effect_styles != ed.tokens.publishable_effect_styles()
-                || p.modes != ed.tokens.modes()
-                || p.link() != *l
-        }
-        None => true,
-    }
+    Registry::in_store(store)
+        .get(&l.id)
+        .is_none_or(|p| !up_to_date(&p, ed))
+}
+
+/// Whether `p`, the registry's copy of the system the open project publishes, matches the
+/// project's tokens, components, modes and settings.
+pub fn up_to_date(p: &Published, ed: &Editor) -> bool {
+    ed.published.as_ref().is_some_and(|l| p.link() == *l)
+        && p.modes == ed.tokens.modes()
+        && Contents::of(ed).published_in(p)
 }
 
 /// Remove the open project's design system from the registry. Files that use it keep their
@@ -534,14 +614,14 @@ mod tests {
     use crate::model::{Color, Node, NodeKind, TokenKind, TokenProp};
     use crate::session::Session;
 
-    fn temp_store() -> Store {
+    pub(super) fn temp_store() -> Store {
         let root =
             std::env::temp_dir().join(format!("sketch-rs-systems-{:016x}", fastrand::u64(..)));
         Store::open(root).unwrap()
     }
 
     /// A store with a source project that has `brand` (#ff0000) and `space` (8px).
-    fn source(store: &Store) -> (Session, Editor) {
+    pub(super) fn source(store: &Store) -> (Session, Editor) {
         let mut s = Session::new(store.clone());
         let mut ed = Editor::default();
         s.create(&mut ed, "Brand").unwrap();
@@ -553,7 +633,11 @@ mod tests {
         (s, ed)
     }
 
-    fn publish_open(s: &Session, ed: &mut Editor, req: &PublishRequest) -> PublishReport {
+    pub(super) fn publish_open(
+        s: &Session,
+        ed: &mut Editor,
+        req: &PublishRequest,
+    ) -> PublishReport {
         let p = s.project.as_ref().unwrap();
         publish(&s.store, ed, &p.manifest.id, &p.manifest.name, req).unwrap()
     }
@@ -920,6 +1004,7 @@ mod tests {
             text_styles: Vec::new(),
             effect_styles: Vec::new(),
             modes: Vec::new(),
+            components: Vec::new(),
         };
         let mut used = TokenSet::default();
         used.attach(p.link(), &p.tokens, &[], &[]).unwrap();
