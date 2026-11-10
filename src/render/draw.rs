@@ -6,9 +6,10 @@
 use crate::assets;
 use crate::geom::{Rect, V2, v2};
 use crate::ink;
+use crate::model::effects::blur_sigma;
 use crate::model::{
-    BlendMode, Cap, Color, Document, FillRule, ImageMode, Join, Node, NodeId, NodeKind, Paint,
-    Stop, StrokeAlign,
+    BlendMode, Cap, Color, Document, EffectKind, FillRule, ImageMode, Join, Node, NodeId, NodeKind,
+    Paint, Stop, StrokeAlign,
 };
 use crate::text::{self, FaceId};
 use crate::vector::{self, VPath};
@@ -482,4 +483,222 @@ pub fn draw_bounds(n: &Node, wr: Rect) -> Rect {
         pad = pad.max(4.0);
     }
     wr.inflate(pad)
+}
+
+pub fn blur_reach(sigma: f64) -> f64 {
+    sigma * 3.0
+}
+
+/// World bounds a node and its drop shadows paint into, before any layer blur. Children are
+/// not included.
+pub fn shadow_bounds(n: &Node, wr: Rect) -> Rect {
+    let own = draw_bounds(n, wr);
+    let mut b = own;
+    for e in &n.style.effects {
+        if e.visible && e.kind == EffectKind::DropShadow {
+            let reach = e.spread.max(0.0) + blur_reach(e.sigma());
+            b = b.union(&own.translate(v2(e.x, e.y)).inflate(reach));
+        }
+    }
+    b
+}
+
+pub fn layer_blur_reach(n: &Node) -> f64 {
+    blur_reach(blur_sigma(&n.style.effects, EffectKind::LayerBlur))
+}
+
+/// A rectangle with corner radii, in the order tl, tr, br, bl.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundRect {
+    pub rect: Rect,
+    pub radii: [f64; 4],
+}
+
+impl RoundRect {
+    /// Grow by `d` on every side, or shrink when `d` is negative, as CSS grows a shadow by its
+    /// spread. Round corners follow and square ones stay square. None once nothing is left.
+    pub fn inflate(&self, d: f64) -> Option<RoundRect> {
+        let rect = self.rect.inflate(d);
+        (rect.w > 0.0 && rect.h > 0.0).then(|| RoundRect {
+            rect,
+            radii: (self.radii).map(|r| if r > 0.0 { (r + d).max(0.0) } else { 0.0 }),
+        })
+    }
+
+    pub fn translate(&self, d: V2) -> RoundRect {
+        RoundRect {
+            rect: self.rect.translate(d),
+            radii: self.radii,
+        }
+    }
+}
+
+/// CSS box shadows use the box outline regardless of its fill. Circles qualify too.
+pub fn box_shape(n: &Node, wr: Rect) -> Option<RoundRect> {
+    let max = (wr.w.min(wr.h) * 0.5).max(0.0);
+    let radii = match n.kind {
+        NodeKind::Frame { .. } | NodeKind::Rect => n.style.corner_radii(),
+        NodeKind::Sticky { .. } => [n.style.corner_radius.max(2.0); 4],
+        NodeKind::Ellipse if (wr.w - wr.h).abs() < 1e-6 => [max; 4],
+        _ => return None,
+    };
+    Some(RoundRect {
+        rect: wr,
+        radii: radii.map(|r| r.clamp(0.0, max)),
+    })
+}
+
+pub fn stroke_reach(n: &Node) -> (f64, f64) {
+    if n.style.stroke.is_none() || n.style.stroke_width <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let w = n.style.stroke_width;
+    match n.style.stroke_align {
+        StrokeAlign::Inside => (0.0, w),
+        StrokeAlign::Center => (w * 0.5, w * 0.5),
+        StrokeAlign::Outside => (w, 0.0),
+    }
+}
+
+/// The node's filled shape as one opaque op, for effects that work inside it. None for
+/// layers that have no area of their own, such as text, lines and groups.
+pub fn mask_op(n: &Node, wr: Rect) -> Option<DrawOp> {
+    if !is_area(n) {
+        return None;
+    }
+    Some(DrawOp::Fill {
+        path: shape_path(n, wr)?,
+        paint: PaintSpec::Solid([1.0; 4]),
+        even_odd: matches!(
+            n.kind,
+            NodeKind::Path {
+                fill_rule: FillRule::EvenOdd,
+                ..
+            }
+        ),
+    })
+}
+
+/// The node's filled shape grown by `d` on every side, or shrunk when `d` is negative, as one
+/// opaque op. An ellipse stays an ellipse, as in CSS, and other outlines grow with round
+/// corners. None for layers without an area.
+pub fn spread_op(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<DrawOp> {
+    let DrawOp::Fill { path, even_odd, .. } = mask_op(n, wr)? else {
+        return None;
+    };
+    let grown = wr.inflate(d);
+    let path = match n.kind {
+        NodeKind::Ellipse if grown.w > 0.0 && grown.h > 0.0 => vector::ellipse(grown),
+        NodeKind::Ellipse => VPath::new(),
+        _ => vector::offset(&path, even_odd, d, tol),
+    };
+    Some(solid(path))
+}
+
+fn solid(path: VPath) -> DrawOp {
+    DrawOp::Fill {
+        path,
+        paint: PaintSpec::Solid([1.0; 4]),
+        even_odd: false,
+    }
+}
+
+/// Returns opaque shadow geometry and its paint opacity. Spread follows filled outlines,
+/// hollow strokes or text glyphs. Groups have no geometry of their own.
+pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f64)> {
+    let alpha = |c: Color| c.a as f64 / 255.0;
+    let fill_alpha = (n.style.fills.iter())
+        .map(|p| match p {
+            Paint::Solid { color } => alpha(*color),
+            Paint::Image { opacity, .. } => *opacity,
+            _ => 1.0,
+        })
+        .fold(0.0, f64::max);
+    if matches!(n.kind, NodeKind::Text { .. }) {
+        let l = text::layout_node(n)?;
+        let o = wr.min() + text::text_offset(n);
+        let mut glyphs = VPath::new();
+        for g in &l.glyphs {
+            glyphs.append(&text::glyph_path(
+                g.face,
+                g.gid,
+                o + v2(g.x, g.baseline),
+                g.size,
+            ));
+        }
+        let grown = vector::offset(&glyphs, false, d, tol);
+        return Some((vec![solid(grown)], fill_alpha));
+    }
+    let ink = matches!(n.kind, NodeKind::Stroke { .. });
+    // A fill you can't see casts nothing, so the stroke casts the shadow.
+    if is_area(n) && (ink || fill_alpha > 0.0) {
+        let op = spread_op(n, wr, stroke_reach(n).0 + d, tol)?;
+        return Some((vec![op], if ink { 1.0 } else { fill_alpha }));
+    }
+    let color = n.style.stroke?;
+    let mut ops = Vec::new();
+    if matches!(n.kind, NodeKind::Connector { .. }) {
+        connector_ops(n, wr, 1.0, &mut ops, false);
+    } else if let Some(path) = stroke_path(n, wr) {
+        let line = matches!(n.kind, NodeKind::Line { .. });
+        ops.push(DrawOp::Stroke {
+            path,
+            color: [1.0; 4],
+            width: n.style.stroke_width,
+            cap: if line { Cap::Round } else { n.style.cap },
+            join: n.style.join,
+            dash: n.style.dash.clone(),
+        });
+    }
+    // A filled head is stroked too, so it reaches half the stroke past its outline.
+    let head_reach = n.style.stroke_width.max(0.5) * 0.5 + d;
+    ops.retain_mut(|op| match op {
+        DrawOp::Stroke { color, width, .. } => {
+            *color = [1.0; 4];
+            *width += 2.0 * d;
+            *width > 0.0
+        }
+        DrawOp::Fill { path, paint, .. } => {
+            *path = vector::offset(path, false, head_reach, tol);
+            *paint = PaintSpec::Solid([1.0; 4]);
+            !path.is_empty()
+        }
+        DrawOp::Glyphs { .. } => true,
+    });
+    Some((ops, alpha(color)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Head;
+
+    #[test]
+    fn a_connector_shadow_shrinks_its_head_with_a_negative_spread() {
+        let mut n = Node::new(
+            NodeId(1),
+            NodeKind::Connector {
+                points: vec![v2(0.0, 0.0), v2(200.0, 0.0)],
+                start: None,
+                end: None,
+                route: Default::default(),
+                start_head: Head::None,
+                end_head: Head::Triangle,
+            },
+            Rect::new(0.0, 0.0, 200.0, 0.0),
+        );
+        n.style.stroke_width = 2.0;
+        // The extent of the head's fill across the line, None once it is gone.
+        let head = |d: f64| {
+            let (ops, _) = cast_ops(&n, n.rect, d, 0.1).unwrap();
+            let fills = ops.iter().filter_map(|op| match op {
+                DrawOp::Fill { path, .. } => path.bounds().map(|b| b.h),
+                _ => None,
+            });
+            fills.reduce(f64::max)
+        };
+        let (grown, plain, shrunk) = (head(2.0).unwrap(), head(0.0).unwrap(), head(-1.5).unwrap());
+        assert!(grown > plain && plain > shrunk, "{grown} {plain} {shrunk}");
+        assert_eq!(head(-100.0), None, "nothing is left to cast a shadow");
+    }
 }

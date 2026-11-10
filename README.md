@@ -349,6 +349,7 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
 | Strokes: width, align, dash, caps, joins | ✓ | ✓ | ✓ | ✅ |
 | Corner radius (per corner), polygons, stars | ✓ | ✓ | – | ✅ |
 | Opacity, blend modes | ✓ | ✓ | ✓ (opacity) | ✅ ⚠️ canvas renders 5 modes exactly, all 16 exact in SVG |
+| Effects: drop shadow, inner shadow, layer blur, background blur | ✓ | ✓ | – | ✅ Several per layer, reorder and hide, shadow color from a token. ⚠️ Canvas and PNG only |
 | Rich text (per-range bold/italic/size/colour) | ✓ | ✓ | – | ✅ Plus underline, strikethrough, line height, letter spacing |
 | Align / distribute | ✓ | ✓ | ✓ | ✅ ⌥A/D/W/S/H/V, ⌥⇧H/V |
 | Smart guides, spacing, measurement | ✓ | ✓ | – | ✅ Edge/center snap, equal spacing, ⌥-hover distances |
@@ -396,6 +397,19 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
   reuse the previous item list and GPU buffers, so panning uploads nothing. With 10k visible
   nodes a cached frame takes ~3 ms (release, `tests/perf.rs`); the first frame at a new zoom
   octave takes ~140 ms on a CPU. Not tuned for 100k+.
+* **Effects.** The canvas, PNG export and thumbnails draw shadows and blurs. SVG and PDF
+  leave them out. A rectangle, frame or circle casts its shadow from its box, as CSS
+  `box-shadow` does. Any other shape casts it from what it paints, so the shadow shows
+  through a translucent fill, and its spread grows what it paints. Groups ignore the spread.
+  The order of the list sets which shadow is on top, and a blur works the same wherever it
+  sits. Sketch doesn't draw a background blur on a layer inside one that has a layer blur.
+  In `get_jsx`, a layer that exports as inline SVG writes its drop shadows as
+  `filter: drop-shadow()`, which has no spread, and leaves out its inner shadows and
+  background blur. With several drop shadows on such a layer, a browser also draws each
+  later shadow's shadow of the earlier ones, because CSS chains filters.
+  Box shadows cost no extra render pass. Shape shadows and layer blurs share atlas pages at
+  three passes a page, and each background blur in view adds about four. `tests/perf.rs`
+  measures all of these.
 * **PDF**: text is outlined (not selectable); gradient stop transparency uses the first
   stop's alpha; tiled image fills are drawn as repeated images.
 * **Import**: Excalidraw rotation is baked into paths (text rotation is dropped), bound text
@@ -405,7 +419,8 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
   `open_file` to switch; the user's window switches too). No comments or AI image
   generation (Paper has them). Moving or duplicating layers between pages isn't
   supported. Remote `http(s)` images aren't fetched; pass a local path or a `data:` URI.
-  CSS margin, grid, shadows and transforms are reported back as ignored styles.
+  The tools report CSS margin, grid, transforms and filters other than `blur()` back as
+  ignored styles.
 * **Linux file dialogs** need an XDG desktop portal. Without one, Save/Open dialogs return
   nothing. The headless CLI is unaffected.
 

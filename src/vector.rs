@@ -405,6 +405,36 @@ pub fn ellipse(r: Rect) -> VPath {
     p
 }
 
+/// The area `path` fills, grown by `d` on every side with round corners, or shrunk when `d` is
+/// negative. Curves are flattened to `tol`.
+pub fn offset(path: &VPath, even_odd: bool, d: f64, tol: f64) -> VPath {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::single::SingleFloatOverlay;
+    use i_overlay::mesh::float::outline::offset::OutlineOffset;
+    use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
+    let contours: Vec<Vec<[f64; 2]>> = (path.flatten(tol).into_iter())
+        .filter(|p| p.pts.len() >= 3)
+        .map(|p| p.pts.iter().map(|q| [q.x, q.y]).collect())
+        .collect();
+    let rule = if even_odd {
+        FillRule::EvenOdd
+    } else {
+        FillRule::NonZero
+    };
+    // The offset needs outer contours and holes wound the way a union leaves them.
+    let none: Vec<Vec<[f64; 2]>> = Vec::new();
+    let shapes = contours.overlay(&none, OverlayRule::Subject, rule);
+    // A round join in steps of a quarter radian is smooth once blurred.
+    let style = OutlineStyle::new(d).line_join(LineJoin::Round(0.25));
+    let mut out = VPath::new();
+    for contour in shapes.outline(&style).into_iter().flatten() {
+        let pts: Vec<V2> = contour.iter().map(|p| v2(p[0], p[1])).collect();
+        out.append(&VPath::polyline(&pts, true));
+    }
+    out
+}
+
 /// Vertices of a regular polygon inscribed in `r`, first vertex at the top center.
 pub fn polygon_points(r: Rect, sides: u32) -> Vec<V2> {
     let n = sides.max(3) as usize;

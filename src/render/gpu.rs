@@ -1,12 +1,22 @@
-//! wgpu pipeline for canvas batches, plus offscreen rendering for screenshots and PNG export.
+//! wgpu pipelines for the canvas, plus offscreen rendering for screenshots and PNG export.
+//!
+//! A frame is mostly one multisampled pass over cached world geometry. Effects add to it.
+//! The shader draws box shadows in that same pass. A blur draws its content into a texture
+//! first, blurs it in two passes and paints the result back. A background blur ends the pass,
+//! blurs a copy of what is painted so far, and carries on in a new pass.
 
+use super::fx::{
+    FxParams, FxPipelines, Globals, MAX_BLUR_EDGE, MAX_TEXEL_SIGMA, MIN_SIGMA_PX, MODE_CONTENT,
+    MODE_INSIDE, MODE_TINT, Pool, ShadowInstance, Slots,
+};
 use super::mesh::Vertex;
-use super::scene::{CanvasFrame, Item};
-use super::tess;
+use super::scene::{BlurPaint, CanvasFrame, Op};
+use super::tess::{self, Piece};
 use crate::assets;
-use crate::geom::Rect;
+use crate::geom::{Rect, V2, v2};
 use crate::model::BlendMode;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -77,16 +87,6 @@ fn fs(i: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Globals {
-    size_px: [f32; 2],
-    scale: f32,
-    zoom: f32,
-    pan: [f32; 2],
-    offset: [f32; 2],
-}
-
 /// GPU pipelines exist for the blend modes fixed-function blending can express.
 fn blend_key(b: BlendMode) -> usize {
     match b {
@@ -131,33 +131,473 @@ fn blend_state(key: usize) -> wgpu::BlendState {
     wgpu::BlendState { color, alpha }
 }
 
-/// (index range, world clip, blend key, image) of one cached world draw.
-type WorldDraw = (std::ops::Range<u32>, Option<Rect>, usize, Option<String>);
+// ---------------------------------------------------------------------------------- world plan
 
 struct Draw {
-    range: std::ops::Range<u32>,
-    /// Screen-space scissor (logical px), already intersected with the viewport.
+    range: Range<u32>,
     clip: Option<Rect>,
     blend: usize,
     image: Option<String>,
-    world: bool,
 }
 
-/// Cached world-space geometry: reused while the item list is unchanged (panning, idle).
-struct WorldBuffers {
-    signature: Vec<(usize, Option<[u64; 4]>, usize)>,
+/// The ops of a frame, with geometry replaced by ranges of the uploaded buffers.
+enum Step {
+    Draw(Draw),
+    Shadows {
+        range: Range<u32>,
+        clip: Option<Rect>,
+    },
+    /// Index into `World::blurs`.
+    Blur(usize),
+    /// Index into `World::backdrops`.
+    Backdrop(usize),
+}
+
+struct BlurPlan {
+    steps: Vec<Step>,
+    bounds: Rect,
+    sigma: f64,
+    offset: V2,
+    spread: f64,
+    paint: PlanPaint,
+    clip: Option<Rect>,
+}
+
+enum PlanPaint {
+    Content,
+    Tint([f32; 4]),
+    Inside { color: [f32; 4], mask: Range<u32> },
+}
+
+struct BackdropPlan {
+    mask: Range<u32>,
+    bounds: Rect,
+    sigma: f64,
+    opacity: f64,
+    clip: Option<Rect>,
+}
+
+/// Reuse world geometry across idle frames and camera pans.
+struct World {
+    /// Held so a new list can't reuse this one's address and pass for it.
+    ops: Arc<Vec<Op>>,
+    signature: Vec<u64>,
     vb: Option<wgpu::Buffer>,
     ib: Option<wgpu::Buffer>,
-    /// (index range, world clip, blend key, image) per draw.
-    draws: Vec<WorldDraw>,
+    shadows: Option<wgpu::Buffer>,
+    steps: Vec<Step>,
+    blurs: Vec<BlurPlan>,
+    backdrops: Vec<BackdropPlan>,
+}
+
+fn rect_bits(r: &Rect) -> [u64; 4] {
+    [r.x, r.y, r.w, r.h].map(f64::to_bits)
+}
+
+fn signature(ops: &[Op], out: &mut Vec<u64>) {
+    let clip = |c: &Option<Rect>, out: &mut Vec<u64>| match c {
+        Some(c) => {
+            out.push(1);
+            out.extend(rect_bits(c));
+        }
+        None => out.push(0),
+    };
+    let color = |c: &[f32; 4], out: &mut Vec<u64>| out.extend(c.map(|v| v.to_bits() as u64));
+    let pieces = |p: &Arc<Vec<Piece>>| Arc::as_ptr(p) as usize as u64;
+    for op in ops {
+        match op {
+            Op::Item(it) => {
+                out.extend([0, pieces(&it.pieces), blend_key(it.blend) as u64]);
+                clip(&it.clip, out);
+            }
+            Op::Shadow(s) => {
+                out.extend([1, s.inset as u64, s.sigma.to_bits()]);
+                for b in [&s.caster, &s.layer] {
+                    out.extend(rect_bits(&b.rect));
+                    out.extend(b.radii.map(f64::to_bits));
+                }
+                color(&s.color, out);
+                clip(&s.clip, out);
+            }
+            Op::Blur(b) => {
+                out.extend([2, b.sigma.to_bits(), b.offset.x.to_bits()]);
+                out.extend([b.offset.y.to_bits(), b.spread.to_bits()]);
+                out.extend(rect_bits(&b.bounds));
+                match &b.paint {
+                    BlurPaint::Content => out.push(0),
+                    BlurPaint::Tint(c) => {
+                        out.push(1);
+                        color(c, out);
+                    }
+                    BlurPaint::Inside { color: c, mask } => {
+                        out.extend([2, pieces(mask)]);
+                        color(c, out);
+                    }
+                }
+                clip(&b.clip, out);
+                out.push(b.content.len() as u64);
+                signature(&b.content, out);
+            }
+            Op::Backdrop(b) => {
+                out.extend([3, pieces(&b.mask), b.sigma.to_bits()]);
+                out.push(b.opacity.to_bits());
+                out.extend(rect_bits(&b.bounds));
+                clip(&b.clip, out);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Builder {
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+    shadows: Vec<ShadowInstance>,
+    blurs: Vec<BlurPlan>,
+    backdrops: Vec<BackdropPlan>,
+}
+
+impl Builder {
+    fn mesh(&mut self, piece: &Piece) -> Range<u32> {
+        let base = self.vertices.len() as u32;
+        let start = self.indices.len() as u32;
+        self.vertices.extend_from_slice(&piece.mesh.vertices);
+        self.indices
+            .extend(piece.mesh.indices.iter().map(|i| i + base));
+        start..self.indices.len() as u32
+    }
+
+    fn mask(&mut self, pieces: &[Piece]) -> Range<u32> {
+        let start = self.indices.len() as u32;
+        for p in pieces {
+            self.mesh(p);
+        }
+        start..self.indices.len() as u32
+    }
+
+    fn steps(&mut self, ops: &[Op]) -> Vec<Step> {
+        let mut out: Vec<Step> = Vec::new();
+        for op in ops {
+            match op {
+                Op::Item(it) => {
+                    let blend = blend_key(it.blend);
+                    for p in it.pieces.iter() {
+                        let range = self.mesh(p);
+                        match out.last_mut() {
+                            Some(Step::Draw(d))
+                                if d.clip == it.clip
+                                    && d.blend == blend
+                                    && d.image == p.image
+                                    && d.range.end == range.start =>
+                            {
+                                d.range.end = range.end
+                            }
+                            _ => out.push(Step::Draw(Draw {
+                                range,
+                                clip: it.clip,
+                                blend,
+                                image: p.image.clone(),
+                            })),
+                        }
+                    }
+                }
+                Op::Shadow(s) => {
+                    let at = self.shadows.len() as u32;
+                    let rect = |r: &Rect| {
+                        let c = r.center();
+                        [c.x, c.y, r.w * 0.5, r.h * 0.5].map(|v| v as f32)
+                    };
+                    self.shadows.push(ShadowInstance {
+                        caster: rect(&s.caster.rect),
+                        caster_radii: s.caster.radii.map(|r| r as f32),
+                        layer: rect(&s.layer.rect),
+                        layer_radii: s.layer.radii.map(|r| r as f32),
+                        color: s.color,
+                        params: [s.sigma as f32, s.inset as u8 as f32, 0.0, 0.0],
+                    });
+                    match out.last_mut() {
+                        Some(Step::Shadows { range, clip })
+                            if *clip == s.clip && range.end == at =>
+                        {
+                            range.end = at + 1
+                        }
+                        _ => out.push(Step::Shadows {
+                            range: at..at + 1,
+                            clip: s.clip,
+                        }),
+                    }
+                }
+                Op::Blur(b) => {
+                    let steps = self.steps(&b.content);
+                    let paint = match &b.paint {
+                        BlurPaint::Content => PlanPaint::Content,
+                        BlurPaint::Tint(c) => PlanPaint::Tint(*c),
+                        BlurPaint::Inside { color, mask } => PlanPaint::Inside {
+                            color: *color,
+                            mask: self.mask(mask),
+                        },
+                    };
+                    self.blurs.push(BlurPlan {
+                        steps,
+                        bounds: b.bounds,
+                        sigma: b.sigma,
+                        offset: b.offset,
+                        spread: b.spread,
+                        paint,
+                        clip: b.clip,
+                    });
+                    out.push(Step::Blur(self.blurs.len() - 1));
+                }
+                Op::Backdrop(b) => {
+                    let mask = self.mask(&b.mask);
+                    self.backdrops.push(BackdropPlan {
+                        mask,
+                        bounds: b.bounds,
+                        sigma: b.sigma,
+                        opacity: b.opacity,
+                        clip: b.clip,
+                    });
+                    out.push(Step::Backdrop(self.backdrops.len() - 1));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Maps world units to target pixels with `px = world * k + t`.
+#[derive(Clone, Copy)]
+struct Map {
+    k: f64,
+    t: V2,
+}
+
+impl Map {
+    fn rect(&self, r: &Rect) -> Rect {
+        Rect::new(
+            r.x * self.k + self.t.x,
+            r.y * self.k + self.t.y,
+            r.w * self.k,
+            r.h * self.k,
+        )
+    }
+
+    /// Pan is subtracted before scaling, as on the canvas, so far-off content keeps its
+    /// precision in `f32`.
+    fn globals(&self, size: [u32; 2]) -> Globals {
+        Globals {
+            size_px: size.map(|s| s as f32),
+            scale: 1.0,
+            zoom: self.k as f32,
+            pan: [(-self.t.x / self.k) as f32, (-self.t.y / self.k) as f32],
+            offset: [0.0; 2],
+        }
+    }
+}
+
+struct Target {
+    size: [u32; 2],
+    map: Map,
+    /// The px that end up on screen. Nothing is drawn outside.
+    visible: Rect,
+    globals: u32,
+    /// The canvas itself. Only it can blur what is behind a layer.
+    main: bool,
+}
+
+type Scissor = [u32; 4];
+
+impl Target {
+    /// `r`, in target px, cut to the visible part and to `clip`, which is in world units.
+    fn shown(&self, r: Rect, clip: &Option<Rect>) -> Option<Rect> {
+        let r = r.intersection(&self.visible)?;
+        match clip {
+            Some(c) => r.intersection(&self.map.rect(c)),
+            None => Some(r),
+        }
+    }
+
+    fn scissor(&self, r: &Rect) -> Option<Scissor> {
+        let [w, h] = self.size.map(|s| s as f64);
+        let x0 = r.x.floor().clamp(0.0, w);
+        let y0 = r.y.floor().clamp(0.0, h);
+        let x1 = r.right().ceil().clamp(0.0, w);
+        let y1 = r.bottom().ceil().clamp(0.0, h);
+        (x1 > x0 && y1 > y0).then_some([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
+    }
+
+    fn clip(&self, clip: &Option<Rect>) -> Option<Scissor> {
+        self.scissor(&self.shown(self.visible, clip)?)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Tex {
+    Pool(usize),
+    /// The copy of the canvas a background blur reads.
+    Canvas,
+}
+
+/// One draw of a pass, resolved for its target.
+enum Cmd {
+    Draw {
+        range: Range<u32>,
+        scissor: Scissor,
+        blend: usize,
+        image: Option<String>,
+        globals: u32,
+        /// From the per-frame screen buffers that hold the chrome, not the world buffers.
+        screen: bool,
+    },
+    Shadows {
+        range: Range<u32>,
+        scissor: Scissor,
+        globals: u32,
+    },
+    Paint {
+        tex: usize,
+        fx: u32,
+        scissor: Scissor,
+        mask: Option<Range<u32>>,
+        /// Mix with what is there by this much, in place of blending over it.
+        mix: Option<f64>,
+        globals: u32,
+    },
+    /// Blur what the pass has painted so far. Ends the pass.
+    Backdrop {
+        plan: usize,
+        /// Visible bounds in target pixels.
+        shown: Rect,
+    },
+}
+
+enum BlurMode {
+    Skip,
+    /// Too slight to see, so its content is drawn as it is.
+    Inline,
+    Offscreen(Job),
+}
+
+struct Job {
+    plan: usize,
+    /// The target px that show it.
+    shown: Rect,
+    /// Target px of its texture's top-left.
+    origin: V2,
+    /// Target px per texel.
+    down: f64,
+    size: [u32; 2],
+}
+
+/// An atlas page, one texture that many blurs share so they also share their passes.
+struct Page {
+    size: [u32; 2],
+    tex: usize,
+    jobs: Vec<(usize, [u32; 2])>,
+}
+
+const PAGE_EDGE: u32 = 2048;
+
+/// Most times a background blur halves the canvas. Sixteen take any canvas down to a pixel.
+const MAX_HALVINGS: usize = 16;
+
+#[derive(Default)]
+struct Packed {
+    size: [u32; 2],
+    rects: Vec<(usize, [u32; 2])>,
+}
+
+fn pack(sizes: &[[u32; 2]]) -> Vec<Packed> {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|i| std::cmp::Reverse(sizes[*i][1]));
+    let area: f64 = sizes.iter().map(|s| s[0] as f64 * s[1] as f64).sum();
+    let widest = sizes.iter().map(|s| s[0]).max().unwrap_or(1);
+    // Roughly square, so a few small blurs don't ask for a whole page.
+    let width = ((area * 1.2).sqrt().ceil() as u32).clamp(widest, PAGE_EDGE.max(widest));
+    let mut pages: Vec<Packed> = Vec::new();
+    let (mut x, mut y, mut shelf) = (0, 0, 0);
+    for i in order {
+        let [w, h] = sizes[i];
+        if x + w > width {
+            (x, y, shelf) = (0, y + shelf, 0);
+        }
+        if pages.is_empty() || y + h > PAGE_EDGE.max(h) {
+            pages.push(Packed::default());
+            (x, y, shelf) = (0, 0, 0);
+        }
+        let page = pages.last_mut().unwrap();
+        page.rects.push((i, [x, y]));
+        page.size = [page.size[0].max(x + w), page.size[1].max(y + h)];
+        x += w;
+        shelf = shelf.max(h);
+    }
+    pages
+}
+
+/// Source region in texture pixels.
+struct Source {
+    tex: Tex,
+    at: [f64; 2],
+    size: [f64; 2],
+    alloc: [u32; 2],
+}
+
+impl Source {
+    fn pool(tex: usize, at: [u32; 2], size: [u32; 2], alloc: [u32; 2]) -> Source {
+        Source {
+            tex: Tex::Pool(tex),
+            at: at.map(|v| v as f64),
+            size: size.map(|v| v as f64),
+            alloc,
+        }
+    }
+
+    fn uv(&self) -> [f32; 4] {
+        let [w, h] = self.alloc.map(|a| a as f64);
+        [
+            self.at[0] / w,
+            self.at[1] / h,
+            self.size[0] / w,
+            self.size[1] / h,
+        ]
+        .map(|v| v as f32)
+    }
+
+    /// The uv range of the texels inside the region, so taps past its edge repeat the edge
+    /// instead of reading a neighbor or what another pass left there.
+    fn valid_uv(&self) -> [f32; 4] {
+        let [w, h] = self.alloc.map(|a| a as f64);
+        let lo = [(self.at[0] + 0.5) / w, (self.at[1] + 0.5) / h];
+        let hi = [
+            (self.at[0] + self.size[0] - 0.5) / w,
+            (self.at[1] + self.size[1] - 0.5) / h,
+        ];
+        [lo[0], lo[1], hi[0].max(lo[0]), hi[1].max(lo[1])].map(|v| v as f32)
+    }
+}
+
+/// `dir` selects the Gaussian axis, 0 for x and 1 for y. None makes a resampling copy.
+struct BlurPart {
+    src: Source,
+    at: [u32; 2],
+    size: [u32; 2],
+    /// In source texels.
+    sigma: f64,
+    dir: Option<usize>,
+}
+
+struct Attachments<'a> {
+    view: &'a wgpu::TextureView,
+    resolve: &'a wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    store: wgpu::StoreOp,
 }
 
 pub struct CanvasRenderer {
     pipelines: Vec<wgpu::RenderPipeline>,
-    world_globals: wgpu::Buffer,
-    screen_globals: wgpu::Buffer,
-    world_bg: wgpu::BindGroup,
-    screen_bg: wgpu::BindGroup,
+    fx: FxPipelines,
+    slots: Slots,
+    pool: Pool,
     ramp_tex: wgpu::Texture,
     ramp_bg: wgpu::BindGroup,
     ramp_version: u64,
@@ -165,11 +605,17 @@ pub struct CanvasRenderer {
     img_sampler: wgpu::Sampler,
     blank_img: wgpu::BindGroup,
     images: HashMap<String, wgpu::BindGroup>,
-    world: Option<WorldBuffers>,
+    world: Option<World>,
     msaa: Option<(wgpu::TextureView, [u32; 2])>,
+    /// Copy of the canvas for background blurs: view, sampling bind group, size.
+    canvas_copy: Option<(wgpu::TextureView, wgpu::BindGroup, [u32; 2])>,
+    /// Per-frame screen-space vertex and index buffers.
+    screen: Option<(wgpu::Buffer, wgpu::Buffer)>,
     format: wgpu::TextureFormat,
     /// World geometry uploads (for tests: panning must not re-upload).
     pub uploads: u64,
+    /// Render passes recorded by the last `render`, for tests and profiling.
+    pub last_passes: u32,
 }
 
 fn texture_2d(device: &wgpu::Device, label: &str, w: u32, h: u32, mips: u32) -> wgpu::Texture {
@@ -211,25 +657,19 @@ fn write_texture(queue: &wgpu::Queue, tex: &wgpu::Texture, mip: u32, img: &image
     );
 }
 
+fn premultiplied(c: [f32; 4]) -> [f32; 4] {
+    [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
+}
+
 impl CanvasRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> CanvasRenderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("canvas"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("canvas globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let slots = Slots::new(device);
+        let pool = Pool::new(device, format);
+        let fx = FxPipelines::new(device, format, &slots, &pool);
         let tex_layout = |label| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -255,28 +695,6 @@ impl CanvasRenderer {
         };
         let ramp_layout = tex_layout("ramp");
         let img_layout = tex_layout("image");
-        let mk_globals = |label| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: std::mem::size_of::<Globals>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-        let world_globals = mk_globals("world globals");
-        let screen_globals = mk_globals("screen globals");
-        let mk_bg = |buf: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("globals"),
-                layout: &globals_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf.as_entire_binding(),
-                }],
-            })
-        };
-        let world_bg = mk_bg(&world_globals);
-        let screen_bg = mk_bg(&screen_globals);
         let ramp_tex = texture_2d(device, "gradient ramps", tess::ATLAS_W, tess::ATLAS_H, 1);
         let ramp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("ramp"),
@@ -328,7 +746,11 @@ impl CanvasRenderer {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("canvas"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&ramp_layout), Some(&img_layout)],
+            bind_group_layouts: &[
+                Some(&slots.globals_layout),
+                Some(&ramp_layout),
+                Some(&img_layout),
+            ],
             immediate_size: 0,
         });
         let pipelines = (0..5)
@@ -372,10 +794,9 @@ impl CanvasRenderer {
             .collect();
         CanvasRenderer {
             pipelines,
-            world_globals,
-            screen_globals,
-            world_bg,
-            screen_bg,
+            fx,
+            slots,
+            pool,
             ramp_tex,
             ramp_bg,
             ramp_version: 0,
@@ -385,12 +806,15 @@ impl CanvasRenderer {
             images: HashMap::new(),
             world: None,
             msaa: None,
+            canvas_copy: None,
+            screen: None,
             format,
             uploads: 0,
+            last_passes: 0,
         }
     }
 
-    fn msaa_view(&mut self, device: &wgpu::Device, size: [u32; 2]) -> &wgpu::TextureView {
+    fn msaa_view(&mut self, device: &wgpu::Device, size: [u32; 2]) -> wgpu::TextureView {
         if self.msaa.as_ref().is_none_or(|(_, s)| *s != size) {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("canvas msaa"),
@@ -408,7 +832,15 @@ impl CanvasRenderer {
             });
             self.msaa = Some((tex.create_view(&Default::default()), size));
         }
-        &self.msaa.as_ref().unwrap().0
+        self.msaa.as_ref().unwrap().0.clone()
+    }
+
+    fn canvas_copy_view(&mut self, device: &wgpu::Device, size: [u32; 2]) -> wgpu::TextureView {
+        if self.canvas_copy.as_ref().is_none_or(|(_, _, s)| *s != size) {
+            let (view, bind) = self.pool.texture(device, size, 1);
+            self.canvas_copy = Some((view, bind.expect("single-sampled"), size));
+        }
+        self.canvas_copy.as_ref().unwrap().0.clone()
     }
 
     fn sync_ramps(&mut self, queue: &wgpu::Queue) {
@@ -465,76 +897,64 @@ impl CanvasRenderer {
         self.images.insert(id.to_string(), bg);
     }
 
-    /// Rebuild the world vertex/index buffers when the item list changed.
-    fn sync_world(&mut self, device: &wgpu::Device, items: &[Item]) {
-        let sig: Vec<(usize, Option<[u64; 4]>, usize)> = items
-            .iter()
-            .map(|it| {
-                (
-                    Arc::as_ptr(&it.pieces) as usize,
-                    it.clip
-                        .map(|c| [c.x.to_bits(), c.y.to_bits(), c.w.to_bits(), c.h.to_bits()]),
-                    blend_key(it.blend),
-                )
-            })
-            .collect();
-        if self.world.as_ref().is_some_and(|w| w.signature == sig) {
+    fn sync_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ops: &[Op]) {
+        for op in ops {
+            match op {
+                Op::Item(it) => {
+                    for p in it.pieces.iter() {
+                        if let Some(id) = &p.image {
+                            self.image_bg(device, queue, id);
+                        }
+                    }
+                }
+                Op::Blur(b) => self.sync_images(device, queue, &b.content),
+                Op::Shadow(_) | Op::Backdrop(_) => {}
+            }
+        }
+    }
+
+    fn sync_world(&mut self, device: &wgpu::Device, ops: &Arc<Vec<Op>>) {
+        if (self.world.as_ref()).is_some_and(|w| Arc::ptr_eq(&w.ops, ops)) {
+            return;
+        }
+        let mut sig = Vec::new();
+        signature(ops, &mut sig);
+        if let Some(w) = &mut self.world
+            && w.signature == sig
+        {
+            w.ops = ops.clone();
             return;
         }
         self.uploads += 1;
-        let mut vertices: Vec<Vertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut draws: Vec<WorldDraw> = Vec::new();
-        for it in items {
-            let bk = blend_key(it.blend);
-            for p in it.pieces.iter() {
-                let base = vertices.len() as u32;
-                let start = indices.len() as u32;
-                vertices.extend_from_slice(&p.mesh.vertices);
-                indices.extend(p.mesh.indices.iter().map(|i| i + base));
-                let end = indices.len() as u32;
-                match draws.last_mut() {
-                    Some(d)
-                        if d.1 == it.clip && d.2 == bk && d.3 == p.image && d.0.end == start =>
-                    {
-                        d.0.end = end
-                    }
-                    _ => draws.push((start..end, it.clip, bk, p.image.clone())),
-                }
-            }
-        }
+        let mut b = Builder::default();
+        let steps = b.steps(ops);
         let mk = |data: &[u8], usage, label| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: data,
-                usage,
+            (!data.is_empty()).then(|| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: data,
+                    usage,
+                })
             })
         };
-        let (vb, ib) = if indices.is_empty() {
-            (None, None)
-        } else {
-            (
-                Some(mk(
-                    bytemuck::cast_slice(&vertices),
-                    wgpu::BufferUsages::VERTEX,
-                    "world vertices",
-                )),
-                Some(mk(
-                    bytemuck::cast_slice(&indices),
-                    wgpu::BufferUsages::INDEX,
-                    "world indices",
-                )),
-            )
-        };
-        self.world = Some(WorldBuffers {
+        let vertex = wgpu::BufferUsages::VERTEX;
+        self.world = Some(World {
+            ops: ops.clone(),
             signature: sig,
-            vb,
-            ib,
-            draws,
+            vb: mk(bytemuck::cast_slice(&b.vertices), vertex, "world vertices"),
+            ib: mk(
+                bytemuck::cast_slice(&b.indices),
+                wgpu::BufferUsages::INDEX,
+                "world indices",
+            ),
+            shadows: mk(bytemuck::cast_slice(&b.shadows), vertex, "box shadows"),
+            steps,
+            blurs: b.blurs,
+            backdrops: b.backdrops,
         });
     }
 
-    /// Record a pass that clears `target` and draws a canvas frame.
+    /// Record the passes that clear `target` and draw a canvas frame.
     /// Logical px × `scale` = physical px.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
@@ -549,52 +969,73 @@ impl CanvasRenderer {
         clear: [f64; 4],
     ) {
         let cam = frame.camera;
-        let world = Globals {
+        self.last_passes = 0;
+        self.sync_ramps(queue);
+        self.sync_images(device, queue, &frame.ops);
+        self.sync_world(device, &frame.ops);
+        let world = self.world.take().expect("synced above");
+        // A blur takes its target, two blur passes and the paint. A background blur takes a
+        // slot per halving, two blur passes and the paint.
+        let slots = 4 + 4 * world.blurs.len() + (MAX_HALVINGS + 3) * world.backdrops.len();
+        self.slots.begin(device, slots as u32);
+        let world_globals = Globals {
             size_px: [size[0] as f32, size[1] as f32],
             scale,
             zoom: cam.zoom as f32,
             pan: [cam.pan.x as f32, cam.pan.y as f32],
             offset: [frame.offset.x as f32, frame.offset.y as f32],
         };
-        let screen = Globals {
+        let screen_globals = Globals {
             zoom: 1.0,
             pan: [0.0; 2],
             offset: [0.0; 2],
-            ..world
+            ..world_globals
         };
-        queue.write_buffer(&self.world_globals, 0, bytemuck::bytes_of(&world));
-        queue.write_buffer(&self.screen_globals, 0, bytemuck::bytes_of(&screen));
-        self.sync_ramps(queue);
-        for it in &frame.items {
-            for p in it.pieces.iter() {
-                if let Some(id) = &p.image {
-                    self.image_bg(device, queue, id);
-                }
-            }
-        }
-        self.sync_world(device, &frame.items);
+        let scale = scale as f64;
+        let k = cam.zoom * scale;
+        let vp = frame.viewport;
+        let main = Target {
+            size,
+            map: Map {
+                k,
+                t: (frame.offset - cam.pan * cam.zoom) * scale,
+            },
+            visible: Rect::new(vp.x * scale, vp.y * scale, vp.w * scale, vp.h * scale),
+            globals: self.slots.push(&world_globals),
+            main: true,
+        };
+        let screen_slot = self.slots.push(&screen_globals);
 
         // Screen-space batches (underlay + overlay) are small: rebuilt every frame.
         let mut sverts: Vec<Vertex> = Vec::new();
         let mut sidx: Vec<u32> = Vec::new();
-        let mut under = Vec::new();
-        let mut over = Vec::new();
-        for (list, out) in [(&frame.under, &mut under), (&frame.over, &mut over)] {
-            for b in list.iter() {
+        let full = Rect::new(0.0, 0.0, size[0] as f64, size[1] as f64);
+        let mut chrome = |list: &[super::mesh::Batch], out: &mut Vec<Cmd>| {
+            for b in list {
                 let base = sverts.len() as u32;
                 let start = sidx.len() as u32;
                 sverts.extend_from_slice(&b.mesh.vertices);
                 sidx.extend(b.mesh.indices.iter().map(|i| i + base));
-                out.push(Draw {
-                    range: start..sidx.len() as u32,
-                    clip: b.clip,
-                    blend: 0,
-                    image: None,
-                    world: false,
+                let px = b.clip.map_or(full, |c| {
+                    Rect::new(c.x * scale, c.y * scale, c.w * scale, c.h * scale)
                 });
+                if let Some(scissor) = main.scissor(&px) {
+                    out.push(Cmd::Draw {
+                        range: start..sidx.len() as u32,
+                        scissor,
+                        blend: 0,
+                        image: None,
+                        globals: screen_slot,
+                        screen: true,
+                    });
+                }
             }
-        }
-        let sbuf = (!sidx.is_empty()).then(|| {
+        };
+        let mut cmds = Vec::new();
+        chrome(&frame.under, &mut cmds);
+        self.resolve(device, encoder, &world, &world.steps, &main, &mut cmds);
+        chrome(&frame.over, &mut cmds);
+        self.screen = (!sidx.is_empty()).then(|| {
             (
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("screen vertices"),
@@ -608,53 +1049,289 @@ impl CanvasRenderer {
                 }),
             )
         });
-        let vp = frame.viewport;
-        let to_screen = |r: &Rect| {
-            Rect::new(
-                (r.x - cam.pan.x) * cam.zoom + frame.offset.x,
-                (r.y - cam.pan.y) * cam.zoom + frame.offset.y,
-                r.w * cam.zoom,
-                r.h * cam.zoom,
-            )
-        };
-        let world_draws: Vec<Draw> = self
-            .world
-            .as_ref()
-            .map(|w| {
-                w.draws
-                    .iter()
-                    .filter_map(|(range, clip, blend, image)| {
-                        let sc = match clip {
-                            Some(c) => vp.intersection(&to_screen(c))?,
-                            None => vp,
-                        };
-                        Some(Draw {
-                            range: range.clone(),
-                            clip: Some(sc),
-                            blend: *blend,
-                            image: image.clone(),
-                            world: true,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
-        let msaa = self.msaa_view(device, size).clone();
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("canvas"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+        let msaa = self.msaa_view(device, size);
+        let clear = wgpu::Color {
+            r: clear[0],
+            g: clear[1],
+            b: clear[2],
+            a: clear[3],
+        };
+        let mut start = 0;
+        let mut carried: Option<Cmd> = None;
+        loop {
+            let end = cmds[start..]
+                .iter()
+                .position(|c| matches!(c, Cmd::Backdrop { .. }))
+                .map_or(cmds.len(), |i| start + i);
+            let more = end < cmds.len();
+            let copy = more.then(|| self.canvas_copy_view(device, size));
+            let at = Attachments {
                 view: &msaa,
+                resolve: copy.as_ref().unwrap_or(target),
+                load: if start == 0 {
+                    wgpu::LoadOp::Clear(clear)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: if more {
+                    wgpu::StoreOp::Store
+                } else {
+                    wgpu::StoreOp::Discard
+                },
+            };
+            let list = carried.iter().chain(&cmds[start..end]);
+            self.pass(encoder, &world, list, size, &at);
+            // The pass that paints the last background blur is recorded, so its texture is
+            // free for the next one.
+            if let Some(Cmd::Paint { tex, .. }) = carried {
+                self.pool.release(tex);
+            }
+            if !more {
+                break;
+            }
+            let Cmd::Backdrop { plan, shown } = &cmds[end] else {
+                unreachable!()
+            };
+            carried = Some(self.backdrop(device, encoder, &world.backdrops[*plan], shown, &main));
+            start = end + 1;
+        }
+        self.slots.flush(queue);
+        self.pool.end_frame();
+        self.world = Some(world);
+    }
+
+    /// Turn steps into the draws of a pass on `tgt`. Blurs record their own passes here, so
+    /// their textures are ready when the pass runs.
+    fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        enc: &mut wgpu::CommandEncoder,
+        world: &World,
+        steps: &[Step],
+        tgt: &Target,
+        out: &mut Vec<Cmd>,
+    ) {
+        let mut jobs = Vec::new();
+        collect(world, steps, tgt, &mut jobs);
+        let painted = self.bake(device, enc, world, jobs, tgt);
+        emit(world, steps, tgt, &painted, out);
+    }
+
+    /// Share three passes per atlas page across all its blurs. Return composite draws by plan.
+    fn bake(
+        &mut self,
+        device: &wgpu::Device,
+        enc: &mut wgpu::CommandEncoder,
+        world: &World,
+        jobs: Vec<Job>,
+        tgt: &Target,
+    ) -> HashMap<usize, Cmd> {
+        let mut painted = HashMap::new();
+        if jobs.is_empty() {
+            return painted;
+        }
+        let sizes: Vec<[u32; 2]> = jobs.iter().map(|j| j.size).collect();
+        let pages: Vec<Page> = pack(&sizes)
+            .into_iter()
+            .map(|p| Page {
+                size: p.size,
+                tex: self.pool.acquire(device, p.size, 1),
+                jobs: p.rects,
+            })
+            .collect();
+        for page in &pages {
+            let mut cmds = Vec::new();
+            for (j, at) in &page.jobs {
+                let job = &jobs[*j];
+                let plan = &world.blurs[job.plan];
+                let at_px = v2(at[0] as f64, at[1] as f64);
+                let map = Map {
+                    k: tgt.map.k / job.down,
+                    t: (tgt.map.t + plan.offset * tgt.map.k - job.origin) / job.down + at_px,
+                };
+                let inner = Target {
+                    size: page.size,
+                    map,
+                    visible: Rect::new(at_px.x, at_px.y, job.size[0] as f64, job.size[1] as f64),
+                    globals: self.slots.push(&map.globals(page.size)),
+                    main: false,
+                };
+                self.resolve(device, enc, world, &plan.steps, &inner, &mut cmds);
+            }
+            let msaa = self.pool.acquire(device, page.size, MSAA);
+            let at = Attachments {
+                view: &self.pool.get(msaa).view.clone(),
+                resolve: &self.pool.get(page.tex).view.clone(),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Discard,
+            };
+            self.pass(enc, world, cmds.iter(), page.size, &at);
+            self.pool.release(msaa);
+            // The pass is recorded, so the pages it sampled are free for later passes.
+            for c in &cmds {
+                if let Cmd::Paint { tex, .. } = c {
+                    self.pool.release(*tex);
+                }
+            }
+
+            let alloc = self.pool.get(page.tex).alloc;
+            let sigma = |j: &Job| world.blurs[j.plan].sigma * tgt.map.k / j.down;
+            if page.jobs.iter().any(|(j, _)| sigma(&jobs[*j]) * 3.0 >= 0.5) {
+                let scratch = self.pool.acquire(device, page.size, 1);
+                for (from, to, dir) in [(page.tex, scratch, 0), (scratch, page.tex, 1)] {
+                    let parts: Vec<BlurPart> = (page.jobs.iter())
+                        .map(|(j, at)| BlurPart {
+                            src: Source::pool(from, *at, jobs[*j].size, alloc),
+                            at: *at,
+                            size: jobs[*j].size,
+                            sigma: sigma(&jobs[*j]),
+                            dir: Some(dir),
+                        })
+                        .collect();
+                    self.blur_pass(enc, to, &parts);
+                }
+                self.pool.release(scratch);
+            }
+
+            for (j, at) in &page.jobs {
+                let job = &jobs[*j];
+                let plan = &world.blurs[job.plan];
+                let (mode, color, mask) = match &plan.paint {
+                    PlanPaint::Content => (MODE_CONTENT, [0.0; 4], None),
+                    PlanPaint::Tint(c) => (MODE_TINT, premultiplied(*c), None),
+                    PlanPaint::Inside { color, mask } => {
+                        (MODE_INSIDE, premultiplied(*color), Some(mask.clone()))
+                    }
+                };
+                let [aw, ah] = alloc.map(|a| a as f64);
+                let src = Source::pool(page.tex, *at, job.size, alloc);
+                let x = job.origin.x - at[0] as f64 * job.down;
+                let y = job.origin.y - at[1] as f64 * job.down;
+                let [w, h] = job.size.map(|s| s as f64 * job.down);
+                let fx = self.slots.push(&FxParams {
+                    rect: [x, y, 1.0 / (job.down * aw), 1.0 / (job.down * ah)].map(|v| v as f32),
+                    clamp: src.valid_uv(),
+                    color,
+                    quad: [job.origin.x, job.origin.y, w, h].map(|v| v as f32),
+                    params: [mode, tgt.size[0] as f32, tgt.size[1] as f32, 0.0],
+                });
+                if let Some(scissor) = tgt.scissor(&job.shown) {
+                    let paint = Cmd::Paint {
+                        tex: page.tex,
+                        fx,
+                        scissor,
+                        mask,
+                        mix: None,
+                        globals: tgt.globals,
+                    };
+                    painted.insert(job.plan, paint);
+                }
+            }
+        }
+        painted
+    }
+
+    fn backdrop(
+        &mut self,
+        device: &wgpu::Device,
+        enc: &mut wgpu::CommandEncoder,
+        plan: &BackdropPlan,
+        shown: &Rect,
+        tgt: &Target,
+    ) -> Cmd {
+        let sigma = plan.sigma * tgt.map.k;
+        let [tw, th] = tgt.size.map(|s| s as f64);
+        // The blur reads past the layer, but not past the canvas.
+        let x0 = (shown.x - 3.0 * sigma).floor().clamp(0.0, tw - 1.0);
+        let y0 = (shown.y - 3.0 * sigma).floor().clamp(0.0, th - 1.0);
+        let w = ((shown.right() + 3.0 * sigma).ceil().clamp(1.0, tw) - x0).max(1.0);
+        let h = ((shown.bottom() + 3.0 * sigma).ceil().clamp(1.0, th) - y0).max(1.0);
+        let mut left = (sigma / MAX_TEXEL_SIGMA).max(1.0);
+        let first = left.min(2.0);
+        let largest = [(w / first).ceil() as u32, (h / first).ceil() as u32];
+        let mut to = self.pool.acquire(device, largest, 1);
+        let mut spare = self.pool.acquire(device, largest, 1);
+        let alloc = self.pool.get(to).alloc;
+        let mut src = Source {
+            tex: Tex::Canvas,
+            at: [x0, y0],
+            size: [w, h],
+            alloc: tgt.size,
+        };
+        let mut size = [w as u32, h as u32];
+        let whole = |src, size, sigma, dir| BlurPart {
+            src,
+            at: [0; 2],
+            size,
+            sigma,
+            dir,
+        };
+        // Halve until the blur is narrow enough, so every texel of the canvas still counts.
+        for _ in 0..MAX_HALVINGS {
+            if left <= 1.0 + 1e-6 || size == [1, 1] {
+                break;
+            }
+            let f = left.min(2.0);
+            size = size.map(|s| ((s as f64 / f).ceil() as u32).max(1));
+            self.blur_pass(enc, to, &[whole(src, size, 0.0, None)]);
+            src = Source::pool(to, [0; 2], size, alloc);
+            std::mem::swap(&mut to, &mut spare);
+            left /= f;
+        }
+        let across = sigma * size[0] as f64 / w;
+        let down = sigma * size[1] as f64 / h;
+        self.blur_pass(enc, to, &[whole(src, size, across, Some(0))]);
+        let src = Source::pool(to, [0; 2], size, alloc);
+        self.blur_pass(enc, spare, &[whole(src, size, down, Some(1))]);
+        self.pool.release(to);
+        let result = Source::pool(spare, [0; 2], size, alloc);
+        let [aw, ah] = alloc.map(|a| a as f64);
+        let fx = self.slots.push(&FxParams {
+            rect: [x0, y0, size[0] as f64 / (w * aw), size[1] as f64 / (h * ah)].map(|v| v as f32),
+            clamp: result.valid_uv(),
+            color: [0.0; 4],
+            quad: [0.0; 4],
+            params: [MODE_CONTENT, tw as f32, th as f32, 0.0],
+        });
+        Cmd::Paint {
+            tex: spare,
+            fx,
+            scissor: tgt.scissor(shown).unwrap_or([0, 0, 1, 1]),
+            mask: Some(plan.mask.clone()),
+            mix: Some(plan.opacity.clamp(0.0, 1.0)),
+            globals: tgt.globals,
+        }
+    }
+
+    fn blur_pass(&mut self, enc: &mut wgpu::CommandEncoder, to: usize, parts: &[BlurPart]) {
+        let slots: Vec<u32> = (parts.iter())
+            .map(|p| {
+                let mut step = [0.0; 2];
+                let mut radius = 0.0;
+                if let Some(d) = p.dir {
+                    step[d] = 1.0 / p.src.alloc[d] as f64;
+                    radius = (p.sigma * 3.0).ceil().min(32.0);
+                }
+                self.slots.push(&FxParams {
+                    rect: p.src.uv(),
+                    clamp: p.src.valid_uv(),
+                    color: [step[0], step[1], p.sigma, radius].map(|v| v as f32),
+                    quad: [p.at[0] as f32, p.at[1] as f32, 0.0, 0.0],
+                    params: [0.0, 1.0 / p.size[0] as f32, 1.0 / p.size[1] as f32, 0.0],
+                })
+            })
+            .collect();
+        self.last_passes += 1;
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blur"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.pool.get(to).view,
                 depth_slice: None,
-                resolve_target: Some(target),
+                resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: clear[0],
-                        g: clear[1],
-                        b: clear[2],
-                        a: clear[3],
-                    }),
-                    store: wgpu::StoreOp::Discard,
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: None,
@@ -662,62 +1339,284 @@ impl CanvasRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_bind_group(1, &self.ramp_bg, &[]);
-        let mut current_pipeline = usize::MAX;
-        for d in under.iter().chain(&world_draws).chain(&over) {
-            let (vb, ib) = if d.world {
-                match self
-                    .world
-                    .as_ref()
-                    .and_then(|w| w.vb.as_ref().zip(w.ib.as_ref()))
-                {
-                    Some(b) => b,
-                    None => continue,
-                }
-            } else {
-                match &sbuf {
-                    Some((v, i)) => (v, i),
-                    None => continue,
-                }
-            };
-            let (x, y, w, h) = match d.clip {
-                Some(c) => {
-                    let x0 = (c.x * scale as f64).floor().clamp(0.0, size[0] as f64);
-                    let y0 = (c.y * scale as f64).floor().clamp(0.0, size[1] as f64);
-                    let x1 = (c.right() * scale as f64).ceil().clamp(0.0, size[0] as f64);
-                    let y1 = (c.bottom() * scale as f64)
-                        .ceil()
-                        .clamp(0.0, size[1] as f64);
-                    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
-                }
-                None => (0, 0, size[0], size[1]),
-            };
-            if w == 0 || h == 0 || d.range.is_empty() {
-                continue;
-            }
-            if current_pipeline != d.blend {
-                pass.set_pipeline(&self.pipelines[d.blend]);
-                current_pipeline = d.blend;
-            }
-            pass.set_bind_group(
-                0,
-                if d.world {
-                    &self.world_bg
-                } else {
-                    &self.screen_bg
+        pass.set_pipeline(&self.fx.blur);
+        pass.set_bind_group(0, &self.slots.globals, &[0]);
+        for (p, fx) in parts.iter().zip(slots) {
+            let [x, y, w, h] = [p.at[0], p.at[1], p.size[0], p.size[1]].map(|v| v as f32);
+            pass.set_viewport(x, y, w, h, 0.0, 1.0);
+            pass.set_bind_group(1, &self.slots.fx, &[fx]);
+            pass.set_bind_group(2, self.texture(p.src.tex), &[]);
+            pass.draw(0..4, 0..1);
+        }
+    }
+
+    fn texture(&self, tex: Tex) -> &wgpu::BindGroup {
+        match tex {
+            Tex::Pool(i) => self.pool.get(i).bind.as_ref().expect("single-sampled"),
+            Tex::Canvas => &self.canvas_copy.as_ref().expect("made before the pass").1,
+        }
+    }
+
+    /// Record one multisampled pass that draws `cmds` into the top-left `size` px.
+    fn pass<'c>(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        world: &World,
+        cmds: impl Iterator<Item = &'c Cmd>,
+        size: [u32; 2],
+        at: &Attachments,
+    ) {
+        self.last_passes += 1;
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("canvas"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: at.view,
+                depth_slice: None,
+                resolve_target: Some(at.resolve),
+                ops: wgpu::Operations {
+                    load: at.load,
+                    store: at.store,
                 },
-                &[],
-            );
-            let img = d
-                .image
-                .as_ref()
-                .and_then(|i| self.images.get(i))
-                .unwrap_or(&self.blank_img);
-            pass.set_bind_group(2, img, &[]);
-            pass.set_vertex_buffer(0, vb.slice(..));
-            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            pass.set_scissor_rect(x, y, w, h);
-            pass.draw_indexed(d.range.clone(), 0, 0..1);
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+        let world_buffers = world.vb.as_ref().zip(world.ib.as_ref());
+        let screen_buffers = self.screen.as_ref().map(|(v, i)| (v, i));
+        #[derive(PartialEq, Clone, Copy)]
+        enum Bound {
+            None,
+            Canvas(usize),
+            Shadow,
+            Quad,
+            Mask(bool),
+        }
+        let mut bound = Bound::None;
+        for cmd in cmds {
+            match cmd {
+                Cmd::Draw {
+                    range,
+                    scissor,
+                    blend,
+                    image,
+                    globals,
+                    screen,
+                } => {
+                    let buffers = if *screen {
+                        screen_buffers
+                    } else {
+                        world_buffers
+                    };
+                    let Some((vb, ib)) = buffers else { continue };
+                    if range.is_empty() {
+                        continue;
+                    }
+                    if bound != Bound::Canvas(*blend) {
+                        pass.set_pipeline(&self.pipelines[*blend]);
+                        pass.set_bind_group(1, &self.ramp_bg, &[]);
+                        bound = Bound::Canvas(*blend);
+                    }
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
+                    let img = image
+                        .as_ref()
+                        .and_then(|i| self.images.get(i))
+                        .unwrap_or(&self.blank_img);
+                    pass.set_bind_group(2, img, &[]);
+                    pass.set_vertex_buffer(0, vb.slice(..));
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    let [x, y, w, h] = *scissor;
+                    pass.set_scissor_rect(x, y, w, h);
+                    pass.draw_indexed(range.clone(), 0, 0..1);
+                }
+                Cmd::Shadows {
+                    range,
+                    scissor,
+                    globals,
+                } => {
+                    let Some(instances) = &world.shadows else {
+                        continue;
+                    };
+                    if bound != Bound::Shadow {
+                        pass.set_pipeline(&self.fx.shadow);
+                        bound = Bound::Shadow;
+                    }
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
+                    pass.set_vertex_buffer(0, instances.slice(..));
+                    let [x, y, w, h] = *scissor;
+                    pass.set_scissor_rect(x, y, w, h);
+                    pass.draw(0..4, range.clone());
+                }
+                Cmd::Paint {
+                    tex,
+                    fx,
+                    scissor,
+                    mask,
+                    mix,
+                    globals,
+                } => {
+                    let kind = match mask {
+                        Some(_) => Bound::Mask(mix.is_some()),
+                        None => Bound::Quad,
+                    };
+                    if let Some(m) = *mix {
+                        pass.set_blend_constant(wgpu::Color {
+                            r: m,
+                            g: m,
+                            b: m,
+                            a: m,
+                        });
+                    }
+                    if bound != kind {
+                        pass.set_pipeline(match kind {
+                            Bound::Mask(mix) => &self.fx.mask[mix as usize],
+                            _ => &self.fx.quad,
+                        });
+                        bound = kind;
+                    }
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
+                    pass.set_bind_group(1, &self.slots.fx, &[*fx]);
+                    pass.set_bind_group(2, self.texture(Tex::Pool(*tex)), &[]);
+                    let [x, y, w, h] = *scissor;
+                    pass.set_scissor_rect(x, y, w, h);
+                    match mask {
+                        Some(range) => {
+                            let Some((vb, ib)) = world_buffers else {
+                                continue;
+                            };
+                            pass.set_vertex_buffer(0, vb.slice(..));
+                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(range.clone(), 0, 0..1);
+                        }
+                        None => pass.draw(0..4, 0..1),
+                    }
+                }
+                Cmd::Backdrop { .. } => {}
+            }
+        }
+    }
+}
+
+fn blur_mode(i: usize, plan: &BlurPlan, tgt: &Target) -> BlurMode {
+    let k = tgt.map.k;
+    let sigma = plan.sigma * k;
+    let reach = 3.0 * sigma + 1.0;
+    let content = tgt.map.rect(&plan.bounds.translate(plan.offset));
+    let Some(shown) = tgt.shown(content.inflate(reach), &plan.clip) else {
+        return BlurMode::Skip;
+    };
+    match plan.paint {
+        PlanPaint::Content if sigma < MIN_SIGMA_PX => return BlurMode::Inline,
+        // A shadow that moves and spreads less than a pixel hides under its layer.
+        PlanPaint::Tint(_) | PlanPaint::Inside { .. }
+            if 3.0 * sigma + (plan.offset.len() + plan.spread) * k < 0.5 =>
+        {
+            return BlurMode::Skip;
+        }
+        _ => {}
+    }
+    // What is shown needs the content around it, as far as the blur reaches.
+    let Some(region) = shown.inflate(reach).intersection(&content.inflate(reach)) else {
+        return BlurMode::Skip;
+    };
+    let origin = v2(region.x.floor(), region.y.floor());
+    let (w, h) = (
+        region.right().ceil() - origin.x,
+        region.bottom().ceil() - origin.y,
+    );
+    let down = (sigma / MAX_TEXEL_SIGMA)
+        .max(w.max(h) / MAX_BLUR_EDGE)
+        .max(1.0);
+    BlurMode::Offscreen(Job {
+        plan: i,
+        shown,
+        origin,
+        down,
+        size: [w, h].map(|s| (s / down).ceil().max(1.0) as u32),
+    })
+}
+
+fn collect(world: &World, steps: &[Step], tgt: &Target, jobs: &mut Vec<Job>) {
+    for step in steps {
+        if let Step::Blur(i) = step {
+            let plan = &world.blurs[*i];
+            match blur_mode(*i, plan, tgt) {
+                BlurMode::Offscreen(job) => jobs.push(job),
+                BlurMode::Inline => collect(world, &plan.steps, tgt, jobs),
+                BlurMode::Skip => {}
+            }
+        }
+    }
+}
+
+fn emit(
+    world: &World,
+    steps: &[Step],
+    tgt: &Target,
+    painted: &HashMap<usize, Cmd>,
+    out: &mut Vec<Cmd>,
+) {
+    for step in steps {
+        match step {
+            Step::Draw(d) => {
+                if let Some(scissor) = tgt.clip(&d.clip) {
+                    out.push(Cmd::Draw {
+                        range: d.range.clone(),
+                        scissor,
+                        blend: d.blend,
+                        image: d.image.clone(),
+                        globals: tgt.globals,
+                        screen: false,
+                    });
+                }
+            }
+            Step::Shadows { range, clip } => {
+                if let Some(scissor) = tgt.clip(clip) {
+                    out.push(Cmd::Shadows {
+                        range: range.clone(),
+                        scissor,
+                        globals: tgt.globals,
+                    });
+                }
+            }
+            Step::Blur(i) => {
+                let plan = &world.blurs[*i];
+                match painted.get(i) {
+                    Some(Cmd::Paint {
+                        tex,
+                        fx,
+                        scissor,
+                        mask,
+                        mix,
+                        globals,
+                    }) => out.push(Cmd::Paint {
+                        tex: *tex,
+                        fx: *fx,
+                        scissor: *scissor,
+                        mask: mask.clone(),
+                        mix: *mix,
+                        globals: *globals,
+                    }),
+                    _ if matches!(blur_mode(*i, plan, tgt), BlurMode::Inline) => {
+                        emit(world, &plan.steps, tgt, painted, out)
+                    }
+                    _ => {}
+                }
+            }
+            Step::Backdrop(i) => {
+                let b = &world.backdrops[*i];
+                let shown = tgt.shown(tgt.map.rect(&b.bounds), &b.clip);
+                if let Some(shown) = shown
+                    && tgt.main
+                    && b.sigma * tgt.map.k >= MIN_SIGMA_PX
+                    && b.opacity > 0.0
+                    && !b.mask.is_empty()
+                {
+                    out.push(Cmd::Backdrop { plan: *i, shown });
+                }
+            }
         }
     }
 }
@@ -843,5 +1742,39 @@ impl Headless {
         );
         self.queue.submit([enc.finish()]);
         self.read(&tex)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_rects_stay_on_their_page_and_apart() {
+        let sizes: Vec<[u32; 2]> = (0..400u32)
+            .map(|i| [20 + i % 37 * 9, 10 + i % 23 * 11])
+            .chain([[2048, 2048], [1, 1]])
+            .collect();
+        let pages = pack(&sizes);
+        assert!(pages.len() > 1, "the full-page rect needs its own");
+        let mut seen = vec![false; sizes.len()];
+        for page in &pages {
+            assert!(page.size[0] <= PAGE_EDGE && page.size[1] <= PAGE_EDGE);
+            let rects: Vec<Rect> = (page.rects.iter())
+                .map(|(i, at)| {
+                    seen[*i] = true;
+                    let [w, h] = sizes[*i].map(|s| s as f64);
+                    Rect::new(at[0] as f64, at[1] as f64, w, h)
+                })
+                .collect();
+            for (n, a) in rects.iter().enumerate() {
+                assert!(a.right() <= page.size[0] as f64 && a.bottom() <= page.size[1] as f64);
+                let overlap = rects[..n].iter().find(|b| {
+                    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+                });
+                assert!(overlap.is_none(), "{a:?} overlaps {overlap:?}");
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "every rect is placed");
     }
 }

@@ -947,7 +947,7 @@ fn screenshot(host: &mut dyn Host, a: &Args) -> ToolResult {
         None => (def, ed.page_doc(def).root.clone()),
     };
     let doc = ed.page_doc(page);
-    let b = crate::io::svg::export_bounds(doc, &roots).ok_or("nothing to capture (empty)")?;
+    let b = crate::io::svg::effect_bounds(doc, &roots).ok_or("nothing to capture (empty)")?;
     let want = a.num("scale").unwrap_or(1.0).clamp(0.1, 4.0);
     let mut scale = want.min(SHOT_MAX_EDGE / b.w.max(b.h).max(1.0));
     loop {
@@ -1100,6 +1100,16 @@ fn token_input(v: &Value) -> Result<String, String> {
     }
 }
 
+/// A shadow's color as CSS: the variable that owns it, or the color itself.
+fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
+    (n.tokens.get(&TokenProp::EffectColor(i)))
+        .and_then(|id| tokens.get(id))
+        .map_or_else(
+            || css::color_css(c),
+            |t| format!("var({})", tokens.css_name(t)),
+        )
+}
+
 /// In computed styles, show a bound property as the variable that owns it, and a text
 /// layer's style as `textStyle` with the fields it overrides.
 fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
@@ -1112,7 +1122,13 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
             st.insert("textStyleOverrides".into(), json!(keys));
         }
     }
+    if let Some(v) = css::shadows_css(n, |i, c| shadow_color(tokens, n, i, c)) {
+        st.insert(css::shadow_key(n).into(), json!(v));
+    }
     for (prop, id) in &n.tokens {
+        if matches!(prop, TokenProp::EffectColor(_)) {
+            continue;
+        }
         let Some(t) = tokens.get(id) else { continue };
         let var = format!("var({})", tokens.css_name(t));
         let key = prop.css_key(n);
@@ -2222,6 +2238,10 @@ fn jsx_node(
                     pos.insert(k.into(), v.clone());
                 }
             }
+            // A box shadow here would be the shadow of the element's box, not of the shape.
+            if let Some(f) = css::shape_filter_css(n, |i, c| shadow_color(tokens, n, i, c)) {
+                pos.insert("filter".into(), json!(f));
+            }
             out.push_str(&format!(
                 "{ind}<div data-name=\"{name}\" style={}>{}</div>\n",
                 style_obj(&pos),
@@ -2284,7 +2304,8 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
     for (key, settings) in nodes {
         let (page, id) = resolve(ed, key, def)?;
         let doc = ed.page_doc(page);
-        let b = crate::io::svg::export_bounds(doc, &[id]).ok_or("nothing to export")?;
+        let plain = crate::io::svg::export_bounds(doc, &[id]).ok_or("nothing to export")?;
+        let drawn = crate::io::svg::effect_bounds(doc, &[id]).unwrap_or(plain);
         let name = doc.get(id).unwrap().name.clone();
         let list: Vec<Value> = match settings.as_array() {
             Some(v) if !v.is_empty() => v.clone(),
@@ -2301,6 +2322,7 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
                 "pdf" => Format::Pdf,
                 f => return Err(format!("format `{f}` is not supported (png, svg, pdf)")),
             };
+            let b = if format == Format::Png { drawn } else { plain };
             let scale = parse_scale(s.str("scale"), b)?;
             let stem = if format == Format::Png && scale != 1.0 {
                 format!("{name}@{}x", (scale * 100.0).round() / 100.0)
@@ -2585,6 +2607,7 @@ const INHERITED: &[&str] = &[
     "fontFamily",
     "whiteSpace",
     "textDecoration",
+    "textShadow",
 ];
 
 fn get<'s>(st: &'s Styles, k: &str) -> Option<&'s str> {
@@ -2941,6 +2964,13 @@ impl Builder<'_, '_> {
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
                         || k == "display" && v.contains("flex")
+                        || matches!(
+                            k.as_str(),
+                            "boxShadow"
+                                | "backdropFilter"
+                                | "WebkitBackdropFilter"
+                                | "webkitBackdropFilter"
+                        ) && v != "none"
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -3777,17 +3807,28 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
+                    let effects = n.style.effects.clone();
                     let mut applied = css::apply(&mut n, &styles, &parent.ctx());
                     // Like the inspector, a bindable field edited on an instance layer stops
                     // following the main component.
-                    let edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
+                    let mut edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
                         .filter(|k| !applied.ignored.iter().any(|i| i == k))
                         .filter_map(|k| match k {
-                            "border" => Some(TokenProp::Stroke),
-                            k => TokenProp::from_css_key(k, &n),
+                            "border" => Some(TokenProp::Stroke.field()),
+                            "boxShadow"
+                            | "textShadow"
+                            | "filter"
+                            | "backdropFilter"
+                            | "WebkitBackdropFilter"
+                            | "webkitBackdropFilter" => Some("effects"),
+                            k => TokenProp::from_css_key(k, &n).map(TokenProp::field),
                         })
-                        .map(|p| crate::editor::structure::override_key(p.field()))
+                        .map(crate::editor::structure::override_key)
                         .collect();
+                    // A filter can apply in part and still be reported as ignored.
+                    if n.style.effects != effects {
+                        edited.push("effects");
+                    }
                     if let Some(l) = &mut n.instance {
                         for k in edited {
                             if !l.overrides.iter().any(|o| o == k) {

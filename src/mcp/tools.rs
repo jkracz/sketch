@@ -877,7 +877,8 @@ pub const GUIDE_HTML: &str = "\
 
 Elements: div/section/header/footer/nav/main/article/aside/ul/ol/li/button/form → frames;
 p/h1–h6/span/label/a/strong/em/code/pre (elements holding only text) → text layers (with a
-frame around them when they have a background, border or padding); img → image rectangle;
+frame around them when they have a background, border, padding or box-shadow); img → image
+rectangle;
 svg → vector layers; br → line break; x-sketch-clone node-id=ID → copy of an existing layer.
 
 Default sizes (like CSS): h1 32px bold, h2 24px bold, h3 20px bold, h4–h6 16px bold, p 16px,
@@ -889,7 +890,11 @@ justify-content, align-items, align-self, flex-grow, overflow, background, backg
 background-image (url(), linear-gradient(), radial-gradient()), background-size/object-fit,
 border, border-color/width/style, border-radius (1–4 values), opacity, mix-blend-mode, color,
 font-family, font-size, font-weight, font-style, line-height, letter-spacing, text-align, text-decoration.
-Ignored (reported back): margin, grid, box-shadow, transform, filters, transitions.";
+
+Effects: box-shadow with lists, inset and spread, text-shadow on text, filter: blur(),
+backdrop-filter: blur(). A shadow whose color is var(--token) stays bound to that color token.
+Setting one of these replaces the layer's effects of that kind, and none removes them.
+Ignored (reported back): margin, grid, transform, filters other than blur(), transitions.";
 
 pub const GUIDE_WHITEBOARD: &str = "\
 # Whiteboard elements

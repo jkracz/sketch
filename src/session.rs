@@ -222,7 +222,7 @@ pub fn render_thumbnail(
     gpu: &Headless,
     doc: &crate::model::Document,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(b) = crate::io::svg::export_bounds(doc, &doc.root) else {
+    let Some(b) = crate::io::svg::effect_bounds(doc, &doc.root) else {
         return Ok(None);
     };
     let scale = (THUMB_SIZE.0 / b.w).min(THUMB_SIZE.1 / b.h).min(2.0);

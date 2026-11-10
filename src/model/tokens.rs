@@ -1344,7 +1344,8 @@ impl TokenSet {
 
     /// Replace `var(--token)` in styles with the token's value. A style whose whole value is
     /// one variable also gets a [`css::TOKEN_MARKER`] entry, which binds the node's property
-    /// when `css::apply` reaches it. Unknown variables fall back to their default, if any.
+    /// when `css::apply` reaches it. So does each shadow in a list that names a color token.
+    /// Unknown variables fall back to their default, if any.
     pub fn expand(&self, styles: &mut Vec<(String, String)>) {
         self.expand_in(styles, None);
     }
@@ -1363,6 +1364,16 @@ impl TokenSet {
                 bound.push((format!("{}{k}", css::TOKEN_MARKER), t.id.clone()));
                 *v = self.literal_css(t.kind, lit);
                 continue;
+            }
+            if matches!(k.as_str(), "boxShadow" | "textShadow") {
+                for (i, shadow) in css::split_top(v, ',').iter().enumerate() {
+                    let color = (css::split_ws(shadow).iter())
+                        .filter_map(|part| self.by_css_name(var_name(part)?))
+                        .find(|t| t.kind == TokenKind::Color);
+                    if let Some(t) = color {
+                        bound.push((format!("{}{k}:{i}", css::TOKEN_MARKER), t.id.clone()));
+                    }
+                }
             }
             *v = self.expand_text(v, mode);
         }
@@ -1643,9 +1654,8 @@ pub(super) fn check_description(d: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// A node property a token can own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// A node property a token can own. Saved as its [`key`](TokenProp::key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TokenProp {
     /// The top fill layer.
     Fill,
@@ -1661,9 +1671,53 @@ pub enum TokenProp {
     Gap,
     /// All four sides.
     Padding,
+    /// The color of the shadow at this index of `style.effects`. Change the list with
+    /// [`edit_effects`](super::effects::edit_effects) so the index stays right.
+    EffectColor(usize),
+}
+
+const EFFECT_COLOR_KEY: &str = "effectColor.";
+
+impl Serialize for TokenProp {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.key())
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenProp {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        TokenProp::from_key(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown token property {s:?}")))
+    }
 }
 
 impl TokenProp {
+    pub fn key(self) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(match self {
+            TokenProp::Fill => "fill",
+            TokenProp::Stroke => "stroke",
+            TokenProp::StrokeWidth => "strokeWidth",
+            TokenProp::Radius => "radius",
+            TokenProp::Opacity => "opacity",
+            TokenProp::FontFamily => "fontFamily",
+            TokenProp::FontSize => "fontSize",
+            TokenProp::FontWeight => "fontWeight",
+            TokenProp::LineHeight => "lineHeight",
+            TokenProp::LetterSpacing => "letterSpacing",
+            TokenProp::Gap => "gap",
+            TokenProp::Padding => "padding",
+            TokenProp::EffectColor(i) => return format!("{EFFECT_COLOR_KEY}{i}").into(),
+        })
+    }
+
+    pub fn from_key(key: &str) -> Option<TokenProp> {
+        if let Some(i) = key.strip_prefix(EFFECT_COLOR_KEY) {
+            return i.parse().ok().map(TokenProp::EffectColor);
+        }
+        TokenProp::ALL.into_iter().find(|p| p.key() == key)
+    }
+
     pub const ALL: [TokenProp; 12] = [
         TokenProp::Fill,
         TokenProp::Stroke,
@@ -1682,7 +1736,7 @@ impl TokenProp {
     /// The kind of token this property accepts.
     pub fn kind(self) -> TokenKind {
         match self {
-            TokenProp::Fill | TokenProp::Stroke => TokenKind::Color,
+            TokenProp::Fill | TokenProp::Stroke | TokenProp::EffectColor(_) => TokenKind::Color,
             TokenProp::StrokeWidth => TokenKind::BorderWidth,
             TokenProp::Radius => TokenKind::Radius,
             TokenProp::Opacity => TokenKind::Opacity,
@@ -1709,6 +1763,7 @@ impl TokenProp {
             TokenProp::LineHeight => "line height",
             TokenProp::LetterSpacing => "letter spacing",
             TokenProp::Gap | TokenProp::Padding => "layout",
+            TokenProp::EffectColor(_) => "effects",
         }
     }
 
@@ -1728,11 +1783,19 @@ impl TokenProp {
             TokenProp::LetterSpacing => "letterSpacing",
             TokenProp::Gap => "gap",
             TokenProp::Padding => "padding",
+            TokenProp::EffectColor(_) => css::shadow_key(n),
         }
     }
 
-    /// The property a CSS key binds on `n`, if it binds one.
+    /// The property a CSS key binds on `n`, if it binds one. `boxShadow:1` is the color of
+    /// the second shadow in the list.
     pub fn from_css_key(key: &str, n: &Node) -> Option<TokenProp> {
+        if let Some((k, i)) = key.split_once(':') {
+            let nth = css::shadow_slots(n)
+                .get(i.parse::<usize>().ok()?)
+                .copied()?;
+            return (k == css::shadow_key(n)).then_some(TokenProp::EffectColor(nth));
+        }
         let text = n.kind.text().is_some();
         // A sticky's fill is its paper; `color` is the writing on it.
         let sticky = matches!(n.kind, NodeKind::Sticky { .. });
@@ -1770,6 +1833,9 @@ impl TokenProp {
             | TokenProp::LineHeight
             | TokenProp::LetterSpacing => is_text,
             TokenProp::Gap | TokenProp::Padding => n.layout.is_some(),
+            TokenProp::EffectColor(i) => {
+                (n.style.effects.get(i)).is_some_and(|e| e.kind.is_shadow())
+            }
         }
     }
 
@@ -1794,6 +1860,9 @@ impl TokenProp {
             }
             (TokenProp::LetterSpacing, TokenValue::Em(em)) => {
                 n.text_style.letter_spacing == LetterSpacing::Em { em: *em }
+            }
+            (TokenProp::EffectColor(i), TokenValue::Color(c)) => {
+                (n.style.effects.get(i)).is_some_and(|e| e.kind.is_shadow() && e.color == *c)
             }
             (TokenProp::Gap, TokenValue::Number(g)) => n.layout.is_some_and(|l| l.gap == *g),
             (TokenProp::Padding, TokenValue::Number(p)) => {
@@ -1832,6 +1901,11 @@ impl TokenProp {
             }
             (TokenProp::LetterSpacing, TokenValue::Em(em)) => {
                 n.text_style.letter_spacing = LetterSpacing::Em { em: *em }
+            }
+            (TokenProp::EffectColor(i), TokenValue::Color(c)) => {
+                if let Some(e) = n.style.effects.get_mut(i) {
+                    e.color = *c;
+                }
             }
             (TokenProp::Gap, TokenValue::Number(g)) => {
                 if let Some(l) = &mut n.layout {

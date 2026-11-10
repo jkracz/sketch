@@ -1,7 +1,7 @@
 # Third-party code and assets
 
-Sketch is MIT OR Apache-2.0. It ports a few algorithms from MIT-licensed projects (listed
-below with their copyright notices and license text) and bundles the Inter font (SIL OFL 1.1,
+Sketch is MIT OR Apache-2.0. It ports a few algorithms from MIT-licensed projects and one
+CC0 shader (listed below with their copyright notices and license text) and bundles the Inter font (SIL OFL 1.1,
 `assets/fonts/OFL.txt`). Figma and Paper are proprietary: only their *behavior* was studied
 (`analysis/FIGMA_NOTES.md`, `analysis/PAPER_ARCHITECTURE.md`), and no code, shaders, icons or
 assets from them are used.
@@ -14,6 +14,7 @@ assets from them are used.
 | [hachure-fill](https://github.com/pshihn/hachure-fill) 0.5.2 | Copyright (c) 2023 Preet Shihn | Scan-line hachure algorithm | `src/render/rough.rs` |
 | [points-on-curve](https://github.com/pshihn/bezier-points) 0.2.0, [points-on-path](https://github.com/pshihn/points-on-path) 0.2.1 | Copyright (c) 2020 Preet Shihn | Bezier flattening by flatness, Ramer–Douglas–Peucker, `curveToBezier`, path point sets | `src/render/rough.rs` |
 | [Excalidraw](https://github.com/excalidraw/excalidraw) | Copyright (c) 2020 Excalidraw | Element → rough options (`adjustRoughness`, dash patterns, fill weights), binding gap and fixed-point rules, elbow-arrow grid/A* router with its segment-count heuristic, elbow corner rounding, arrowhead geometry, laser trail decay constants, sticky-note sizing, `.excalidraw` / `.excalidrawlib` formats | `src/render/rough.rs`, `src/connector.rs`, `src/editor/whiteboard.rs`, `src/io/excalidraw.rs` |
+| [Fast Rounded Rectangle Shadows](https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/) | Evan Wallace, CC0 | Gaussian shadow of a rounded box, in closed form along x and sampled along y. Sketch adds a radius per corner. | `src/render/fx.rs` |
 
 Each ported module starts with a comment naming its source.
 
@@ -43,7 +44,7 @@ from [terminal-rs](https://github.com/michaelshimeles/terminal-rs) and
 [glide](https://github.com/michaelshimeles/glide), other projects by the same author. Each starts
 with a comment naming its source.
 
-## MIT License (applies to each project listed above, with its copyright line)
+## MIT License (applies to each MIT project listed above, with its copyright line)
 
 ```
 MIT License

@@ -140,6 +140,10 @@ pub struct Style {
     /// Hand-drawn (rough.js style) rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rough: Option<super::rough::Rough>,
+    /// Shadows and blurs. As in CSS, the order sets which shadow of a kind is on top, first
+    /// one highest. A blur works the same wherever it sits in the list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<super::effects::Effect>,
 }
 
 fn is_default<T: Default + PartialEq>(t: &T) -> bool {
@@ -161,6 +165,7 @@ impl Default for Style {
             opacity: 1.0,
             blend: BlendMode::Normal,
             rough: None,
+            effects: Vec::new(),
         }
     }
 }

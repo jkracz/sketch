@@ -331,14 +331,15 @@ fn editing_tools_update_move_duplicate_and_delete() {
     let up = call(
         &mut h,
         "update_styles",
-        json!({"updates": [{"nodeIds": [a.clone()], "styles": {"backgroundColor": "linear-gradient(90deg, red, blue)", "boxShadow": "0 1px 2px black", "sketch": true, "roughness": 2}}]}),
+        json!({"updates": [{"nodeIds": [a.clone()], "styles": {"backgroundColor": "linear-gradient(90deg, red, blue)", "boxShadow": "0 1px 2px black", "transform": "rotate(3deg)", "sketch": true, "roughness": 2}}]}),
     );
     assert_eq!(up["updated"], 1);
     assert_eq!(
         up["ignoredStyles"][a.as_str().unwrap()],
-        json!(["boxShadow"])
+        json!(["transform"])
     );
     let an = h.ed.doc.get(num(&a)).unwrap();
+    assert_eq!(an.style.effects.len(), 1);
     assert!(matches!(an.style.fills[0], Paint::Linear { .. }));
     assert_eq!(an.style.rough.unwrap().roughness, 2.0);
 

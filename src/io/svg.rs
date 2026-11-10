@@ -2,8 +2,8 @@
 //! identically without fonts; images are embedded as data URLs.
 
 use crate::assets;
-use crate::geom::Rect;
-use crate::model::{BlendMode, Color, Document, NodeId, NodeKind, Stop};
+use crate::geom::{Rect, v2};
+use crate::model::{BlendMode, Color, Document, EffectKind, NodeId, NodeKind, Stop};
 use crate::render::draw::{self, DrawOp, PaintSpec};
 use crate::text;
 use std::fmt::Write;
@@ -45,6 +45,26 @@ fn color_attr(attr: &str, c: [f32; 4]) -> String {
 
 /// Bounds used for export: drawn bounds of the roots and their subtrees.
 pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
+    bounds(doc, roots, false)
+}
+
+/// [`export_bounds`] with room for shadows and layer blurs, for the outputs that draw them.
+pub fn effect_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
+    bounds(doc, roots, true)
+}
+
+fn bounds(doc: &Document, roots: &[NodeId], effects: bool) -> Option<Rect> {
+    Rect::union_all(&painted(doc, roots, effects)).map(|r| {
+        Rect::new(
+            r.x.floor(),
+            r.y.floor(),
+            (r.right().ceil() - r.x.floor()).max(1.0),
+            (r.bottom().ceil() - r.y.floor()).max(1.0),
+        )
+    })
+}
+
+fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
     let mut rects = Vec::new();
     for r in roots {
         if !doc.get(*r).is_some_and(|n| n.visible) {
@@ -54,7 +74,7 @@ pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
             let (Some(nd), Some(wr)) = (doc.get(id), doc.world_rect(id)) else {
                 continue;
             };
-            if nd.is_group() || !doc.is_effectively_visible(id) {
+            if !doc.is_effectively_visible(id) {
                 continue;
             }
             // Children of clipping frames can't draw outside them.
@@ -66,17 +86,37 @@ pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
             }) {
                 continue;
             }
-            rects.push(draw::draw_bounds(nd, wr));
+            // A layer blur spreads the layer and everything inside it, up to the exported root.
+            let mut spread = draw::layer_blur_reach(nd);
+            let outer = doc.ancestors(id);
+            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
+            for a in outer[..exported].iter().filter_map(|a| doc.get(*a)) {
+                spread += draw::layer_blur_reach(a);
+            }
+            if nd.is_group() {
+                // A group paints nothing itself. It casts its shadows from what its children
+                // paint, their own shadows included.
+                let shadows: Vec<_> = (nd.style.effects.iter())
+                    .filter(|e| effects && e.visible && e.kind == EffectKind::DropShadow)
+                    .collect();
+                if !shadows.is_empty()
+                    && let Some(cast) = Rect::union_all(&painted(doc, &nd.children, true))
+                {
+                    for e in shadows {
+                        let reach = draw::blur_reach(e.sigma()) + spread;
+                        rects.push(cast.translate(v2(e.x, e.y)).inflate(reach));
+                    }
+                }
+                continue;
+            }
+            if !effects {
+                rects.push(draw::draw_bounds(nd, wr));
+                continue;
+            }
+            rects.push(draw::shadow_bounds(nd, wr).inflate(spread));
         }
     }
-    Rect::union_all(&rects).map(|r| {
-        Rect::new(
-            r.x.floor(),
-            r.y.floor(),
-            (r.right().ceil() - r.x.floor()).max(1.0),
-            (r.bottom().ceil() - r.y.floor()).max(1.0),
-        )
-    })
+    rects
 }
 
 struct Writer<'a> {
