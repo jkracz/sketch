@@ -1,4 +1,7 @@
 //! Layer effects share per-frame uniforms and pooled offscreen textures.
+//!
+//! The box shadow shader is ported from Evan Wallace's "Fast Rounded Rectangle Shadows"
+//! (CC0), https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/.
 
 use super::gpu::MSAA;
 use super::mesh::Vertex;

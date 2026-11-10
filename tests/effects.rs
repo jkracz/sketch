@@ -611,6 +611,20 @@ fn effect_edits_undo_and_instances_follow_until_overridden() {
     key(&mut e, Key::Char('z'), Modifiers::cmd_shift());
     assert_eq!(effects(&e, inst).len(), 1);
 
+    // A token on the main's shadow reaches the instance with it.
+    let token = e
+        .edit_tokens("add", None, |t| {
+            t.create(TokenKind::Color, "shadow", "#ff0000", None)
+        })
+        .unwrap();
+    let bound = |e: &Editor, id: NodeId| {
+        let n = e.doc.get(id).unwrap();
+        e.bound_token(n, TokenProp::EffectColor(0)).is_some()
+    };
+    e.bind_token(&[id], TokenProp::EffectColor(0), &token);
+    assert!(bound(&e, inst));
+    assert_eq!(effects(&e, inst)[0].color, Color::rgb(255, 0, 0));
+
     inspector::apply(&mut e, "effects", &[inst], |n| {
         n.style.effects[0].blur = 30.0
     });
@@ -620,9 +634,11 @@ fn effect_edits_undo_and_instances_follow_until_overridden() {
     inspector::apply(&mut e, "effects", &[id], |n| n.style.effects.clear());
     assert!(effects(&e, id).is_empty());
     assert_eq!(effects(&e, inst)[0].blur, 30.0);
+    assert!(bound(&e, inst), "the override keeps its binding");
     e.select(vec![inst]);
     e.reset_overrides();
     assert!(effects(&e, inst).is_empty());
+    assert!(e.doc.get(inst).unwrap().tokens.is_empty());
 }
 
 #[test]
@@ -791,6 +807,7 @@ fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
         "create_tokens",
         json!({"tokens": [
             {"type": "color", "name": "--shadow", "value": "rgba(0, 0, 0, 0.5)"},
+            {"type": "color", "name": "--ink", "value": "#ffffff"},
             {"type": "spacing", "name": "--lift", "value": "8px"},
         ]}),
     );
@@ -817,6 +834,20 @@ fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
         styles[key]["boxShadow"],
         "0px 8px 16px var(--shadow), inset 0px 0px 0px 1px #ffffff"
     );
+
+    // A list that doesn't parse changes nothing. Its tokens don't bind to the shadows that
+    // are there, even one that already has a token's color.
+    let up = call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key], "styles": {
+            "boxShadow": "1px var(--shadow), inset 0 0 0 1px var(--ink)"
+        }}]}),
+    );
+    assert_eq!(up["ignoredStyles"][key], json!(["boxShadow"]));
+    let n = h.ed.doc.get(id).unwrap();
+    assert!(n.tokens.contains_key(&TokenProp::EffectColor(0)));
+    assert!(!n.tokens.contains_key(&TokenProp::EffectColor(1)));
 
     let dir = h.session.project.as_ref().unwrap().dir.clone();
     h.session.save(&mut h.ed).unwrap();

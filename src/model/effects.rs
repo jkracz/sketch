@@ -72,6 +72,17 @@ fn is_shadow_color(c: &Color) -> bool {
 }
 
 impl Effect {
+    /// Largest offset, blur or spread, in px. A pasted CSS value can't ask the renderer or
+    /// an export for more than this.
+    pub const MAX_LENGTH: f64 = 100_000.0;
+
+    /// `v` held to [`MAX_LENGTH`](Self::MAX_LENGTH) either way. None when it is not a
+    /// number, which a project file could not save.
+    pub fn bounded(v: f64) -> Option<f64> {
+        v.is_finite()
+            .then(|| v.clamp(-Self::MAX_LENGTH, Self::MAX_LENGTH))
+    }
+
     pub fn new(kind: EffectKind) -> Effect {
         let shadow = kind.is_shadow();
         Effect {

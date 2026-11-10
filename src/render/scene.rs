@@ -414,17 +414,20 @@ impl SceneCache {
                 clip,
                 shapes: &shapes,
             };
-            let cast: Vec<Op> = match &item {
-                Some(it) => vec![Op::Item(it.clone())],
-                None => kids.clone(),
-            };
-            let cast_bounds = if item.is_some() {
-                Some(draw::draw_bounds(n, wr))
-            } else {
-                kids_bounds
-            };
-            for (i, e) in fx.of(EffectKind::DropShadow).rev() {
-                local.extend(fx.drop_shadow(i, e, &cast, cast_bounds));
+            let drops: Vec<_> = fx.of(EffectKind::DropShadow).collect();
+            if !drops.is_empty() {
+                let cast: Vec<Op> = match &item {
+                    Some(it) => vec![Op::Item(it.clone())],
+                    None => kids.clone(),
+                };
+                let cast_bounds = if item.is_some() {
+                    Some(draw::draw_bounds(n, wr))
+                } else {
+                    kids_bounds
+                };
+                for (i, e) in drops.into_iter().rev() {
+                    local.extend(fx.drop_shadow(i, e, &cast, cast_bounds));
+                }
             }
             local.extend(item.map(Op::Item));
             for (i, e) in fx.of(EffectKind::InnerShadow).rev() {

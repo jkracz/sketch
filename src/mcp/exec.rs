@@ -2955,7 +2955,13 @@ impl Builder<'_, '_> {
                         || k.starts_with("border") && v != "none" && v != "0"
                         || k.starts_with("padding")
                         || k == "display" && v.contains("flex")
-                        || matches!(k.as_str(), "boxShadow" | "backdropFilter") && v != "none"
+                        || matches!(
+                            k.as_str(),
+                            "boxShadow"
+                                | "backdropFilter"
+                                | "WebkitBackdropFilter"
+                                | "webkitBackdropFilter"
+                        ) && v != "none"
                 }) || matches!(el.tag.as_str(), "button" | "li" | "a")
                     && own.iter().any(|(k, _)| k.starts_with("padding"));
                 if boxy {
@@ -3799,9 +3805,12 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         .filter(|k| !applied.ignored.iter().any(|i| i == k))
                         .filter_map(|k| match k {
                             "border" => Some(TokenProp::Stroke.field()),
-                            "boxShadow" | "textShadow" | "filter" | "backdropFilter" => {
-                                Some("effects")
-                            }
+                            "boxShadow"
+                            | "textShadow"
+                            | "filter"
+                            | "backdropFilter"
+                            | "WebkitBackdropFilter"
+                            | "webkitBackdropFilter" => Some("effects"),
                             k => TokenProp::from_css_key(k, &n).map(TokenProp::field),
                         })
                         .map(crate::editor::structure::override_key)

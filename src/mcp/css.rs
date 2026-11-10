@@ -531,7 +531,7 @@ fn shadow(s: &str, fs: f64, text: bool) -> Option<Effect> {
         if part.eq_ignore_ascii_case("inset") && !inset {
             inset = true;
         } else if let Some(l) = length(&part, fs) {
-            lengths.push(l);
+            lengths.push(Effect::bounded(l)?);
         } else if col.is_none() {
             col = Some(color(&part)?);
         } else {
@@ -578,6 +578,7 @@ fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
         let blur = func_args(&part.to_ascii_lowercase())
             .filter(|(name, args)| name == "blur" && args.len() <= 1)
             .and_then(|(_, args)| args.first().map_or(Some(0.0), |a| length(a, fs)))
+            .and_then(Effect::bounded)
             .filter(|r| *r >= 0.0);
         match blur {
             Some(r) => radius = Some(r),
@@ -822,6 +823,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let is_text = n.kind.text().is_some();
     let fs = n.kind.font_size().unwrap_or(16.0);
     // A stroke color gives a zero width 1px, unless a token owns the width.
+    let mut shadows_set = false;
     let width_bound = n.tokens.contains_key(&TokenProp::StrokeWidth)
         || styles.iter().any(|(k, _)| {
             k.strip_prefix(TOKEN_MARKER)
@@ -844,7 +846,10 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             continue;
         }
         if let Some(key) = k.strip_prefix(TOKEN_MARKER) {
-            if let Some(prop) = TokenProp::from_css_key(key, n) {
+            // A shadow's marker names a place in the list it came with. If that list was
+            // turned down, the place holds some other shadow.
+            let stale = key.contains(':') && !shadows_set;
+            if !stale && let Some(prop) = TokenProp::from_css_key(key, n) {
                 n.tokens.insert(prop, v.to_string());
             }
             continue;
@@ -1257,6 +1262,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             "boxShadow" | "textShadow" if k == shadow_key(n) => {
                 match shadows(v, fs, k == "textShadow") {
                     Some(list) => {
+                        shadows_set = true;
                         let text = k == "textShadow";
                         replace_effects(n, list, |e| {
                             e.kind == EffectKind::DropShadow
@@ -1856,6 +1862,19 @@ mod tests {
         let (n, a) = styled(NodeKind::Rect, "filter: grayscale(1); box-shadow: 1px red");
         assert!(n.style.effects.is_empty());
         assert_eq!(a.ignored, ["filter", "boxShadow"]);
+    }
+
+    #[test]
+    fn effect_lengths_stay_finite_and_bounded() {
+        // An overflowing length would save as `null` and the project would not reopen.
+        let (n, a) = styled(NodeKind::Rect, "box-shadow: 1e308rem 0 red");
+        assert!(n.style.effects.is_empty());
+        assert_eq!(a.ignored, ["boxShadow"]);
+        let (n, a) = styled(NodeKind::Rect, "filter: blur(1e308rem)");
+        assert!(n.style.effects.is_empty());
+        assert_eq!(a.ignored, ["filter"]);
+        let (n, _) = styled(NodeKind::Ellipse, "box-shadow: 0 0 0 1e16px red");
+        assert_eq!(n.style.effects[0].spread, Effect::MAX_LENGTH);
     }
 
     #[test]
