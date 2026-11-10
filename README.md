@@ -171,7 +171,8 @@ written for Paper work here too.
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
 | Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens`, `create_text_styles`, `set_text_styles` |
 | Design systems | `list_design_systems`, `get_design_system` (filter by type or name), `use_design_system`, `remove_design_system`, `publish_design_system` |
-| Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `select_nodes`, `undo`, `redo` |
+| Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `update_arrows` (rebind, reroute, heads), `create_stroke` (pencil), `select_nodes`, `undo`, `redo` |
+| Vectors & rich text | `boolean_nodes`, `flatten_nodes`, `set_vector_points` (points or SVG `d`), `set_text_range_styles` (style part of a text) |
 
 `write_html` takes HTML with inline styles: flexbox (`display:flex`, direction, gap, padding,
 alignment, `flex-grow`, wrap) and block stacking map onto auto layout with CSS's stretch rules;

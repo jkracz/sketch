@@ -1169,6 +1169,14 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                 }
                 None => false,
             },
+            // A pencil stroke's ink is its fill.
+            "color" if matches!(n.kind, NodeKind::Stroke { .. }) => match color(v) {
+                Some(c) => {
+                    n.style.set_fill(Some(c));
+                    true
+                }
+                None => false,
+            },
             "color" => true, // inherited by text children; meaningless on boxes
             "fontFamily" if is_text => {
                 n.text_style.family = font_family(v);

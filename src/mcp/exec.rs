@@ -128,7 +128,7 @@ impl Host for SessionHost {
 
 // ------------------------------------------------------------------------------ arguments
 
-pub(super) struct Args<'a>(&'a Map<String, Value>);
+pub(super) struct Args<'a>(pub(super) &'a Map<String, Value>);
 
 impl<'a> Args<'a> {
     pub(super) fn get(&self, k: &str) -> Option<&'a Value> {
@@ -141,14 +141,14 @@ impl<'a> Args<'a> {
         self.str(k)
             .ok_or_else(|| format!("missing required string argument `{k}`"))
     }
-    fn num(&self, k: &str) -> Option<f64> {
+    pub(super) fn num(&self, k: &str) -> Option<f64> {
         self.get(k).and_then(|v| match v {
             Value::Number(n) => n.as_f64(),
             Value::String(s) => s.trim().trim_end_matches("px").parse().ok(),
             _ => None,
         })
     }
-    fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
+    pub(super) fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
         self.get(k)
             .and_then(Value::as_array)
             .ok_or_else(|| format!("missing required array argument `{k}`"))
@@ -172,7 +172,7 @@ pub(super) fn text(v: Value) -> ToolResult {
     )])
 }
 
-fn r2(v: f64) -> Value {
+pub(super) fn r2(v: f64) -> Value {
     json!((v * 100.0).round() / 100.0)
 }
 
@@ -245,7 +245,7 @@ pub(super) fn resolve(
 }
 
 /// Resolve several ids that must all live on one page.
-fn resolve_all(
+pub(super) fn resolve_all(
     ed: &Editor,
     keys: &[String],
     default_page: usize,
@@ -348,7 +348,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     text(json!({"ok": true, "saved": host.project().is_some()}))
                 }
                 n if super::pages::NAMES.contains(&n) => super::pages::call(ed, n, &a),
-                _ => Err(format!("unknown tool `{name}`")),
+                _ => super::vectors::call(ed, name, &a)
+                    .unwrap_or_else(|| Err(format!("unknown tool `{name}`"))),
             };
             let ed = host.editor();
             // An edit to a main on a background page shows on the page the user is viewing.
@@ -878,6 +879,7 @@ fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     }
     components::describe(ed, page, id, &mut v);
     v["autoLayout"] = json!(n.layout.is_some());
+    super::vectors::node_details(ed, page, n, &mut v);
     text(v)
 }
 
@@ -2852,7 +2854,7 @@ fn remember_stretch(page_id: &str, id: NodeId, styles: &Styles) {
 }
 
 /// Recompute a text node's box from its content (inside a transaction).
-fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
+pub(super) fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
     let Some(n) = tx.doc().get(id) else { return };
     let NodeKind::Text { auto_width, .. } = n.kind else {
         return;
@@ -3871,7 +3873,7 @@ fn clone_subtree(
 }
 
 /// A free spot for a new top-level frame: right of the existing artboards, 80 px apart.
-fn free_spot(doc: &Document, w: f64) -> V2 {
+pub(super) fn free_spot(doc: &Document, w: f64) -> V2 {
     let rects: Vec<Rect> = doc
         .root
         .iter()
@@ -4108,7 +4110,7 @@ fn doc_without(doc: &Document, id: NodeId) -> Document {
     }
 }
 
-fn head(s: Option<&str>, default: Head) -> Result<Head, String> {
+pub(super) fn head(s: Option<&str>, default: Head) -> Result<Head, String> {
     Ok(match s.map(str::to_ascii_lowercase).as_deref() {
         None => default,
         Some("none") => Head::None,
@@ -4563,7 +4565,7 @@ fn edited_overrides(before: &Node, after: &Node) -> Vec<&'static str> {
     out
 }
 
-fn mark_override(n: &mut Node, key: &str) {
+pub(super) fn mark_override(n: &mut Node, key: &str) {
     if let Some(l) = &mut n.instance
         && !l.overrides.iter().any(|o| o == key)
     {

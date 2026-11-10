@@ -7,6 +7,7 @@
 //!
 //! * [`server`]: the rmcp HTTP service (runs on its own Tokio thread).
 //! * [`exec`]: runs one tool call against a [`exec::Host`] (the app, or a headless session).
+//! * [`vectors`]: booleans, path points, text ranges, arrow edits and pencil strokes.
 //! * [`tools`]: tool names, descriptions and schemas; [`css`] and [`html`]: the style and
 //!   markup mapping used by `write_html` / `update_styles`.
 //! * [`pages`] and [`projects`]: page, project, trash and unpublish tools, each module with
@@ -19,6 +20,7 @@ pub mod pages;
 pub mod projects;
 pub mod server;
 pub mod tools;
+pub mod vectors;
 
 /// Paper uses 29979; Sketch listens next door so both apps can run side by side.
 pub const DEFAULT_PORT: u16 = 29_980;
