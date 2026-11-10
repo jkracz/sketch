@@ -52,6 +52,8 @@ pub trait Host {
     fn close_project(&mut self) -> Result<(), String>;
     /// An offscreen renderer for screenshots and PNG export.
     fn gpu(&mut self) -> Option<Headless>;
+    /// The personal library the Library tab shows.
+    fn library(&mut self) -> &mut crate::library::Library;
 }
 
 /// A host without a window: an editor plus a project session. Used by tests and anything
@@ -61,6 +63,7 @@ pub struct SessionHost {
     pub session: Session,
     gpu: Option<Headless>,
     gpu_tried: bool,
+    library: Option<crate::library::Library>,
 }
 
 impl SessionHost {
@@ -70,6 +73,7 @@ impl SessionHost {
             session: Session::new(store),
             gpu: None,
             gpu_tried: false,
+            library: None,
         }
     }
 }
@@ -122,6 +126,12 @@ impl Host for SessionHost {
             device: g.device.clone(),
             queue: g.queue.clone(),
             adapter_info: g.adapter_info.clone(),
+        })
+    }
+    fn library(&mut self) -> &mut crate::library::Library {
+        self.library.get_or_insert_with(|| {
+            let path = crate::library::Library::path_in(&self.session.store.root);
+            crate::library::Library::load(&path)
         })
     }
 }
@@ -282,6 +292,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
         "list_design_systems" => list_design_systems(host),
         "get_design_system" => get_design_system(host, &a),
         n if super::projects::NAMES.contains(&n) => super::projects::call(host, n, &a),
+        _ if super::library::is_global(name, &a) => super::library::call_global(host, name, &a),
         _ => {
             check_file(host, &a)?;
             if matches!(
@@ -348,8 +359,11 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     text(json!({"ok": true, "saved": host.project().is_some()}))
                 }
                 n if super::pages::NAMES.contains(&n) => super::pages::call(ed, n, &a),
-                _ => super::vectors::call(ed, name, &a)
-                    .unwrap_or_else(|| Err(format!("unknown tool `{name}`"))),
+                _ => match super::library::call(host, name, &a) {
+                    Some(r) => r,
+                    None => super::vectors::call(host.editor(), name, &a)
+                        .unwrap_or_else(|| Err(format!("unknown tool `{name}`"))),
+                },
             };
             let ed = host.editor();
             // An edit to a main on a background page shows on the page the user is viewing.
@@ -456,7 +470,7 @@ pub(super) fn find_folder(store: &Store, key: &str) -> Result<Folder, String> {
 }
 
 /// A `parentId`: a folder, or None for the top level.
-fn parent_arg(store: &Store, key: &str) -> Result<Option<Folder>, String> {
+pub(super) fn parent_arg(store: &Store, key: &str) -> Result<Option<Folder>, String> {
     if key.trim() == TOP_LEVEL {
         return Ok(None);
     }
@@ -3873,7 +3887,7 @@ fn clone_subtree(
 }
 
 /// A free spot for a new top-level frame: right of the existing artboards, 80 px apart.
-fn free_spot(doc: &Document, w: f64) -> V2 {
+pub(super) fn free_spot(doc: &Document, w: f64) -> V2 {
     let rects: Vec<Rect> = doc
         .root
         .iter()

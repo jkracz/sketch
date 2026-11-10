@@ -1505,6 +1505,9 @@ impl crate::mcp::exec::Host for App {
     fn gpu(&mut self) -> Option<Headless> {
         self.offscreen().or_else(|| Headless::new().ok())
     }
+    fn library(&mut self) -> &mut crate::library::Library {
+        &mut self.st.library.library
+    }
 }
 
 /// Start the MCP server unless `SKETCH_RS_MCP=0`. Calls wake the event loop through `proxy`.
