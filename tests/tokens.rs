@@ -387,6 +387,22 @@ fn border_width_tokens_bind_the_stroke_width() {
         border(&mut h),
         "var(--border-none) solid rgba(0, 0, 0, 0.502)"
     );
+
+    // A new color leaves a bound zero width alone, in a later call or after it in one.
+    set(&mut h, json!({"borderColor": "#ff0000"}));
+    assert_eq!(border(&mut h), "var(--border-none) solid #ff0000");
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": ab, "mode": "insert-children",
+            "html": "<div style=\"width: 40px; height: 40px; \
+                     border-width: var(--border-none); border-color: #ff0000\"></div>",
+        }),
+    );
+    let n = h.ed.doc.get(node(&r["createdNodeIds"][0])).unwrap();
+    assert_eq!(n.style.stroke_width, 0.0);
+    assert!(n.tokens.contains_key(&TokenProp::StrokeWidth));
 }
 
 #[test]
