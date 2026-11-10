@@ -543,8 +543,9 @@ pub fn definitions() -> Vec<Value> {
             "Update styles on one or more nodes (camelCase CSS, like React.CSSProperties). Setting \
              left/top on an artboard moves it. textStyle: \"heading-l\" applies a text style to \
              text layers; keys after it override single fields. effectStyle: \"elevation-2\" gives a \
-             layer an effect style's shadows and blurs, as does boxShadow: \"var(--elevation-2)\"; \
-             setting a shadow or blur by value detaches the style. mode: \"Dark\" makes frames and \
+             layer an effect style's shadows and blurs, as does boxShadow: \"var(--elevation-2)\". It \
+             wins over shadow and blur values in the same update; setting one by value without it \
+             detaches the style. mode: \"Dark\" makes frames and \
              their children show tokens in that mode (\"inherit\" clears it). Hand-drawn keys: sketch, \
              roughness, fillStyle, strokeStyle, seed. Styles with no effect are returned under \
              ignoredStyles.",
@@ -875,7 +876,10 @@ layer the whole list with box-shadow: var(--elevation-2) in write_html (text-sha
 {effectStyle: \"elevation-2\"} in update_styles. A style with blurs also writes
 --elevation-2-blur for filter and --elevation-2-backdrop-blur for backdrop-filter; any of the
 three applies the style. get_computed_styles shows effectStyle and the variables, and get_jsx
-writes the variables. Setting a shadow or blur by value detaches the style and keeps the rest.
+writes the variables, or effectStyle where no variable fits (text whose style has spread or
+inset shadows, and vector shapes); write_html takes that as effect-style. effectStyle wins over
+shadow and blur values set beside it. Setting a shadow or blur by value without it detaches the
+style and keeps the rest.
 Editing a style in the app updates every layer that uses it.
 
 Design systems: a project can publish its tokens for other projects to use. Load only what the

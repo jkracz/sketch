@@ -399,8 +399,8 @@ impl TokenSet {
         Ok(id)
     }
 
-    /// A new style with an unused name that copies a layer's effects and their color tokens,
-    /// or holds one drop shadow.
+    /// A new style with an unused name that copies a layer's effects and their color tokens
+    /// (those of its effect style, if it uses one), or holds one drop shadow.
     pub fn add_default_effect_style(&mut self, from: Option<&Node>) -> String {
         let base = "Effect style";
         let mut i = 1;
@@ -410,7 +410,10 @@ impl TokenSet {
         {
             i += 1;
         }
+        // A layer that uses a style holds colors, so the aliases come from the style.
+        let styled = from.and_then(|n| self.effect_style(n.effect_style.as_ref()?));
         let effects = match from.filter(|n| !n.style.effects.is_empty()) {
+            Some(_) if styled.is_some() => styled.map(|s| s.effects.clone()).unwrap_or_default(),
             Some(n) => (n.style.effects.iter().enumerate())
                 .map(|(i, e)| {
                     let token = (n.tokens.get(&TokenProp::EffectColor(i)))
@@ -726,6 +729,15 @@ mod tests {
         assert_eq!(st.effects[1].color_token, Some(token));
         let next = s.add_default_effect_style(None);
         assert_eq!(s.effect_style(&next).unwrap().name, "Effect style 2");
+        // A layer that already uses a style passes on that style's aliases.
+        n.tokens.clear();
+        n.style.effects = s.resolve_effect_style_in(&id, None).unwrap();
+        n.effect_style = Some(id.clone());
+        let copy = s.add_default_effect_style(Some(&n));
+        assert_eq!(
+            s.effect_style(&copy).unwrap().effects,
+            s.effect_style(&id).unwrap().effects
+        );
     }
 
     #[test]

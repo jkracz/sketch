@@ -200,6 +200,35 @@ fn a_variable_in_box_shadow_binds_the_style() {
         st["textShadow"],
         "0px 1px 2px var(--shade), 0px 4px 8px #ff0000"
     );
+    // What a styled layer reports applies back without losing the style or its spread.
+    for id in [&ids[0], &ids[1]] {
+        let before = effects(&h, node(id));
+        let st = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
+        let st = st[id.as_str().unwrap()].clone();
+        let keep = ["effectStyle", "boxShadow", "textShadow", "filter"];
+        let st: serde_json::Map<String, Value> = (st.as_object().unwrap().iter())
+            .filter(|(k, _)| keep.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        call(
+            &mut h,
+            "update_styles",
+            json!({"updates": [{"nodeIds": [id], "styles": st}]}),
+        );
+        assert!(bound(&h, node(id)));
+        assert_eq!(effects(&h, node(id)), before);
+    }
+    // JSX names the style where no variable can carry it, and write_html takes it back.
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": ids[1]}));
+    let jsx = jsx.as_str().unwrap();
+    assert!(jsx.contains("effectStyle: \"elevation-2\""), "{jsx}");
+    let again = write(
+        &mut h,
+        &ab,
+        "<p style=\"effect-style: elevation-2; text-shadow: 0px 1px 2px #000\">Again</p>",
+    );
+    assert!(bound(&h, node(&again[0])));
+    assert_eq!(effects(&h, node(&again[0])).len(), 3);
 }
 
 #[test]
@@ -259,16 +288,15 @@ fn update_styles_applies_by_name_and_a_value_detaches() {
     assert_eq!(effects(&h, b).len(), 2);
     assert!(bound(&h, a));
 
-    // In one update the style goes on first, so a value next to it wins.
+    // A style applied by name wins over a value next to it.
     call(
         &mut h,
         "update_styles",
         json!({"updates": [{"nodeIds": [ids[1]], "styles":
             {"filter": "blur(9px)", "effectStyle": "--elevation-2"}}]}),
     );
-    assert!(!bound(&h, b));
-    let e = effects(&h, b);
-    assert_eq!((e.len(), e[2].blur), (3, 9.0));
+    assert!(bound(&h, b));
+    assert_eq!(effects(&h, b), effects(&h, a));
 
     let r = call(
         &mut h,

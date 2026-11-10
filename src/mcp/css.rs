@@ -52,13 +52,13 @@ pub fn parse_inline(s: &str) -> Styles {
 
 /// A JSON style object (`{"padding": 8, "color": "#000"}`) as styles. Numbers become px for
 /// lengths and stay unitless for the few unitless properties. JSON objects lose their key
-/// order, so `textStyle` and `effectStyle` go first and the other keys override them.
+/// order, so `textStyle` goes first and the other keys override its fields.
 pub fn from_json(v: &Value) -> Result<Styles, String> {
     let Some(m) = v.as_object() else {
         return Err("styles must be an object".into());
     };
     let mut entries: Vec<(&String, &Value)> = m.iter().collect();
-    entries.sort_by_key(|(k, _)| !matches!(camel(k).as_str(), "textStyle" | "effectStyle"));
+    entries.sort_by_key(|(k, _)| camel(k) != "textStyle");
     Ok(entries
         .into_iter()
         .filter_map(|(k, v)| {
@@ -871,6 +871,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let fs = n.kind.font_size().unwrap_or(16.0);
     // A stroke color gives a zero width 1px, unless a token owns the width.
     let mut shadows_set = false;
+    let mut named_style = None;
     let width_bound = n.tokens.contains_key(&TokenProp::StrokeWidth)
         || styles.iter().any(|(k, _)| {
             k.strip_prefix(TOKEN_MARKER)
@@ -893,19 +894,9 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             continue;
         }
         if let Some(key) = k.strip_prefix(EFFECT_STYLE_MARKER) {
-            let text = matches!(n.kind, NodeKind::Text { .. });
-            let style = v
-                .split_once(' ')
-                .and_then(|(id, json)| Some((id, serde_json::from_str::<Vec<Effect>>(json).ok()?)));
-            match (key, style) {
-                // `text-shadow` is inherited, so boxes take it without using it.
-                ("textShadow", _) if !text => {}
-                ("boxShadow", _) if text => a.ignored.push(key.into()),
-                (_, Some((id, effects))) => {
-                    edit_effects(n, |l| *l = effects.into_iter().map(|e| (e, None)).collect());
-                    n.effect_style = Some(id.to_string());
-                }
-                (_, None) => a.ignored.push(key.into()),
+            match key {
+                "effectStyle" => named_style = Some(v),
+                _ => apply_effect_style(n, key, v, &mut a),
             }
             continue;
         }
@@ -1407,7 +1398,31 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
+    // A style applied by name wins over shadow and blur values set beside it, wherever it
+    // sits in the list. So what `computed` reports for a styled layer applies back unchanged.
+    if let Some(v) = named_style {
+        apply_effect_style(n, "effectStyle", v, &mut a);
+    }
     a
+}
+
+/// Give `n` the effect style an [`EFFECT_STYLE_MARKER`] entry carries. `key` is the property
+/// the style came in through.
+fn apply_effect_style(n: &mut Node, key: &str, v: &str, a: &mut Applied) {
+    let text = matches!(n.kind, NodeKind::Text { .. });
+    let style = v
+        .split_once(' ')
+        .and_then(|(id, json)| Some((id, serde_json::from_str::<Vec<Effect>>(json).ok()?)));
+    match (key, style) {
+        // `text-shadow` is inherited, so boxes take it without using it.
+        ("textShadow", _) if !text => {}
+        ("boxShadow", _) if text => a.ignored.push(key.into()),
+        (_, Some((id, effects))) => {
+            edit_effects(n, |l| *l = effects.into_iter().map(|e| (e, None)).collect());
+            n.effect_style = Some(id.to_string());
+        }
+        (_, None) => a.ignored.push(key.into()),
+    }
 }
 
 fn set_dash(n: &mut Node, style: &str) {
