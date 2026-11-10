@@ -8,7 +8,8 @@ use super::exec::{Args, ROOT, find_page, node_key, page_arg, relayout, resolve, 
 use super::tools::tool;
 use crate::editor::Editor;
 use crate::geom::{Rect, V2};
-use crate::model::{Node, NodeId};
+use crate::history::Tx;
+use crate::model::{Document, Node, NodeId};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -230,18 +231,11 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
     let dst_id = ed.pages[dst].id.clone();
     let label = if copy { "Copy to page" } else { "Move to page" };
 
-    // Removed first, so a moved main is still a main where it lands (pasting a main elsewhere
-    // while it exists makes an instance of it).
-    if !copy {
-        ed.with_page(src, |ed| {
-            ed.edit(label, |tx| {
-                for r in &roots {
-                    tx.remove(*r);
-                }
-            });
-            ed.selection.retain(|s| ed.doc.get(*s).is_some());
-        });
-    }
+    // The destination goes first, keeping moved mains as mains. Each page's own links to a
+    // moved main change in the same undo step as the move on that page.
+    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut moved: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut relinked = 0;
     let new_roots = ed.with_page(dst, |ed| {
         ed.insert_subtrees_with(
             label,
@@ -250,6 +244,7 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
             &world,
             V2::ZERO,
             Some(&src_id),
+            !copy,
             |tx, new| {
                 if let Some(p) = parent {
                     for id in new {
@@ -257,19 +252,38 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     relayout(tx, Some(p));
                 }
+                for (old, new) in old_order.iter().zip(new) {
+                    pairs.extend(old.iter().copied().zip(tx.doc().subtree(*new)));
+                }
+                if !copy {
+                    moved = moved_mains(tx.doc(), &pairs);
+                    relinked += relink(tx, &dst_id, &src_id, &dst_id, &moved);
+                }
             },
         )
     });
-    let dst_doc = ed.page_doc(dst);
-    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
-    for (old, new) in old_order.iter().zip(&new_roots) {
-        pairs.extend(old.iter().copied().zip(dst_doc.subtree(*new)));
+    if !copy {
+        ed.with_page(src, |ed| {
+            ed.edit(label, |tx| {
+                relinked += relink(tx, &src_id, &src_id, &dst_id, &moved);
+                for r in &roots {
+                    tx.remove(*r);
+                }
+            });
+            ed.selection.retain(|s| ed.doc.get(*s).is_some());
+        });
+        for i in 0..ed.pages.len() {
+            let here = ed.pages[i].id.clone();
+            if i == src || i == dst || stale(ed.page_doc(i), &here, &src_id, &moved).is_empty() {
+                continue;
+            }
+            ed.with_page(i, |ed| {
+                ed.edit("Relink instances", |tx| {
+                    relinked += relink(tx, &here, &src_id, &dst_id, &moved);
+                })
+            });
+        }
     }
-    let relinked = if copy {
-        0
-    } else {
-        relink_moved_mains(ed, &src_id, &dst_id, &pairs)
-    };
     let map: serde_json::Map<String, Value> = (pairs.iter())
         .map(|(o, n)| (node_key(ed, src, *o), json!(node_key(ed, dst, *n))))
         .collect();
@@ -285,54 +299,38 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
     text(v)
 }
 
-/// Point instances of mains that moved from page `src` to page `dst` at their new place.
-/// Returns how many layers changed.
-fn relink_moved_mains(ed: &mut Editor, src: &str, dst: &str, pairs: &[(NodeId, NodeId)]) -> usize {
-    let dst_i = ed.pages.iter().position(|p| p.id == dst).unwrap();
-    let moved: HashMap<NodeId, NodeId> = pairs
-        .iter()
-        .filter(|(_, n)| {
-            let doc = ed.page_doc(dst_i);
-            doc.get(*n).is_some_and(|node| {
-                node.component
-                    || doc
-                        .ancestors(*n)
-                        .iter()
-                        .any(|a| doc.get(*a).is_some_and(|x| x.component))
+/// Old to new ids of the moved layers that are, or are inside, a main component.
+fn moved_mains(doc: &Document, pairs: &[(NodeId, NodeId)]) -> HashMap<NodeId, NodeId> {
+    let in_main = |id: NodeId| {
+        std::iter::once(id)
+            .chain(doc.ancestors(id))
+            .any(|a| doc.get(a).is_some_and(|n| n.component))
+    };
+    pairs.iter().filter(|(_, n)| in_main(*n)).copied().collect()
+}
+
+/// Layers on page `here` linked to a main that moved off page `src`.
+fn stale(doc: &Document, here: &str, src: &str, moved: &HashMap<NodeId, NodeId>) -> Vec<NodeId> {
+    (doc.nodes.values())
+        .filter(|n| {
+            n.instance.as_ref().is_some_and(|l| {
+                l.component.is_none()
+                    && moved.contains_key(&l.main)
+                    && l.page.as_deref().unwrap_or(here) == src
             })
         })
-        .copied()
-        .collect();
-    if moved.is_empty() {
-        return 0;
+        .map(|n| n.id)
+        .collect()
+}
+
+/// Point page `here`'s links to moved mains at their new place on page `dst`. Returns how
+/// many layers changed.
+fn relink(tx: &mut Tx, here: &str, src: &str, dst: &str, moved: &HashMap<NodeId, NodeId>) -> usize {
+    let ids = stale(tx.doc(), here, src, moved);
+    for id in &ids {
+        let l = tx.node_mut(*id).unwrap().instance.as_mut().unwrap();
+        l.main = moved[&l.main];
+        l.page = (here != dst).then(|| dst.to_string());
     }
-    let mut total = 0;
-    for i in 0..ed.pages.len() {
-        let here = ed.pages[i].id.clone();
-        let doc = ed.page_doc(i);
-        let stale: Vec<NodeId> = (doc.nodes.values())
-            .filter(|n| {
-                n.instance.as_ref().is_some_and(|l| {
-                    l.component.is_none()
-                        && moved.contains_key(&l.main)
-                        && l.page.as_deref().unwrap_or(&here) == src
-                })
-            })
-            .map(|n| n.id)
-            .collect();
-        if stale.is_empty() {
-            continue;
-        }
-        total += stale.len();
-        ed.with_page(i, |ed| {
-            ed.edit("Relink instances", |tx| {
-                for id in stale {
-                    let l = tx.node_mut(id).unwrap().instance.as_mut().unwrap();
-                    l.main = moved[&l.main];
-                    l.page = (here != dst).then(|| dst.to_string());
-                }
-            });
-        });
-    }
-    total
+    ids.len()
 }

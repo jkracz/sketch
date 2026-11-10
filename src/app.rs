@@ -1491,6 +1491,15 @@ impl crate::mcp::exec::Host for App {
         }
         Ok(())
     }
+    fn close_project(&mut self) -> Result<(), String> {
+        if self.session.project.is_some() {
+            self.session
+                .close(&mut self.ed)
+                .map_err(|e| format!("could not save the open project: {e}"))?;
+        }
+        self.show_home();
+        Ok(())
+    }
     fn gpu(&mut self) -> Option<Headless> {
         self.offscreen().or_else(|| Headless::new().ok())
     }

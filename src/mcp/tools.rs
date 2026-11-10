@@ -907,7 +907,8 @@ Both move_resources and rename_resource work on the open project. Report the ret
 which can differ from the old one after a name clash.
 - \"Delete X\": trash_resources moves projects and folders to the trash, where the user can
   still get them back. Say that it's in the trash. Deleting forever and emptying the trash
-  are left to the user. The open project can't be trashed; open another one first.
+  are left to the user. Trashing the open project closes it and the app shows the home
+  screen, so only do that when the user asked.
 - \"Bring X back\": list_trash, then restore_resources with its id. A folder's id or name
   restores every project trashed from it.
 - \"Make a copy of X\": duplicate_file, then open_file with the returned fileId.

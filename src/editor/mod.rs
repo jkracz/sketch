@@ -2264,10 +2264,12 @@ impl Editor {
         offset: V2,
         from: Option<&str>,
     ) -> Vec<NodeId> {
-        self.insert_subtrees_with(label, nodes, roots, world, offset, from, |_, _| {})
+        self.insert_subtrees_with(label, nodes, roots, world, offset, from, false, |_, _| {})
     }
 
     /// [`Editor::insert_subtrees`], then `after` runs on the new roots in the same undo step.
+    /// With `keep_mains`, main components stay mains instead of becoming instances of the
+    /// originals (the caller is moving them, not copying).
     #[allow(clippy::too_many_arguments)]
     pub fn insert_subtrees_with(
         &mut self,
@@ -2277,11 +2279,13 @@ impl Editor {
         world: &[Rect],
         offset: V2,
         from: Option<&str>,
+        keep_mains: bool,
         after: impl FnOnce(&mut Tx, &[NodeId]),
     ) -> Vec<NodeId> {
         let here = self.pages[self.current_page()].id.clone();
         let same_page = from == Some(here.as_str());
-        let nodes = self.relink_for_paste(nodes, roots, from);
+        let mains_of = if keep_mains { &[][..] } else { roots };
+        let nodes = self.relink_for_paste(nodes, mains_of, from);
         let ids = self.edit(label, |tx| {
             let ids = insert_subtrees_tx(tx, &nodes, roots, world, offset, same_page);
             let local: Vec<NodeId> = (ids.iter().flat_map(|r| tx.doc().subtree(*r)))

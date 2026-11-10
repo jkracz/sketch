@@ -246,6 +246,13 @@ fn a_moved_main_component_keeps_its_instances() {
     h.ed.switch_page(p);
     assert_eq!(h.ed.instance_main(there_id), Some((2, new_main)));
     assert_eq!(h.ed.instance_main(num(&copied)), Some((2, new_main)));
+
+    // One undo on the source page brings the main back, linked to the instance left there.
+    h.ed.switch_page(0);
+    let first = h.ed.pages[0].id.clone();
+    call(&mut h, "undo", json!({"pageId": first}));
+    assert!(h.ed.doc.get(main).unwrap().component);
+    assert_eq!(h.ed.instance_main(here), Some((0, main)));
 }
 
 #[test]
@@ -278,13 +285,7 @@ fn projects_duplicate_trash_and_restore() {
         json!({"name": "Inside", "parentId": f["folderId"]}),
     );
 
-    // The open project can't go, and nothing goes with it.
-    let e = err(
-        &mut h,
-        "trash_resources",
-        json!({"resourceIds": ["Copy A", open_id]}),
-    );
-    assert!(e.contains("open"), "{e}");
+    // A bad id trashes nothing.
     assert!(
         err(
             &mut h,
@@ -332,6 +333,22 @@ fn projects_duplicate_trash_and_restore() {
     assert_eq!(r["restored"][0]["location"], "Old work/Inside", "{r}");
     assert!(s.list_trash().is_empty());
     assert_eq!(s.folders().len(), 1);
+
+    // The open project is saved, closed and trashed, and comes back with its work.
+    let t = call(&mut h, "trash_resources", json!({"resourceIds": [open_id]}));
+    assert_eq!(t["closedOpenProject"], true, "{t}");
+    assert!(h.session.project.is_none());
+    let back = call(
+        &mut h,
+        "restore_resources",
+        json!({"resourceIds": [open_id]}),
+    );
+    let dir = std::path::Path::new(back["restored"][0]["path"].as_str().unwrap());
+    let pages = sketch_rs::project::Project::open(dir)
+        .unwrap()
+        .load_pages()
+        .unwrap();
+    assert_eq!(pages[0].doc.nodes.len(), 2, "the card survived the trip");
 
     // Deleting forever stays with the user.
     let tools: Vec<String> = sketch_rs::mcp::tools::definitions()

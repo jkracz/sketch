@@ -51,8 +51,9 @@ pub fn definitions() -> Vec<Value> {
              folder trashes its projects, and restoring any of them brings the folder back. \
              Trashed projects vanish from list_resources, and a design system a trashed project \
              publishes stops being available. Only the user can delete forever or empty the \
-             trash. The project open in the app can't be trashed: open another first. Every id \
-             is checked first: if any can't be trashed, nothing is. Returns the trashed items.",
+             trash. Trashing the project open in the app saves and closes it first, and the app \
+             shows the home screen. Every id is checked first: if any can't be trashed, nothing \
+             is. Returns the trashed items.",
             json!({"resourceIds": keys("Project or folder ids, names or Folder/Project locations from list_resources.")}),
             &["resourceIds"],
             false,
@@ -169,7 +170,9 @@ enum Doomed {
 
 fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
     let open = host.project().map(|p| p.dir.clone());
-    let store = host.store();
+    let store = host.store().clone();
+    let store = &store;
+    let mut closes_open = false;
     let mut doomed: Vec<Doomed> = Vec::new();
     for key in a.strs("resourceIds")? {
         let item = match (lookup_project(store, &key)?, find_folder(store, &key)) {
@@ -183,16 +186,10 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
             (None, Err(_)) => return Err(format!("`{key}` not found (see list_resources)")),
         };
         if let Some(o) = &open {
-            let holds_open = match &item {
+            closes_open |= match &item {
                 Doomed::File(d) => same_dir(d, o),
                 Doomed::Folder(f) => o.parent().is_some_and(|p| same_dir(p, &f.dir)),
             };
-            if holds_open {
-                return Err(format!(
-                    "`{key}` is open in the app (or holds the project that is). Open another \
-                     project with open_file first. Nothing was trashed."
-                ));
-            }
         }
         let dup = doomed.iter().any(|d| match (d, &item) {
             (Doomed::File(a), Doomed::File(b)) => same_dir(a, b),
@@ -216,6 +213,10 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
             .is_some_and(|p| folders.iter().any(|f| same_dir(f, p))),
         Doomed::Folder(_) => true,
     });
+    // As in the app, where the user goes home before trashing the project they had open.
+    if closes_open {
+        host.close_project()?;
+    }
     let mut trashed = Vec::new();
     for d in doomed {
         let r = match &d {
@@ -239,10 +240,15 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
             }
         }
     }
-    text(json!({
+    let mut v = json!({
         "trashed": trashed,
         "hint": "restore_resources brings them back; list_trash lists the trash.",
-    }))
+    });
+    if closes_open {
+        v["closedOpenProject"] = json!(true);
+        v["next"] = json!("The app shows the home screen. Call open_file to keep working.");
+    }
+    text(v)
 }
 
 /// Trash entries matching `key`: its id, path or name, or the id or name of its old folder.

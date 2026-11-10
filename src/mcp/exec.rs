@@ -48,6 +48,8 @@ pub trait Host {
     fn project_moved(&mut self, dir: &Path);
     /// Save the open project now.
     fn save(&mut self) -> Result<(), String>;
+    /// Save and close the open project, showing the home screen.
+    fn close_project(&mut self) -> Result<(), String>;
     /// An offscreen renderer for screenshots and PNG export.
     fn gpu(&mut self) -> Option<Headless>;
 }
@@ -105,6 +107,9 @@ impl Host for SessionHost {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+    fn close_project(&mut self) -> Result<(), String> {
+        self.session.close(&mut self.ed).map_err(|e| e.to_string())
     }
     fn gpu(&mut self) -> Option<Headless> {
         if !self.gpu_tried {
