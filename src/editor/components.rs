@@ -61,22 +61,27 @@ impl Editor {
 
     /// Bring page `i`'s instances of mains on other pages up to date, after the pages it
     /// takes mains from. Adds no undo step; the page is marked for saving if anything moved.
-    /// Waits while an edit is open (a drag or text edit), so it never splits one.
+    /// Waits while an edit is open (a drag or text edit), so it never splits one, and while
+    /// [`Editor::with_page`] has a page out.
     pub fn sync_page_instances(&mut self, i: usize) {
-        if self.rec.is_none() {
+        if self.can_sync() {
             self.sync_deep(i, &mut HashSet::new());
         }
     }
 
     /// [`Editor::sync_page_instances`] for every page (before saving or exporting).
     pub fn sync_all_instances(&mut self) {
-        if self.rec.is_some() {
+        if !self.can_sync() {
             return;
         }
         let mut seen = HashSet::new();
         for i in 0..self.pages.len() {
             self.sync_deep(i, &mut seen);
         }
+    }
+
+    fn can_sync(&self) -> bool {
+        self.rec.is_none() && self.lent_page.is_none()
     }
 
     fn sync_deep(&mut self, i: usize, seen: &mut HashSet<usize>) {
@@ -403,6 +408,21 @@ mod tests {
         let d = e.page_doc(2);
         let leaf = *d.subtree(b_inst).last().unwrap();
         assert_eq!(d.get(leaf).unwrap().style.fill(), Some(BLUE));
+    }
+
+    #[test]
+    fn undo_on_a_background_page_waits_to_sync() {
+        // Agents undo on pages the user isn't viewing (`Editor::with_page`).
+        let (mut e, main, rect) = two_pages();
+        copy(&mut e, &[main]);
+        let inst = paste_on(&mut e, 1);
+        e.edit("move", |tx| tx.node_mut(inst).unwrap().rect.x = 500.0);
+        e.switch_page(0);
+        set_main_fill(&mut e, rect, BLUE);
+        e.with_page(1, |ed| ed.undo());
+        assert_eq!(inner_fill(&e, 1, inst), Some(RED));
+        e.sync_all_instances();
+        assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
     }
 
     #[test]
