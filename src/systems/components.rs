@@ -51,7 +51,7 @@ pub fn publishable(ed: &Editor) -> Vec<PublishedComponent> {
             let page = ed.pages[i].id.as_str();
             (doc.nodes.values())
                 .filter(|n| n.component)
-                .map(move |m| publish_one(doc, page, m.id, &ed.tokens))
+                .map(move |m| publish_one(ed, doc, page, m.id))
         })
         .collect();
     out.sort_by(|a, b| {
@@ -60,7 +60,7 @@ pub fn publishable(ed: &Editor) -> Vec<PublishedComponent> {
     out
 }
 
-fn publish_one(doc: &Document, page: &str, main: NodeId, tokens: &TokenSet) -> PublishedComponent {
+fn publish_one(ed: &Editor, doc: &Document, page: &str, main: NodeId) -> PublishedComponent {
     let mut nodes = Vec::new();
     let mut nested = BTreeMap::new();
     let mut stack = vec![main];
@@ -77,11 +77,16 @@ fn publish_one(doc: &Document, page: &str, main: NodeId, tokens: &TokenSet) -> P
             // A main inside another main publishes on its own; here it's plain layers.
             n.component = false;
         }
-        flatten_bindings(&mut n, tokens);
+        flatten_bindings(&mut n, &ed.tokens);
         if let Some(l) = &n.instance {
-            match owner(doc, l.main) {
+            // Its main can be on another page.
+            let (mdoc, mpage) = match l.page.as_deref() {
+                None => (Some(doc), page),
+                Some(p) => (ed.page_doc_by_id(p), p),
+            };
+            match mdoc.and_then(|d| owner(d, l.main)) {
                 Some(c) => {
-                    nested.insert(id, component_id(page, c));
+                    nested.insert(id, component_id(mpage, c));
                 }
                 // Its main is gone, so it keeps its look as plain layers.
                 None => n.instance = None,
@@ -279,6 +284,35 @@ mod tests {
         assert!(c.nested.values().all(|v| *v == component_id(&page, button)));
         assert_eq!(c.nested.get(&inst), Some(&component_id(&page, button)));
         assert!(by_name(&r.system.components, "Button").nested.is_empty());
+    }
+
+    #[test]
+    fn nested_instances_of_mains_on_other_pages_name_their_page() {
+        use crate::editor::shortcuts::Action;
+        let store = temp_store();
+        let (s, mut ed) = source(&store);
+        let (button, rect) = component(&mut ed, "Button", 0.0);
+        let first = ed.active_page_id().to_string();
+        ed.select(vec![button]);
+        ed.run(Action::Copy);
+        ed.add_page();
+        ed.run(Action::Paste);
+        let inst = ed.selection[0];
+        ed.create_component();
+        let card = ed.doc.get(inst).unwrap().parent.unwrap();
+        ed.edit("name", |tx| tx.node_mut(card).unwrap().name = "Card".into());
+        // An edit the Card's page hasn't been shown since still publishes.
+        ed.switch_page(0);
+        set_fill(&mut ed, rect, Color::rgb(0, 0, 255));
+        let r = publish_open(&s, &mut ed, &PublishRequest::default());
+
+        let c = by_name(&r.system.components, "Card");
+        assert_eq!(c.nested.get(&inst), Some(&component_id(&first, button)));
+        let copy = c
+            .nodes
+            .iter()
+            .find(|n| n.instance.as_ref().is_some_and(|l| l.main == rect));
+        assert_eq!(copy.unwrap().style.fill(), Some(Color::rgb(0, 0, 255)));
     }
 
     #[test]
