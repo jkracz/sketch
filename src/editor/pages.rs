@@ -187,9 +187,22 @@ impl Editor {
         if i >= self.pages.len() {
             return self.active_page;
         }
+        let at = self.duplicate_page_in_background(i, None);
+        self.switch_page(at);
+        at
+    }
+
+    /// Copy page `i` to just after it without leaving the current page.
+    /// Nodes keep their numbers, so only the page part of their ids changes.
+    pub fn duplicate_page_in_background(&mut self, i: usize, name: Option<&str>) -> usize {
         self.commit();
         let src = self.page_data(i);
-        let name = self.unique_page_name(&format!("{} copy", src.name));
+        let base = name
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| format!("{} copy", src.name));
+        let name = self.unique_page_name(&base);
         let mut slot = PageSlot::new(&name);
         slot.saved_gen = u64::MAX;
         slot.stash = Some(Box::new(PageStash {
@@ -207,7 +220,7 @@ impl Editor {
             self.active_page += 1;
         }
         self.meta_dirty = true;
-        self.switch_page(i + 1);
+        self.revision += 1;
         i + 1
     }
 

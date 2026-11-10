@@ -280,7 +280,9 @@ impl App {
         if self.session.project.is_some() {
             self.save_project(true);
             if let Err(e) = self.session.close(&mut self.ed) {
+                // Stay on the canvas: the project is still open and keeps autosaving.
                 self.error(format!("Could not save project: {e}"));
+                return;
             }
         } else if !self.confirm_discard() {
             return;
@@ -1489,6 +1491,15 @@ impl crate::mcp::exec::Host for App {
                 .map_err(|e| e.to_string())?;
             self.st.save_state = "Saved".into();
         }
+        Ok(())
+    }
+    fn close_project(&mut self) -> Result<(), String> {
+        if self.session.project.is_some() {
+            self.session
+                .close(&mut self.ed)
+                .map_err(|e| format!("could not save the open project: {e}"))?;
+        }
+        self.show_home();
         Ok(())
     }
     fn gpu(&mut self) -> Option<Headless> {

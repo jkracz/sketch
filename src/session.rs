@@ -221,11 +221,12 @@ impl Session {
     }
 
     /// Close the project: final save; the caller then shows the home screen.
+    /// If saving fails, keep the project open.
     pub fn close(&mut self, ed: &mut Editor) -> Result<(), FormatError> {
-        let r = self.save_all(ed);
+        self.save_all(ed)?;
         self.project = None;
         self.dirty_since = None;
-        r
+        Ok(())
     }
 }
 
