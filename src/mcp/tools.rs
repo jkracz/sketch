@@ -33,8 +33,12 @@ padding, align-items, justify-content) is the layout model; no margin, grid or t
 - Text defaults to Inter. Use px for font sizes. Find Google Fonts with search_fonts, by name \
 or category, then set font-family and font-weight.
 - Edit with update_styles, set_text_content, rename_nodes, duplicate_nodes, move_nodes, \
-delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape. Hand-drawn style: \
-update_styles with {\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
+delete_nodes. Whiteboard shapes, sticky notes and arrows: create_shape; change an arrow later \
+with update_arrows. Pencil strokes: create_stroke. Hand-drawn style: update_styles with \
+{\"sketch\": true, \"roughness\": 1, \"fillStyle\": \"hachure\"}.
+- Vectors: boolean_nodes (union, subtract, intersect, exclude), flatten_nodes, and \
+set_vector_points to edit a path's points. Bold or color part of a text with \
+set_text_range_styles.
 - Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
 var(--token) in update_styles and write_html styles to bind a property to a token, so later \
 token changes reach it.
@@ -65,7 +69,7 @@ fn file_id() -> Value {
     json!({"type": "string", "description": "The project to operate on (id, name, Folder/Project location or path from list_resources). When omitted the project open in the app is used."})
 }
 
-fn page_id() -> Value {
+pub(super) fn page_id() -> Value {
     json!({"type": "string", "description": "The page to operate on. When omitted the page the user is viewing is used. The user's page can change between calls; prefer explicit page ids."})
 }
 
@@ -152,7 +156,7 @@ fn token_value() -> Value {
     })
 }
 
-fn styles_schema(desc: &str) -> Value {
+pub(super) fn styles_schema(desc: &str) -> Value {
     json!({
         "type": "object",
         "propertyNames": {"type": "string"},
@@ -218,6 +222,7 @@ pub fn definitions() -> Vec<Value> {
     let mut v = core_definitions();
     v.extend(super::pages::definitions());
     v.extend(super::projects::definitions());
+    v.extend(super::vectors::definitions());
     v
 }
 
@@ -920,8 +925,20 @@ true copies them), keeping their place on the canvas. Their ids change; use the 
 idMap. Moving main components keeps their instances linked.
 
 Whiteboard: create_shape makes rectangles, ellipses, diamonds, stickies, text and arrows that
-bind to shapes (they re-route when shapes move). Turn on the hand-drawn look with
-{sketch: true, roughness: 1, fillStyle: \"hachure\"}.
+bind to shapes (they re-route when shapes move). update_arrows rebinds, reroutes or changes the
+heads of an existing arrow. create_stroke draws a pencil stroke through points. Turn on the
+hand-drawn look with {sketch: true, roughness: 1, fillStyle: \"hachure\"}. More in
+get_guide({topic: \"whiteboard\"}).
+
+Vectors: boolean_nodes combines layers into one path (destructive; curves become segments).
+flatten_nodes turns shapes and text into paths. get_node_info returns a path's `vector`
+(subpaths of world-space points with optional in/out bezier handles); edit it and send it back
+with set_vector_points, or pass an SVG `d` string.
+
+Rich text: set_text_range_styles styles part of a text layer, picked by `match` (the words) or
+start/end character offsets: fontWeight, fontStyle, fontFamily, fontSize, color,
+textDecoration. reset: true returns the range to the layer's style. get_node_info lists styled
+ranges as `textRanges`. write_html can also write runs with <b>, <i> and <span style>.
 
 Design tokens: get_tokens first, and reuse what's there. create_tokens adds project-wide CSS
 variables; set_tokens renames, changes or deletes them. A style whose whole value is
@@ -1028,4 +1045,13 @@ points can be omitted: the arrow is routed between the shapes and follows them w
 
 Hand-drawn style (Excalidraw-like): styles {sketch: true, roughness: 0|1|2,
 fillStyle: hachure|cross-hatch|solid|zigzag|dots, strokeStyle: solid|dashed|dotted, seed}.
-Colors: backgroundColor (fill), borderColor/stroke, borderWidth/strokeWidth.";
+Colors: backgroundColor (fill), borderColor/stroke, borderWidth/strokeWidth.
+
+Changing an arrow: update_arrows({updates: [{nodeId, endNodeId: \"<shape>\", route: \"elbow\",
+endHead: \"triangle\"}]}). endNodeId \"\" or null unbinds an end where it is; startAnchor /
+endAnchor [fx, fy] aim an end at part of the shape (fractions of its box, [0.5, 0] is the top
+middle); points [[x,y],...] redraw it, and middle points bend a curved arrow. get_node_info
+shows `arrow`: route, heads, start/end bindings and world points.
+
+Pencil: create_stroke({points: [[x, y, pressure?], ...], width, color}) draws a smoothed
+freehand stroke; recolor it with update_styles {color} and erase it with delete_nodes.";
