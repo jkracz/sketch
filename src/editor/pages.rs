@@ -80,6 +80,7 @@ impl Editor {
             .collect();
         self.active_page = active_i;
         self.meta_dirty = false;
+        self.sync_page_instances(active_i);
     }
 
     pub fn active_page_id(&self) -> &str {
@@ -126,6 +127,7 @@ impl Editor {
         self.meta_dirty = true; // the active page is remembered in the manifest
         self.revision += 1;
         self.doc_stamp = super::next_stamp();
+        self.sync_page_instances(i);
     }
 
     fn unique_page_name(&self, base: &str) -> String {
@@ -315,9 +317,10 @@ impl Editor {
     /// without switching the page the user sees. Edits made by `f` land in page `i`'s own
     /// history; the user's view, camera and dirty marker are left alone.
     pub fn with_page<R>(&mut self, i: usize, f: impl FnOnce(&mut Editor) -> R) -> R {
-        if i == self.active_page || i >= self.pages.len() {
+        if i == self.current_page() || i >= self.pages.len() {
             return f(self);
         }
+        debug_assert!(self.lent_page.is_none(), "with_page doesn't nest");
         self.commit();
         let mut s = self.pages[i]
             .stash
@@ -330,8 +333,14 @@ impl Editor {
         };
         let saved_marker = self.saved_marker;
         swap(self, &mut s);
+        // Park the active page in its slot, so `page_doc` reaches every page while `f` runs.
+        let home = self.active_page;
+        self.pages[home].stash = Some(s);
+        self.lent_page = Some(i);
         let r = f(self);
         self.commit();
+        self.lent_page = None;
+        let mut s = self.pages[home].stash.take().expect("parked above");
         swap(self, &mut s);
         self.saved_marker = saved_marker;
         self.pages[i].stash = Some(s);
@@ -340,12 +349,23 @@ impl Editor {
         r
     }
 
+    /// The page `doc` holds: the active one, or the one [`Editor::with_page`] lent it.
+    pub fn current_page(&self) -> usize {
+        self.lent_page.unwrap_or(self.active_page)
+    }
+
     /// The document of page `i` (active or parked).
     pub fn page_doc(&self, i: usize) -> &Document {
-        if i == self.active_page {
+        if i == self.current_page() {
             &self.doc
         } else {
             &self.pages[i].stash.as_ref().unwrap().doc
         }
+    }
+
+    /// The document of the page with this id.
+    pub fn page_doc_by_id(&self, id: &str) -> Option<&Document> {
+        let i = self.pages.iter().position(|p| p.id == id)?;
+        Some(self.page_doc(i))
     }
 }

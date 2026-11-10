@@ -128,6 +128,7 @@ impl Session {
             return Ok(0);
         };
         ed.commit_pending();
+        ed.sync_all_instances();
         let dirty = ed.dirty_pages();
         for &i in &dirty {
             let data = ed.page_data(i);

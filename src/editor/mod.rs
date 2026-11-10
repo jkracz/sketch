@@ -3,6 +3,7 @@
 //! It consumes platform-agnostic [`InputEvent`]s, so every interaction can be scripted in tests.
 
 pub mod commands;
+pub mod components;
 pub mod effect_styles;
 pub mod hit;
 pub mod input;
@@ -256,6 +257,9 @@ pub struct Editor {
     /// Pages of the open project; the active one's content is `doc`/`history`/`camera`.
     pub pages: Vec<PageSlot>,
     pub active_page: usize,
+    /// The page `doc` holds while [`Editor::with_page`] runs, when it isn't the active one.
+    /// The active page is parked in its slot meanwhile.
+    lent_page: Option<usize>,
     /// Page list or names changed (not tracked by undo history).
     pub meta_dirty: bool,
     /// Auto-layout frames not re-laid out while a child is being dragged inside them.
@@ -340,6 +344,7 @@ impl Editor {
             pending_fit: false,
             pages: vec![PageSlot::new(&name)],
             active_page: 0,
+            lent_page: None,
             meta_dirty: false,
             layout_suspended: Vec::new(),
             pen: None,
@@ -445,6 +450,8 @@ impl Editor {
         self.sync_tokens();
         // They also hold sizes measured before a font arrived.
         self.refit_font_text();
+        // And instances of mains on other pages as they were then.
+        self.sync_page_instances(self.active_page);
     }
 
     /// A pointer gesture (drag, draw, resize...) is in progress.
@@ -2141,7 +2148,7 @@ impl Editor {
                             &p.roots,
                             &p.world,
                             v2(d, d),
-                            false,
+                            p.page.as_deref().filter(|_| !same),
                         );
                         self.selection = ids;
                     }
@@ -2154,7 +2161,7 @@ impl Editor {
                             &roots,
                             &world,
                             off,
-                            false,
+                            None,
                         );
                         self.status = format!("Pasted {} layer(s) from {what}", ids.len());
                         self.selection = ids;
@@ -2233,15 +2240,18 @@ impl Editor {
         }
         let nodes = self.clipboard.clone();
         let roots = self.clipboard_roots.clone();
-        let same_page = self.clipboard_page.as_deref() == Some(self.active_page_id());
+        let from = self.clipboard_page.clone();
         let world = self.clipboard_world.clone();
-        let new_roots = self.insert_subtrees("Paste", &nodes, &roots, &world, offset, same_page);
+        let new_roots =
+            self.insert_subtrees("Paste", &nodes, &roots, &world, offset, from.as_deref());
         self.selection = new_roots;
         self.status = format!("Pasted {} layer(s)", self.selection.len());
     }
 
-    /// Insert copies of subtrees. `world[i]` is root `i`'s world rect; `same_page` keeps the
-    /// original parents and references to layers outside the copied set.
+    /// Insert copies of subtrees. `world[i]` is root `i`'s world rect. `from` is the page
+    /// they were copied from: the current page keeps the original parents and references to
+    /// layers outside the copied set, and another page of this project keeps instances linked
+    /// to their main components there.
     pub fn insert_subtrees(
         &mut self,
         label: &str,
@@ -2249,11 +2259,30 @@ impl Editor {
         roots: &[NodeId],
         world: &[Rect],
         offset: V2,
-        same_page: bool,
+        from: Option<&str>,
     ) -> Vec<NodeId> {
-        self.edit(label, |tx| {
-            insert_subtrees_tx(tx, nodes, roots, world, offset, same_page)
-        })
+        let here = self.pages[self.current_page()].id.clone();
+        let same_page = from == Some(here.as_str());
+        let nodes = self.relink_for_paste(nodes, roots, from);
+        let ids = self.edit(label, |tx| {
+            let ids = insert_subtrees_tx(tx, &nodes, roots, world, offset, same_page);
+            // Instances whose main is on this page link to it as a local main.
+            let local: Vec<NodeId> = (ids.iter().flat_map(|r| tx.doc().subtree(*r)))
+                .filter(|id| {
+                    (tx.doc().get(*id).and_then(|n| n.instance.as_ref()))
+                        .is_some_and(|l| l.page.as_deref() == Some(here.as_str()))
+                })
+                .collect();
+            for id in local {
+                if let Some(l) = &mut tx.node_mut(id).unwrap().instance {
+                    l.page = None;
+                }
+            }
+            ids
+        });
+        // Instances of mains elsewhere show the main as it is now, not as it was copied.
+        self.sync_page_instances(self.current_page());
+        ids
     }
 
     /// Insert a library item centered at world point `at`.
@@ -2271,7 +2300,7 @@ impl Editor {
             &item.roots,
             &world,
             offset,
-            false,
+            None,
         );
         self.selection = ids.clone();
         ids
@@ -2404,7 +2433,10 @@ pub fn insert_subtrees_tx(
                 }
             }
         }
-        if let Some(l) = &mut c.instance {
+        // Links to another page's main are kept; `Editor::insert_subtrees` settles them.
+        if let Some(l) = &mut c.instance
+            && l.page.is_none()
+        {
             match map.get(&l.main) {
                 Some(n) => l.main = *n,
                 None if same_page => {}
