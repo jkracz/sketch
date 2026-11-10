@@ -875,3 +875,69 @@ fn shapes_and_instances_keep_their_frames_mode() {
         "an ignored style edits nothing: {overrides:?}"
     );
 }
+
+#[test]
+fn deleting_a_token_keeps_a_text_styles_other_modes() {
+    let mut h = host();
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [{"type": "fontSize", "name": "--size", "value": "12px", "modes": {"Dark": "48px"}}]}),
+    );
+    call(
+        &mut h,
+        "create_text_styles",
+        json!({"styles": [{"name": "Body", "fontSize": "var(--size)"}]}),
+    );
+    let dark = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Dark", "styles": {"width": "320px", "height": "200px"}}),
+    )["id"]
+        .clone();
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [dark], "styles": {"mode": "Dark"}}]}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": dark, "mode": "insert-children", "html": "<p class=\"body\">Hi</p>"}),
+    );
+    let text = r["createdNodeIds"][0].clone();
+    let size = |h: &mut exec::SessionHost| {
+        let s = call(h, "get_computed_styles", json!({"nodeIds": [text]}));
+        s.as_object().unwrap().values().next().unwrap()["fontSize"].clone()
+    };
+    assert_eq!(size(&mut h), "48px");
+
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--size", "delete": true}]}),
+    );
+    assert_eq!(size(&mut h), "48px");
+    let list = call(&mut h, "get_tokens", json!({}));
+    let style = &list["textStyles"][0];
+    assert_eq!(style["css"], "font: 400 12px Inter", "{list}");
+    assert_eq!(
+        style["modes"],
+        json!({"Dark": {"fontSize": "48px"}}),
+        "{list}"
+    );
+    let css = call(&mut h, "get_tokens", json!({"format": "css"}));
+    assert!(
+        (css.as_str().unwrap()).contains("[data-theme=\"dark\"] .body {\n  font-size: 48px;\n}"),
+        "{css}"
+    );
+
+    call(
+        &mut h,
+        "set_text_styles",
+        json!({"styles": [{"name": "body", "fontSize": "20px"}]}),
+    );
+    assert_eq!(size(&mut h), "20px");
+    let list = call(&mut h, "get_tokens", json!({}));
+    assert!(list["textStyles"][0].get("modes").is_none(), "{list}");
+}
