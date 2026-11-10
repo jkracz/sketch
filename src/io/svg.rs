@@ -77,8 +77,7 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
             if !doc.is_effectively_visible(id) {
                 continue;
             }
-            // The ancestors from the parent up to the exported root. The ones above the root
-            // don't clip or blur the export: a layer exported on its own draws without them.
+            // Ancestors above the exported root don't clip or blur a standalone export.
             let outer = doc.ancestors(id);
             let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
             let outer: Vec<_> = outer[..exported]
@@ -86,7 +85,10 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
                 .filter_map(|a| doc.get(*a))
                 .collect();
             // Children of clipping frames can't draw outside them.
-            if (outer.iter()).any(|a| matches!(a.kind, NodeKind::Frame { clip: true })) {
+            if outer
+                .iter()
+                .any(|a| matches!(a.kind, NodeKind::Frame { clip: true }))
+            {
                 continue;
             }
             // A layer blur spreads the layer and everything inside it, up to the exported root.
@@ -493,7 +495,6 @@ mod tests {
         );
         let b = |id| export_bounds(&ed.doc, &[id]);
         assert_eq!(b(outer), Some(Rect::new(0.0, 0.0, 100.0, 100.0)));
-        // Drawn whole, past the outer frame, but still clipped by its own frame.
         assert_eq!(b(inner), Some(Rect::new(50.0, 50.0, 100.0, 100.0)));
     }
 
