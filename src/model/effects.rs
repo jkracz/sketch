@@ -132,6 +132,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effects_keep_only_what_they_use_on_disk() {
+        let blur = Effect::new(EffectKind::LayerBlur);
+        let json = serde_json::to_string(&blur).unwrap();
+        assert_eq!(json, r#"{"type":"layer-blur","blur":8.0}"#);
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), blur);
+        let minimal: Effect = serde_json::from_str(r#"{"type":"drop-shadow","blur":2}"#).unwrap();
+        assert!(minimal.visible);
+        assert_eq!((minimal.x, minimal.y, minimal.spread), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
     fn sigma_follows_css() {
         assert_eq!(Effect::new(EffectKind::DropShadow).sigma(), 2.0);
         assert_eq!(Effect::new(EffectKind::BackgroundBlur).sigma(), 8.0);

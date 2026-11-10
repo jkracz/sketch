@@ -650,17 +650,55 @@ pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f6
             dash: n.style.dash.clone(),
         });
     }
+    // A filled head is stroked too, so it reaches half the stroke past its outline.
+    let head_reach = n.style.stroke_width.max(0.5) * 0.5 + d;
     ops.retain_mut(|op| match op {
         DrawOp::Stroke { color, width, .. } => {
             *color = [1.0; 4];
             *width += 2.0 * d;
             *width > 0.0
         }
-        DrawOp::Fill { paint, .. } => {
+        DrawOp::Fill { path, paint, .. } => {
+            *path = vector::offset(path, false, head_reach, tol);
             *paint = PaintSpec::Solid([1.0; 4]);
-            true
+            !path.is_empty()
         }
         DrawOp::Glyphs { .. } => true,
     });
     Some((ops, alpha(color)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Head;
+
+    #[test]
+    fn a_connector_shadow_shrinks_its_head_with_a_negative_spread() {
+        let mut n = Node::new(
+            NodeId(1),
+            NodeKind::Connector {
+                points: vec![v2(0.0, 0.0), v2(200.0, 0.0)],
+                start: None,
+                end: None,
+                route: Default::default(),
+                start_head: Head::None,
+                end_head: Head::Triangle,
+            },
+            Rect::new(0.0, 0.0, 200.0, 0.0),
+        );
+        n.style.stroke_width = 2.0;
+        // The extent of the head's fill across the line, None once it is gone.
+        let head = |d: f64| {
+            let (ops, _) = cast_ops(&n, n.rect, d, 0.1).unwrap();
+            let fills = ops.iter().filter_map(|op| match op {
+                DrawOp::Fill { path, .. } => path.bounds().map(|b| b.h),
+                _ => None,
+            });
+            fills.reduce(f64::max)
+        };
+        let (grown, plain, shrunk) = (head(2.0).unwrap(), head(0.0).unwrap(), head(-1.5).unwrap());
+        assert!(grown > plain && plain > shrunk, "{grown} {plain} {shrunk}");
+        assert_eq!(head(-100.0), None, "nothing is left to cast a shadow");
+    }
 }

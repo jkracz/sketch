@@ -339,6 +339,7 @@ fn editing_tools_update_move_duplicate_and_delete() {
         json!(["transform"])
     );
     let an = h.ed.doc.get(num(&a)).unwrap();
+    assert_eq!(an.style.effects.len(), 1);
     assert!(matches!(an.style.fills[0], Paint::Linear { .. }));
     assert_eq!(an.style.rough.unwrap().roughness, 2.0);
 
