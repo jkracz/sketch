@@ -15,7 +15,8 @@ use crate::geom::{Rect, V2, v2};
 use crate::history::Tx;
 use crate::model::{
     AutoLayout, Binding, Color, Direction, Document, Head, ImageMode, Node, NodeId, NodeKind,
-    Paint, PathPoint, Route, Sizing, SubPath, TextAlign, Token, TokenKind, TokenProp, TokenSet,
+    Paint, PathPoint, Route, Sizing, StyleField, StyleInput, SubPath, TextAlign, TextStyleDef,
+    Token, TokenKind, TokenProp, TokenSet,
 };
 use crate::project::{Entry, Folder, Project, Store};
 use crate::render::gpu::Headless;
@@ -276,6 +277,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     | "create_shape"
                     | "create_tokens"
                     | "set_tokens"
+                    | "create_text_styles"
+                    | "set_text_styles"
             ) {
                 check_system_vars(host, args)?;
             }
@@ -315,6 +318,8 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "publish_design_system" => publish_design_system(host, &a),
                 "create_tokens" => create_tokens(ed, &a),
                 "set_tokens" => set_tokens(ed, &a),
+                "create_text_styles" => create_text_styles(ed, &a),
+                "set_text_styles" => set_text_styles(ed, &a),
                 "finish_working_on_nodes" => {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
@@ -1045,8 +1050,18 @@ fn token_input(v: &Value) -> Result<String, String> {
     }
 }
 
-/// In computed styles, show a bound property as the variable that owns it.
+/// In computed styles, show a bound property as the variable that owns it, and a text
+/// layer's style as `textStyle` with the fields it overrides.
 fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
+    if let Some(r) = &n.text_style_ref
+        && let Some(s) = tokens.style(&r.id)
+    {
+        st.insert("textStyle".into(), json!(tokens.style_class(s)));
+        if !r.overrides.is_empty() {
+            let keys: Vec<&str> = r.overrides.iter().map(|f| f.css_key()).collect();
+            st.insert("textStyleOverrides".into(), json!(keys));
+        }
+    }
     for (prop, id) in &n.tokens {
         let Some(t) = tokens.get(id) else { continue };
         let var = format!("var({})", tokens.css_name(t));
@@ -1065,14 +1080,56 @@ fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     }
 }
 
-/// The `types` argument: None for every type.
-fn token_kinds(a: &Args) -> Result<Option<Vec<TokenKind>>, String> {
+/// The `types` argument: the token types it names (None for every type), and whether it
+/// takes text styles (`textStyle`, or no `types`).
+fn token_kinds(a: &Args) -> Result<(Option<Vec<TokenKind>>, bool), String> {
     if a.get("types").is_none() {
-        return Ok(None);
+        return Ok((None, true));
     }
     let names = a.strs("types")?;
-    let kinds: Option<Vec<TokenKind>> = names.iter().map(|k| TokenKind::from_key(k)).collect();
-    Ok(Some(kinds.ok_or("unknown token type in `types`")?).filter(|k| !k.is_empty()))
+    if names.is_empty() {
+        return Ok((None, true));
+    }
+    let styles = names.iter().any(|n| n == TEXT_STYLE_TYPE);
+    let kinds: Option<Vec<TokenKind>> = names
+        .iter()
+        .filter(|n| *n != TEXT_STYLE_TYPE)
+        .map(|k| TokenKind::from_key(k))
+        .collect();
+    Ok((Some(kinds.ok_or("unknown token type in `types`")?), styles))
+}
+
+const TEXT_STYLE_TYPE: &str = "textStyle";
+
+/// `tokens`' text styles, filtered by `types` and by `namePattern` against `.class`.
+fn chosen_styles<'a>(
+    tokens: &'a TokenSet,
+    a: &Args,
+    keep: impl Fn(&TextStyleDef) -> bool,
+) -> Result<Vec<&'a TextStyleDef>, String> {
+    if !token_kinds(a)?.1 {
+        return Ok(Vec::new());
+    }
+    let pattern = a.str("namePattern");
+    Ok(tokens
+        .styles()
+        .iter()
+        .filter(|s| keep(s))
+        .filter(|s| pattern.is_none_or(|p| glob(p, &format!(".{}", tokens.style_class(s)))))
+        .collect())
+}
+
+/// A text style in short form: its class and one line of CSS.
+fn style_json(tokens: &TokenSet, s: &TextStyleDef) -> Value {
+    let mut v = json!({
+        "name": s.name,
+        "class": tokens.style_class(s),
+        "css": tokens.style_short(s),
+    });
+    if let Some(d) = &s.description {
+        v["description"] = json!(d);
+    }
+    v
 }
 
 /// `tokens` in listing order, filtered by `types` and `namePattern`.
@@ -1081,7 +1138,7 @@ fn chosen_tokens<'a>(
     a: &Args,
     keep: impl Fn(&Token) -> bool,
 ) -> Result<Vec<&'a Token>, String> {
-    let kinds = token_kinds(a)?;
+    let kinds = token_kinds(a)?.0;
     let pattern = a.str("namePattern");
     Ok(tokens
         .sorted()
@@ -1111,22 +1168,31 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
         }
     };
     let chosen = chosen_tokens(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
+    let styles = chosen_styles(tokens, a, |t| scope.as_ref().is_none_or(|s| t.system == *s))?;
     // One line per design system the file uses, so its tokens can be loaded on demand.
     let others: Vec<Value> = match &scope {
         Some(None) => tokens
             .systems()
             .iter()
             .map(|l| {
+                let ours = |s: Option<&str>| s == Some(l.id.as_str());
                 let n = tokens
                     .sorted()
                     .iter()
-                    .filter(|t| t.system.as_deref() == Some(l.id.as_str()))
+                    .filter(|t| ours(t.system.as_deref()))
                     .count();
-                json!({
+                let mut v = json!({
                     "id": l.id, "name": l.name, "prefix": format!("--{}-", l.prefix),
                     "version": l.release, "tokens": n,
                     "sourceAvailable": design_systems::source_available(&store, &l.id),
-                })
+                });
+                let styles = (tokens.styles().iter())
+                    .filter(|s| ours(s.system.as_deref()))
+                    .count();
+                if styles > 0 {
+                    v["textStyles"] = json!(styles);
+                }
+                v
             })
             .collect(),
         _ => Vec::new(),
@@ -1135,6 +1201,10 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
         "json" => {
             let list: Vec<Value> = chosen.iter().map(|t| token_json(tokens, t)).collect();
             let mut v = json!({"tokens": list});
+            if !styles.is_empty() {
+                let list: Vec<Value> = styles.iter().map(|s| style_json(tokens, s)).collect();
+                v["textStyles"] = json!(list);
+            }
             if !others.is_empty() {
                 v["designSystems"] = json!(others);
                 v["hint"] = json!(
@@ -1145,6 +1215,7 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
         }
         f @ ("css" | "tailwind") => {
             let mut css = tokens.stylesheet(&chosen, f == "tailwind");
+            css.push_str(&tokens.style_sheet(&styles, f == "tailwind"));
             for o in &others {
                 css.push_str(&format!(
                     "/* Also uses {} ({}*, {} tokens). Pass `system` to include them. */\n",
@@ -1232,6 +1303,80 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"count": results.len(), "tokens": results}))
 }
 
+fn style_input(e: &Args) -> Result<StyleInput, String> {
+    let mut input = StyleInput::default();
+    for f in StyleField::ALL {
+        if let Some(v) = e.get(f.css_key()) {
+            input.set(f, token_input(v)?);
+        }
+    }
+    Ok(input)
+}
+
+fn create_text_styles(ed: &mut Editor, a: &Args) -> ToolResult {
+    let entries = a.arr("styles")?;
+    if entries.is_empty() {
+        return Err("`styles` needs at least one entry".into());
+    }
+    let results: Vec<Value> = ed.edit_tokens("Create text styles", None, |tokens| {
+        entries
+            .iter()
+            .map(|e| {
+                let made = (|| {
+                    let e = Args(e.as_object().ok_or("each style must be an object")?);
+                    let input = style_input(&e)?;
+                    tokens.create_style(e.req_str("name")?, &input, e.str("description"))
+                })();
+                match made {
+                    Ok(id) => {
+                        let s = tokens.style(&id).unwrap();
+                        json!({"class": tokens.style_class(s), "result": "created"})
+                    }
+                    Err(message) => json!({"result": "error", "message": message}),
+                }
+            })
+            .collect()
+    });
+    text(json!({"count": results.len(), "styles": results}))
+}
+
+fn set_text_styles(ed: &mut Editor, a: &Args) -> ToolResult {
+    let entries = a.arr("styles")?;
+    if entries.is_empty() {
+        return Err("`styles` needs at least one entry".into());
+    }
+    let results: Vec<Value> = ed.edit_tokens("Update text styles", None, |tokens| {
+        entries
+            .iter()
+            .map(|e| {
+                let done = (|| {
+                    let e = Args(e.as_object().ok_or("each style must be an object")?);
+                    let name = e.req_str("name")?;
+                    let s = tokens.style_by_name(name).ok_or_else(|| {
+                        format!("Text style not found: \"{name}\". get_tokens lists the styles.")
+                    })?;
+                    let (id, class) = (s.id.clone(), tokens.style_class(s));
+                    if let Some(why) = tokens.style_locked(&id) {
+                        return Err(why);
+                    }
+                    if e.get("delete").and_then(Value::as_bool) == Some(true) {
+                        tokens.delete_styles(std::slice::from_ref(&id));
+                        return Ok::<_, String>((class, "deleted"));
+                    }
+                    let input = style_input(&e)?;
+                    tokens.update_style(&id, e.str("newName"), &input, e.str("description"))?;
+                    Ok((tokens.style_class(tokens.style(&id).unwrap()), "updated"))
+                })();
+                match done {
+                    Ok((class, result)) => json!({"class": class, "result": result}),
+                    Err(message) => json!({"result": "error", "message": message}),
+                }
+            })
+            .collect()
+    });
+    text(json!({"count": results.len(), "styles": results}))
+}
+
 // ------------------------------------------------------------------ design systems
 
 /// Above this many tokens, `get_design_system` without filters returns counts instead.
@@ -1308,6 +1453,24 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
             ..t.clone()
         })
         .collect();
+    let styles = tokens
+        .styles()
+        .iter()
+        .filter(|s| s.system.as_deref() == Some(l.id.as_str()))
+        .map(|s| {
+            let mut s = crate::model::TextStyleDef {
+                id: strip(&s.id),
+                system: None,
+                ..s.clone()
+            };
+            for (_, v) in s.values_mut() {
+                if let crate::model::TokenValue::Alias(a) = v {
+                    *a = strip(a);
+                }
+            }
+            s
+        })
+        .collect();
     Published {
         format: design_systems::FORMAT.into(),
         version: design_systems::VERSION,
@@ -1320,6 +1483,7 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
         source: String::new(),
         published: 0,
         tokens: list,
+        text_styles: styles,
     }
 }
 
@@ -1335,6 +1499,9 @@ fn list_design_systems(host: &mut dyn Host) -> ToolResult {
                 "id": p.id, "name": p.name, "prefix": format!("--{}-", p.prefix),
                 "version": p.release, "tokens": type_counts(p.tokens.iter()),
             });
+            if !p.text_styles.is_empty() {
+                v["textStyles"] = json!(p.text_styles.len());
+            }
             if let Some(d) = &p.description {
                 v["description"] = json!(d);
             }
@@ -1359,8 +1526,17 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     let used = host.canvas_open() && host.editor().tokens.system(&p.id).is_some();
     let set = p.token_set();
     let chosen = chosen_tokens(&set, a, |_| true)?;
+    let styles = chosen_styles(&set, a, |_| true)?;
     let filtered = a.get("types").is_some() || a.get("namePattern").is_some();
-    let too_many = !filtered && chosen.len() > MAX_SYSTEM_TOKENS;
+    let too_many = !filtered && chosen.len() + styles.len() > MAX_SYSTEM_TOKENS;
+    let counts = || {
+        let mut c = type_counts(chosen.iter().copied());
+        if !styles.is_empty() {
+            c[TEXT_STYLE_TYPE] = json!(styles.len());
+        }
+        c
+    };
+    let total = chosen.len() + styles.len();
     let usage = if used {
         "The open file uses this system: bind its tokens with var(--name).".to_string()
     } else {
@@ -1383,10 +1559,9 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             v["notes"] = json!(n);
         }
         if too_many {
-            v["tokenCounts"] = type_counts(chosen.iter().copied());
+            v["tokenCounts"] = counts();
             v["hint"] = json!(format!(
-                "{} tokens. Pass `types` or `namePattern` to load some of them.",
-                chosen.len()
+                "{total} tokens and styles. Pass `types` or `namePattern` to load some of them."
             ));
         } else {
             v["tokens"] = json!(
@@ -1395,20 +1570,29 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
                     .map(|t| token_json(&set, t))
                     .collect::<Vec<_>>()
             );
+            if !styles.is_empty() {
+                v["textStyles"] = json!(
+                    styles
+                        .iter()
+                        .map(|s| style_json(&set, s))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         return text(v);
     }
     if matches!(format, "css" | "tailwind") {
         if too_many {
             return Ok(vec![Out::Text(format!(
-                "/* {} tokens: {}. Pass `types` or `namePattern` to load some of them. */\n",
-                chosen.len(),
-                type_counts(chosen.iter().copied())
+                "/* {total} tokens and styles: {}. Pass `types` or `namePattern` to load some \
+                 of them. */\n",
+                counts()
             ))]);
         }
-        return Ok(vec![Out::Text(
-            set.stylesheet(&chosen, format == "tailwind"),
-        )]);
+        let tailwind = format == "tailwind";
+        let mut css = set.stylesheet(&chosen, tailwind);
+        css.push_str(&set.style_sheet(&styles, tailwind));
+        return Ok(vec![Out::Text(css)]);
     }
     if format != "text" {
         return Err(format!(
@@ -1425,10 +1609,10 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     }
     out.push_str("\n## Tokens\n");
     if too_many {
-        let counts = type_counts(chosen.iter().copied());
         out.push_str(&format!(
-            "{} tokens: {counts}. Pass `types` or `namePattern` to load some of them.\n",
-            chosen.len()
+            "{total} tokens and styles: {}. Pass `types` or `namePattern` to load some of \
+             them.\n",
+            counts()
         ));
         return Ok(vec![Out::Text(out)]);
     }
@@ -1446,6 +1630,20 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
     }
     if chosen.is_empty() {
         out.push_str("No tokens match.\n");
+    }
+    if !styles.is_empty() {
+        out.push_str("\n## Text styles\nApply with class=\"name\" in write_html or textStyle in update_styles.\n");
+        for s in &styles {
+            out.push_str(&format!(
+                ".{} {{ {} }}",
+                set.style_class(s),
+                set.style_short(s)
+            ));
+            if let Some(d) = &s.description {
+                out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
+            }
+            out.push('\n');
+        }
     }
     Ok(vec![Out::Text(out)])
 }
@@ -1851,8 +2049,13 @@ fn jsx_node(
             }
         }
         NodeKind::Text { text, .. } => {
+            st.remove("textStyleOverrides");
+            let class = match st.remove("textStyle") {
+                Some(Value::String(c)) => format!(" className=\"{c}\""),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "{ind}<span style={}>{}</span>\n",
+                "{ind}<span{class} style={}>{}</span>\n",
                 style_obj(&st),
                 jsx_text(text)
             ));
@@ -2283,7 +2486,7 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
         .unwrap_or(16.0);
     let mut out: Styles = parent.clone();
     for (k, v) in own {
-        if INHERITED.contains(&k.as_str()) {
+        if INHERITED.contains(&k.as_str()) || k == css::STYLE_MARKER {
             let v = if k == "fontSize" {
                 css::length(v, pfs).map_or(v.clone(), |px| format!("{px}px"))
             } else {
@@ -2293,6 +2496,22 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
         }
     }
     out
+}
+
+/// An element's own styles: the tag's defaults, then the text style its `class` names, then
+/// its inline styles, with tokens and the style expanded.
+fn own_styles(el: &Element, tokens: &TokenSet) -> Styles {
+    let mut st = ua_styles(&el.tag);
+    let class = el.attr("class").and_then(|c| {
+        c.split_whitespace()
+            .find(|c| tokens.style_by_name(c).is_some())
+    });
+    if let Some(c) = class {
+        st.push(("textStyle".into(), c.to_string()));
+    }
+    st.extend(css::parse_inline(el.attr("style").unwrap_or("")));
+    tokens.expand(&mut st);
+    st
 }
 
 /// Inline content as a styled character stream.
@@ -2344,9 +2563,7 @@ fn collect_runs(
             Html::Text(t) => out.extend(t.chars().map(|ch| (ch, run.clone()))),
             Html::Element(e) if e.tag == "br" => out.push(('\u{2028}', run.clone())),
             Html::Element(e) => {
-                let mut st = ua_styles(&e.tag);
-                st.extend(css::parse_inline(e.attr("style").unwrap_or("")));
-                tokens.expand(&mut st);
+                let st = own_styles(e, tokens);
                 let mut r = run.clone();
                 for (k, v) in &st {
                     let lower = v.to_ascii_lowercase();
@@ -2536,9 +2753,7 @@ impl Builder<'_, '_> {
         parent: &Parent,
         index: &mut Option<usize>,
     ) -> Option<NodeId> {
-        let mut own = ua_styles(&el.tag);
-        own.extend(css::parse_inline(el.attr("style").unwrap_or("")));
-        self.tokens.expand(&mut own);
+        let own = own_styles(el, self.tokens);
         match el.tag.as_str() {
             "head" | "meta" | "link" | "title" | "script" | "style" => None,
             "html" | "body" => {

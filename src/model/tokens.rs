@@ -8,6 +8,7 @@
 
 use super::node::{Color, Node, NodeKind};
 use super::paint::{LetterSpacing, Paint};
+use super::text_styles::TextStyleDef;
 use crate::mcp::css;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -217,7 +218,7 @@ fn closing_paren(s: &str) -> Option<usize> {
     None
 }
 
-fn var_name(s: &str) -> Option<&str> {
+pub(super) fn var_name(s: &str) -> Option<&str> {
     let inner = s.trim().strip_prefix("var(")?.strip_suffix(')')?;
     Some(inner.split(',').next()?.trim())
 }
@@ -266,11 +267,12 @@ impl<T: Keyed> Edit<T> {
     }
 }
 
-/// A change to one token or to one design system link.
+/// A change to one token, text style or design system link.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenEdit {
     Token(Edit<Token>),
     System(Edit<SystemLink>),
+    Style(Box<Edit<TextStyleDef>>),
 }
 
 impl TokenEdit {
@@ -278,6 +280,7 @@ impl TokenEdit {
         match self {
             TokenEdit::Token(e) => e.changes(),
             TokenEdit::System(e) => e.changes(),
+            TokenEdit::Style(e) => e.changes(),
         }
     }
 
@@ -289,6 +292,10 @@ impl TokenEdit {
                 true
             }
             (TokenEdit::System(a), TokenEdit::System(b)) if a.id == b.id => {
+                a.after = b.after.clone();
+                true
+            }
+            (TokenEdit::Style(a), TokenEdit::Style(b)) if a.id == b.id => {
                 a.after = b.after.clone();
                 true
             }
@@ -335,21 +342,22 @@ fn apply_list<'a, T: Keyed + 'a>(
     }
 }
 
-/// The project's tokens, and the design systems it uses. Vector order is creation order, and
-/// duplicates sit after their source. Only the tokens are serialized here: the project
-/// manifest keeps the system links in a field of their own.
+/// The project's tokens and text styles, and the design systems it uses. Vector order is
+/// creation order, and duplicates sit after their source. Only the tokens are serialized
+/// here: the project manifest keeps the system links and styles in fields of their own.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "Vec<Token>", into = "Vec<Token>")]
 pub struct TokenSet {
-    tokens: Vec<Token>,
-    systems: Vec<SystemLink>,
+    pub(super) tokens: Vec<Token>,
+    pub(super) systems: Vec<SystemLink>,
+    pub(super) styles: Vec<TextStyleDef>,
 }
 
 impl From<Vec<Token>> for TokenSet {
     fn from(tokens: Vec<Token>) -> TokenSet {
         TokenSet {
             tokens,
-            systems: Vec::new(),
+            ..TokenSet::default()
         }
     }
 }
@@ -397,8 +405,14 @@ impl TokenSet {
         }
     }
 
+    /// No tokens. There may still be text styles.
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
+    }
+
+    /// No tokens and no text styles.
+    pub fn is_blank(&self) -> bool {
+        self.tokens.is_empty() && self.styles.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -653,6 +667,7 @@ impl TokenSet {
 
     fn remove(&mut self, ids: &[String]) {
         let gone: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        self.flatten_style_aliases(&gone);
         let flat: Vec<(usize, TokenValue)> = self
             .tokens
             .iter()
@@ -790,8 +805,13 @@ impl TokenSet {
 
     /// A token's value as CSS.
     pub fn css_value(&self, t: &Token) -> String {
+        self.value_css(t.kind, &t.value)
+    }
+
+    /// A value of a token of `kind` as CSS. An alias becomes `var(--target)`.
+    pub fn value_css(&self, kind: TokenKind, value: &TokenValue) -> String {
         let num = |v: f64| format!("{}", (v * 1000.0).round() / 1000.0);
-        match &t.value {
+        match value {
             TokenValue::Alias(a) => match self.get(a) {
                 Some(target) => format!("var({})", self.css_name(target)),
                 None => String::new(),
@@ -800,7 +820,7 @@ impl TokenSet {
             TokenValue::Text(s) if s.contains(' ') => format!("\"{s}\""),
             TokenValue::Text(s) => s.clone(),
             TokenValue::Em(v) => format!("{}em", css::round_em(*v)),
-            TokenValue::Number(v) => match t.kind {
+            TokenValue::Number(v) => match kind {
                 TokenKind::LineHeight | TokenKind::Opacity => format!("{}%", num(v * 100.0)),
                 TokenKind::FontWeight => num(*v),
                 _ => format!("{}px", num(*v)),
@@ -822,8 +842,12 @@ impl TokenSet {
     /// one variable also gets a [`css::TOKEN_MARKER`] entry, which binds the node's property
     /// when `css::apply` reaches it. Unknown variables fall back to their default, if any.
     pub fn expand(&self, styles: &mut Vec<(String, String)>) {
+        self.expand_styles(styles);
         let mut bound = Vec::new();
         for (k, v) in styles.iter_mut() {
+            if k.starts_with(css::TOKEN_MARKER) {
+                continue;
+            }
             if let Some(t) = var_name(v).and_then(|n| self.by_css_name(n))
                 && let Some(lit) = self.resolve(&t.id)
             {
@@ -883,10 +907,12 @@ impl TokenSet {
     pub fn diff(&self, before: &TokenSet) -> Vec<TokenEdit> {
         let systems = diff_list(&before.systems, &self.systems);
         let tokens = diff_list(&before.tokens, &self.tokens);
+        let styles = diff_list(&before.styles, &self.styles);
         systems
             .into_iter()
             .map(TokenEdit::System)
             .chain(tokens.into_iter().map(TokenEdit::Token))
+            .chain(styles.into_iter().map(|e| TokenEdit::Style(Box::new(e))))
             .collect()
     }
 
@@ -895,14 +921,19 @@ impl TokenSet {
     pub fn apply_edits(&mut self, edits: &[TokenEdit], forward: bool) {
         let systems = edits.iter().filter_map(|e| match e {
             TokenEdit::System(e) => Some(e),
-            TokenEdit::Token(_) => None,
+            _ => None,
         });
         apply_list(&mut self.systems, systems, forward);
         let tokens = edits.iter().filter_map(|e| match e {
             TokenEdit::Token(e) => Some(e),
-            TokenEdit::System(_) => None,
+            _ => None,
         });
         apply_list(&mut self.tokens, tokens, forward);
+        let styles = edits.iter().filter_map(|e| match e {
+            TokenEdit::Style(e) => Some(&**e),
+            _ => None,
+        });
+        apply_list(&mut self.styles, styles, forward);
     }
 
     // ------------------------------------------------------------------ design systems
@@ -944,7 +975,12 @@ impl TokenSet {
 
     /// Start using a design system. Fails, changing nothing, when the project already uses
     /// it or another system with the same prefix, or when one of its CSS names is taken.
-    pub fn attach(&mut self, link: SystemLink, published: &[Token]) -> Result<(), String> {
+    pub fn attach(
+        &mut self,
+        link: SystemLink,
+        published: &[Token],
+        styles: &[TextStyleDef],
+    ) -> Result<(), String> {
         if self.system(&link.id).is_some() {
             return Err(format!(
                 "This file already uses the {} design system.",
@@ -964,6 +1000,7 @@ impl TokenSet {
             .filter(|s| taken.contains(s))
             .map(|s| format!("--{s}"))
             .collect();
+        clashes.extend(self.style_clashes(&link.prefix, styles));
         clashes.dedup();
         if !clashes.is_empty() {
             let more = clashes.len().saturating_sub(5);
@@ -978,19 +1015,21 @@ impl TokenSet {
             ));
         }
         self.tokens.extend(Self::linked(&link.id, published));
+        self.styles.extend(Self::linked_styles(&link.id, styles));
         self.systems.push(link);
         Ok(())
     }
 
     /// Switch a design system to another published version. Tokens keep their place, new
     /// ones go at the end, and a local alias to a dropped token takes on the value it
-    /// showed. Returns the dropped tokens as (id, CSS name). Layers bound to them keep their
-    /// values; their bindings point at nothing and go when the layer is next edited, or come
-    /// back if the update is undone.
+    /// showed. Returns the dropped tokens and styles as (id, CSS name or `.class`). Layers
+    /// bound to them keep their values; their bindings point at nothing and go when the layer
+    /// is next edited, or come back if the update is undone.
     pub fn update_system(
         &mut self,
         link: SystemLink,
         published: &[Token],
+        styles: &[TextStyleDef],
     ) -> Vec<(String, String)> {
         let Some(at) = self.systems.iter().position(|s| s.id == link.id) else {
             return Vec::new();
@@ -1015,21 +1054,25 @@ impl TokenSet {
             .filter(|n| self.get(&n.id).is_none())
             .collect();
         self.tokens.extend(fresh);
+        let mut gone = gone;
+        gone.extend(self.replace_linked_styles(&link.id, Self::linked_styles(&link.id, styles)));
         self.systems[at] = link;
         gone
     }
 
     /// Stop using a design system. Local aliases to its tokens take on the values they
-    /// showed. Returns the removed token ids.
+    /// showed. Returns the removed token and style ids.
     pub fn remove_system(&mut self, id: &str) -> Vec<String> {
-        let ids: Vec<String> = self
+        let mut ids: Vec<String> = self
             .tokens
             .iter()
             .filter(|t| t.system.as_deref() == Some(id))
             .map(|t| t.id.clone())
             .collect();
+        let styles = self.replace_linked_styles(id, Vec::new());
         self.remove(&ids);
         self.systems.retain(|s| s.id != id);
+        ids.extend(styles.into_iter().map(|(id, _)| id));
         ids
     }
 
@@ -1047,6 +1090,7 @@ impl TokenSet {
                 *t = l.clone();
             }
         }
+        self.detach_styles(id);
         self.systems.retain(|s| s.id != id);
     }
 }
@@ -1061,7 +1105,7 @@ pub fn merge_edits(older: &mut Vec<TokenEdit>, newer: Vec<TokenEdit>) {
     older.retain(TokenEdit::changes);
 }
 
-fn check_description(d: Option<&str>) -> Result<(), String> {
+pub(super) fn check_description(d: Option<&str>) -> Result<(), String> {
     match d {
         Some(d) if d.chars().count() > MAX_DESCRIPTION => Err(format!(
             "Token descriptions can be at most {MAX_DESCRIPTION} characters."
@@ -1555,7 +1599,7 @@ mod tests {
             notes: None,
         };
         let mut s = TokenSet::default();
-        s.attach(link, &src.publishable()).unwrap();
+        s.attach(link, &src.publishable(), &[]).unwrap();
         s
     }
 

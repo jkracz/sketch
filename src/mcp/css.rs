@@ -50,12 +50,16 @@ pub fn parse_inline(s: &str) -> Styles {
 }
 
 /// A JSON style object (`{"padding": 8, "color": "#000"}`) as styles. Numbers become px for
-/// lengths and stay unitless for the few unitless properties.
+/// lengths and stay unitless for the few unitless properties. JSON objects lose their key
+/// order, so `textStyle` goes first and the other keys override its fields.
 pub fn from_json(v: &Value) -> Result<Styles, String> {
     let Some(m) = v.as_object() else {
         return Err("styles must be an object".into());
     };
-    Ok(m.iter()
+    let mut entries: Vec<(&String, &Value)> = m.iter().collect();
+    entries.sort_by_key(|(k, _)| camel(k) != "textStyle");
+    Ok(entries
+        .into_iter()
         .filter_map(|(k, v)| {
             let s = match v {
                 Value::String(s) => s.clone(),
@@ -505,6 +509,8 @@ pub fn url(s: &str) -> Option<String> {
 /// Style key prefix that binds a property to a token: `<marker><cssKey>` holds the token id.
 /// [`crate::model::TokenSet::expand`] adds these after replacing `var(--token)`.
 pub const TOKEN_MARKER: &str = "--token:";
+/// Carries the style id from `TokenSet::expand_styles`; text children inherit it.
+pub const STYLE_MARKER: &str = "--token:textStyle";
 
 /// Where the node sits, for properties whose meaning depends on the parent.
 #[derive(Debug, Clone, Copy, Default)]
@@ -684,6 +690,20 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
     let fs = n.kind.font_size().unwrap_or(16.0);
     for (k, v) in styles {
         let v = v.trim();
+        if k == STYLE_MARKER {
+            if matches!(n.kind, NodeKind::Text { .. }) {
+                for f in crate::model::StyleField::ALL {
+                    if let Some(p) = f.prop() {
+                        n.tokens.remove(&p);
+                    }
+                }
+                n.text_style_ref = Some(crate::model::TextStyleRef {
+                    id: v.to_string(),
+                    overrides: Default::default(),
+                });
+            }
+            continue;
+        }
         if let Some(key) = k.strip_prefix(TOKEN_MARKER) {
             if let Some(prop) = TokenProp::from_css_key(key, n) {
                 n.tokens.insert(prop, v.to_string());

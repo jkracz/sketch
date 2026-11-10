@@ -88,6 +88,7 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     }
     if !ov("font") {
         inst.text_style = main.text_style.clone();
+        inst.text_style_ref = main.text_style_ref.clone();
     }
     if !ov("visible") {
         inst.visible = main.visible;
@@ -309,6 +310,7 @@ impl Editor {
             .unwrap_or_default();
         self.reroute_connectors(&touched);
         self.drop_broken_bindings();
+        self.check_text_style_refs();
     }
 
     /// Record that `prop` was explicitly changed on nodes inside instances.

@@ -11,6 +11,7 @@ pub mod snap;
 pub mod structure;
 pub mod systems;
 pub mod text_edit;
+pub mod text_styles;
 pub mod tokens;
 pub mod vector_ops;
 pub mod whiteboard;

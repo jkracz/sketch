@@ -12,7 +12,7 @@ pub struct SystemUpdate {
     pub name: String,
     pub from: u32,
     pub to: u32,
-    /// CSS names of tokens the new version no longer has.
+    /// CSS names of tokens, and classes of text styles, the new version no longer has.
     pub removed: Vec<String>,
     /// Layers, on every page, that were bound to those tokens.
     pub unbound: usize,
@@ -51,7 +51,9 @@ impl Editor {
             ));
         }
         let label = format!("Use {} design system", p.name);
-        self.edit_tokens(&label, None, |t| t.attach(p.link(), &p.tokens))
+        self.edit_tokens(&label, None, |t| {
+            t.attach(p.link(), &p.tokens, &p.text_styles)
+        })
     }
 
     /// Move a design system this file uses to `p`, when `p` is newer. None when the file
@@ -62,7 +64,9 @@ impl Editor {
             return None;
         }
         let label = format!("Update {} to v{}", p.name, p.release);
-        let gone = self.edit_tokens(&label, None, |t| t.update_system(p.link(), &p.tokens));
+        let gone = self.edit_tokens(&label, None, |t| {
+            t.update_system(p.link(), &p.tokens, &p.text_styles)
+        });
         let ids: Vec<String> = gone.iter().map(|(id, _)| id.clone()).collect();
         Some(SystemUpdate {
             name: p.name.clone(),
@@ -97,7 +101,7 @@ impl Editor {
             .ok_or_else(|| "This file doesn't use that design system.".to_string())
     }
 
-    /// Layers on any page with a property bound to one of these tokens.
+    /// Layers on any page using these token or style ids.
     fn layers_bound_to(&self, ids: &[String]) -> usize {
         let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
         (0..self.pages.len())
@@ -105,7 +109,12 @@ impl Editor {
                 self.page_doc(i)
                     .nodes
                     .values()
-                    .filter(|n| n.tokens.values().any(|t| ids.contains(t.as_str())))
+                    .filter(|n| {
+                        n.tokens.values().any(|t| ids.contains(t.as_str()))
+                            || n.text_style_ref
+                                .as_ref()
+                                .is_some_and(|r| ids.contains(r.id.as_str()))
+                    })
                     .count()
             })
             .sum()

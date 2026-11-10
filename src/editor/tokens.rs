@@ -1,13 +1,12 @@
 //! Design tokens in the editor: undoable token edits, binding node properties to tokens, and
-//! keeping bound properties on every page in step with their tokens.
+//! keeping bound properties and text styles on every page in step with their tokens.
 
 use super::Editor;
 use crate::history::Recording;
 use crate::model::{Node, NodeId, TokenClip, TokenProp, TokenSet};
 
 impl Editor {
-    /// Change the project's tokens as one undo step on the active page. Bound properties on
-    /// every page follow. `key` merges repeated edits, as a drag on a color picker makes.
+    /// Edit tokens or text styles as one undo step; all pages follow. `key` merges repeated edits.
     pub fn edit_tokens<R>(
         &mut self,
         label: &str,
@@ -111,10 +110,9 @@ impl Editor {
         }
     }
 
-    /// Bring every page's bound properties up to their tokens. The values are derived from
-    /// the tokens, so this isn't an undo step, and undo calls it again afterwards.
+    /// Sync bound fields on every page. These derived values need no undo step; undo resyncs them.
     pub fn sync_tokens(&mut self) {
-        if self.tokens.is_empty() {
+        if self.tokens.is_blank() {
             return;
         }
         for i in 0..self.pages.len() {
@@ -126,7 +124,7 @@ impl Editor {
                 .filter(|n| {
                     n.tokens.iter().any(|(prop, token)| {
                         tokens.resolve(token).is_some_and(|v| !prop.holds(n, &v))
-                    })
+                    }) || self.style_is_stale(n)
                 })
                 .map(|n| n.id)
                 .collect();
@@ -151,6 +149,7 @@ impl Editor {
                         prop.write(n, &v);
                     }
                 }
+                Self::write_style_values(&tokens, n);
             }
         }
         for id in ids {

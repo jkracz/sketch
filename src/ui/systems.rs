@@ -97,7 +97,11 @@ impl SystemsUi {
         match (&ed.published, &self.snapshot.own) {
             (None, _) => false,
             (Some(_), None) => true,
-            (Some(l), Some(p)) => p.tokens != ed.tokens.publishable() || p.link() != *l,
+            (Some(l), Some(p)) => {
+                p.tokens != ed.tokens.publishable()
+                    || p.text_styles != ed.tokens.publishable_styles()
+                    || p.link() != *l
+            }
         }
     }
 
@@ -149,7 +153,8 @@ pub fn header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
 /// Entries for the Tokens tab's More menu.
 pub fn menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     st.systems.refresh(ed);
-    let has_local = !ed.tokens.publishable().is_empty();
+    let has_local =
+        !ed.tokens.publishable().is_empty() || !ed.tokens.publishable_styles().is_empty();
     let label = if ed.published.is_some() {
         "Publish changes…"
     } else {
@@ -363,9 +368,19 @@ pub fn dialog(ctx: &egui::Context, ed: &mut Editor, st: &mut UiState) {
         );
         ui.add_space(6.0);
         let prefix = d.prefix.trim();
-        let c = systems::changes(own.as_ref(), prefix, &ed.tokens.publishable());
+        let styles = ed.tokens.publishable_styles();
+        let tokens = ed.tokens.publishable();
+        let c = systems::changes(own.as_ref(), prefix, &tokens, &styles);
         let summary = if own.is_none() {
-            format!("Publishes {}.", plural(c.added.len(), "token"))
+            let tokens = tokens.len();
+            match styles.len() {
+                0 => format!("Publishes {}.", plural(tokens, "token")),
+                n => format!(
+                    "Publishes {} and {}.",
+                    plural(tokens, "token"),
+                    plural(n, "text style")
+                ),
+            }
         } else if c.is_empty() {
             "No token changes since the last publish.".to_string()
         } else {

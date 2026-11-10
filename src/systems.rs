@@ -6,7 +6,9 @@
 //! saw (see `TokenSet::attach`) and move to a newer one when they open.
 
 use crate::editor::Editor;
-use crate::model::{SystemLink, Token, TokenSet, tokens::css_slug};
+use crate::model::{
+    SystemLink, TextStyleDef, Token, TokenSet, text_styles::style_slug, tokens::css_slug,
+};
 use crate::project::{Store, new_id, now_ms};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -40,6 +42,9 @@ pub struct Published {
     pub published: u64,
     /// Local tokens only, with aliases to other systems flattened (`TokenSet::publishable`).
     pub tokens: Vec<Token>,
+    /// Local text styles, flattened the same way (`TokenSet::publishable_styles`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_styles: Vec<TextStyleDef>,
 }
 
 impl Published {
@@ -64,7 +69,7 @@ impl Published {
     pub fn token_set(&self) -> TokenSet {
         let mut s = TokenSet::default();
         // A fresh set can't clash or share a prefix, so this can't fail.
-        let _ = s.attach(self.link(), &self.tokens);
+        let _ = s.attach(self.link(), &self.tokens, &self.text_styles);
         s
     }
 }
@@ -325,8 +330,11 @@ pub fn publish(
         limit("The notes", n, MAX_NOTES)?;
     }
     let tokens = ed.tokens.publishable();
-    if tokens.is_empty() {
-        return Err("Add at least one token before publishing a design system.".into());
+    let text_styles = ed.tokens.publishable_styles();
+    if tokens.is_empty() && text_styles.is_empty() {
+        return Err(
+            "Add at least one token or text style before publishing a design system.".into(),
+        );
     }
     let release = old
         .as_ref()
@@ -346,6 +354,7 @@ pub fn publish(
         source: project_id.to_string(),
         published: now_ms(),
         tokens,
+        text_styles,
     };
     let report = report(store, old.as_ref(), system);
     reg.save(&report.system).map_err(|e| e.to_string())?;
@@ -354,7 +363,8 @@ pub fn publish(
     Ok(report)
 }
 
-/// Tokens a publish would add, change and remove, as CSS names with `prefix`.
+/// Tokens and text styles a publish would add, change and remove, as CSS names and classes
+/// with `prefix`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
     pub added: Vec<String>,
@@ -368,24 +378,49 @@ impl Changes {
     }
 }
 
-pub fn changes(old: Option<&Published>, prefix: &str, tokens: &[Token]) -> Changes {
-    let css = |t: &Token| format!("--{prefix}-{}", css_slug(&t.name));
-    let old_tokens = old.map(|o| o.tokens.as_slice()).unwrap_or_default();
-    let find = |list: &[Token], id: &str| list.iter().find(|t| t.id == id).cloned();
+pub fn changes(
+    old: Option<&Published>,
+    prefix: &str,
+    tokens: &[Token],
+    styles: &[TextStyleDef],
+) -> Changes {
     let mut c = Changes::default();
-    for t in tokens {
-        match find(old_tokens, &t.id) {
-            None => c.added.push(css(t)),
-            Some(o) if o != *t => c.changed.push(css(t)),
+    let old_tokens = old.map(|o| o.tokens.as_slice()).unwrap_or_default();
+    diff_into(
+        &mut c,
+        old_tokens,
+        tokens,
+        |t| t.id.as_str(),
+        |t| format!("--{prefix}-{}", css_slug(&t.name)),
+    );
+    let old_styles = old.map(|o| o.text_styles.as_slice()).unwrap_or_default();
+    diff_into(
+        &mut c,
+        old_styles,
+        styles,
+        |s| s.id.as_str(),
+        |s| format!(".{prefix}-{}", style_slug(&s.name)),
+    );
+    c
+}
+
+fn diff_into<T: PartialEq>(
+    c: &mut Changes,
+    old: &[T],
+    new: &[T],
+    id: impl Fn(&T) -> &str,
+    name: impl Fn(&T) -> String,
+) {
+    let find = |list: &'_ [T], key: &str| list.iter().position(|t| id(t) == key);
+    for t in new {
+        match find(old, id(t)) {
+            None => c.added.push(name(t)),
+            Some(i) if old[i] != *t => c.changed.push(name(t)),
             Some(_) => {}
         }
     }
-    c.removed = old_tokens
-        .iter()
-        .filter(|o| find(tokens, &o.id).is_none())
-        .map(css)
-        .collect();
-    c
+    c.removed
+        .extend(old.iter().filter(|o| find(new, id(o)).is_none()).map(&name));
 }
 
 /// Projects in the store that use design system `id`.
@@ -402,7 +437,7 @@ fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishR
         added,
         changed,
         removed,
-    } = changes(old, &system.prefix, &system.tokens);
+    } = changes(old, &system.prefix, &system.tokens, &system.text_styles);
     let users = users(store, &system.id);
     PublishReport {
         system,
@@ -418,7 +453,11 @@ fn report(store: &Store, old: Option<&Published>, system: Published) -> PublishR
 pub fn has_unpublished_changes(store: &Store, ed: &Editor) -> bool {
     let Some(l) = &ed.published else { return false };
     match Registry::in_store(store).get(&l.id) {
-        Some(p) => p.tokens != ed.tokens.publishable() || p.link() != *l,
+        Some(p) => {
+            p.tokens != ed.tokens.publishable()
+                || p.text_styles != ed.tokens.publishable_styles()
+                || p.link() != *l
+        }
         None => true,
     }
 }
@@ -719,6 +758,109 @@ mod tests {
         assert!(p.manifest.published.is_none());
     }
 
+    fn add_heading(ed: &mut Editor) -> String {
+        ed.edit_tokens("add", None, |t| {
+            t.create(crate::model::TokenKind::FontSize, "size", "24px", None)
+                .unwrap();
+            let mut i = crate::model::StyleInput::default();
+            i.set(crate::model::StyleField::Size, "var(--size)".into());
+            t.create_style("Heading", &i, None).unwrap()
+        })
+    }
+
+    fn text_layer(ed: &mut Editor) -> crate::model::NodeId {
+        ed.edit("add", |tx| {
+            let id = tx.alloc_id();
+            tx.insert(
+                Node::new(
+                    id,
+                    NodeKind::Text {
+                        text: "Hi".into(),
+                        font_size: 16.0,
+                        auto_width: true,
+                        align: Default::default(),
+                    },
+                    Rect::new(0.0, 0.0, 10.0, 10.0),
+                ),
+                None,
+                None,
+            )
+        })
+    }
+
+    #[test]
+    fn text_styles_publish_with_the_prefix_and_follow_new_versions() {
+        let store = temp_store();
+        let (s, mut ed) = source(&store);
+        let heading = add_heading(&mut ed);
+        let r = publish_open(&s, &mut ed, &PublishRequest::default());
+        assert!(
+            r.added.contains(&".brand-heading".to_string()),
+            "{:?}",
+            r.added
+        );
+        let (c, mut app, _) = consumer(&store, &r.system);
+        let style = app
+            .tokens
+            .style_by_name(".brand-heading")
+            .unwrap()
+            .id
+            .clone();
+        let err = app
+            .edit_tokens("edit", None, |t| {
+                t.update_style(&style, Some("x"), &Default::default(), None)
+            })
+            .unwrap_err();
+        assert!(err.contains("design system"), "{err}");
+        let id = text_layer(&mut app);
+        app.apply_text_style(&[id], &style);
+        assert_eq!(app.doc.get(id).unwrap().kind.font_size(), Some(24.0));
+        let mut c = c;
+        c.save(&mut app).unwrap();
+        let dir = c.project.as_ref().unwrap().dir.clone();
+
+        let size = ed.tokens.by_css_name("--size").unwrap().id.clone();
+        ed.edit_tokens("edit", None, |t| t.update(&size, None, Some("40px"), None))
+            .unwrap();
+        assert!(has_unpublished_changes(&store, &ed));
+        publish_open(&s, &mut ed, &PublishRequest::default());
+        let mut c = Session::new(store.clone());
+        let mut app = Editor::default();
+        c.open(&mut app, &dir).unwrap();
+        assert_eq!(app.doc.get(id).unwrap().kind.font_size(), Some(40.0));
+
+        ed.edit_tokens("delete", None, |t| t.delete_styles(&[heading]));
+        let r = publish_open(&s, &mut ed, &PublishRequest::default());
+        assert_eq!(r.removed, [".brand-heading"]);
+        let u = app.update_system(&r.system).unwrap();
+        assert_eq!(u.removed, [".brand-heading"]);
+        assert_eq!(u.unbound, 1);
+        assert_eq!(app.doc.get(id).unwrap().kind.font_size(), Some(40.0));
+        assert!(app.bound_style(app.doc.get(id).unwrap()).is_none());
+    }
+
+    #[test]
+    fn detaching_a_system_keeps_its_style_classes() {
+        let store = temp_store();
+        let (s, mut ed) = source(&store);
+        add_heading(&mut ed);
+        let r = publish_open(&s, &mut ed, &PublishRequest::default());
+        let (_c, mut app, _) = consumer(&store, &r.system);
+        let style = app
+            .tokens
+            .style_by_name(".brand-heading")
+            .unwrap()
+            .id
+            .clone();
+        app.detach_system(&r.system.id).unwrap();
+        let st = app.tokens.style(&style).unwrap();
+        assert!(st.system.is_none());
+        assert_eq!(app.tokens.style_class(st), "brand-heading");
+        app.undo();
+        app.remove_system(&r.system.id).unwrap();
+        assert!(app.tokens.styles().is_empty());
+    }
+
     #[test]
     fn linked_ids_only_resolve_where_the_system_is_used() {
         let mut a = TokenSet::default();
@@ -735,9 +877,10 @@ mod tests {
             source: "src".into(),
             published: 0,
             tokens: a.publishable(),
+            text_styles: Vec::new(),
         };
         let mut used = TokenSet::default();
-        used.attach(p.link(), &p.tokens).unwrap();
+        used.attach(p.link(), &p.tokens, &[]).unwrap();
         let id = crate::model::tokens::linked_id("abc", &p.tokens[0].id);
         assert!(used.get(&id).is_some());
         assert!(TokenSet::default().get(&id).is_none());
