@@ -57,8 +57,9 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "update_library_items",
-            "Renames or removes personal library items, applied in order: {itemId, name} \
-             renames, {itemId, delete: true} removes. Removing an item can't be undone, so \
+            "Renames or removes personal library items: {itemId, name} renames, {itemId, \
+             delete: true} removes. Each update names a different item, by its id or current \
+             name; if any can't be found, nothing changes. Removing an item can't be undone, so \
              confirm with the user first. Layers placed from it stay. Works without an open \
              project.",
             json!({"updates": {"type": "array", "minItems": 1, "items": {
@@ -110,11 +111,12 @@ pub fn definitions() -> Vec<Value> {
 }
 
 /// Whether a call needs no open project: the library list and edits, and an import that
-/// makes a new project.
+/// makes a new project or fills the library.
 pub(super) fn is_global(name: &str, a: &Args) -> bool {
     GLOBAL.contains(&name)
         || (name == "import_excalidraw"
-            && a.get("createFile").and_then(Value::as_bool) == Some(true))
+            && (a.get("createFile").and_then(Value::as_bool) == Some(true)
+                || source(a).is_ok_and(|(json, _)| is_library(&json))))
 }
 
 /// Run a call [`is_global`] accepts.
@@ -122,7 +124,7 @@ pub(super) fn call_global(host: &mut dyn Host, name: &str, a: &Args) -> ToolResu
     match name {
         "list_library_items" => list_items(host),
         "update_library_items" => update_items(host, a),
-        _ => import_as_file(host, a),
+        _ => import_as_file_or_library(host, a),
     }
 }
 
@@ -316,9 +318,6 @@ fn import_library(host: &mut dyn Host, json: &str) -> ToolResult {
 
 fn import_into_page(host: &mut dyn Host, a: &Args) -> ToolResult {
     let (json, name) = source(a)?;
-    if is_library(&json) {
-        return import_library(host, &json);
-    }
     let doc = crate::io::excalidraw::import_scene(&json)?;
     let nodes: Vec<_> = (doc.paint_order().into_iter())
         .filter_map(|id| doc.get(id).cloned())
@@ -344,9 +343,13 @@ fn import_into_page(host: &mut dyn Host, a: &Args) -> ToolResult {
     }))
 }
 
-fn import_as_file(host: &mut dyn Host, a: &Args) -> ToolResult {
+/// A library into the personal library; a scene into a new project (createFile).
+fn import_as_file_or_library(host: &mut dyn Host, a: &Args) -> ToolResult {
     let (json, stem) = source(a)?;
     if is_library(&json) {
+        if a.get("createFile").and_then(Value::as_bool) != Some(true) {
+            return import_library(host, &json);
+        }
         return Err(
             "that is an Excalidraw library; import it without createFile to add its items to \
              the personal library"

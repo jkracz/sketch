@@ -135,11 +135,64 @@ fn library_add_insert_rename_and_remove() {
     );
 }
 
+/// The app showing its home screen: no canvas.
+struct Home(exec::SessionHost);
+
+impl exec::Host for Home {
+    fn editor(&mut self) -> &mut sketch_rs::editor::Editor {
+        self.0.editor()
+    }
+    fn store(&self) -> &Store {
+        self.0.store()
+    }
+    fn project(&self) -> Option<&sketch_rs::project::Project> {
+        None
+    }
+    fn canvas_open(&self) -> bool {
+        false
+    }
+    fn open_project(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        self.0.open_project(dir)
+    }
+    fn project_moved(&mut self, dir: &std::path::Path) {
+        self.0.project_moved(dir)
+    }
+    fn save(&mut self) -> Result<(), String> {
+        self.0.save()
+    }
+    fn close_project(&mut self) -> Result<(), String> {
+        self.0.close_project()
+    }
+    fn gpu(&mut self) -> Option<sketch_rs::render::gpu::Headless> {
+        None
+    }
+    fn library(&mut self) -> &mut sketch_rs::library::Library {
+        self.0.library()
+    }
+}
+
 #[test]
 fn library_tools_work_from_the_home_screen() {
-    // No project open.
-    let mut h = exec::SessionHost::new(store());
-    assert!(!names(&call(&mut h, "list_library_items", json!({}))).is_empty());
+    let mut h = Home(exec::SessionHost::new(store()));
+    let run = |h: &mut Home, name: &str, args: Value| exec::call(h, name, &args);
+    let list = |h: &mut Home| match run(h, "list_library_items", json!({})).unwrap().remove(0) {
+        Out::Text(t) => serde_json::from_str::<Value>(&t).unwrap(),
+        _ => panic!(),
+    };
+    let before = names(&list(&mut h)).len();
+    assert!(before > 0);
+    // A library file imports without a project; a scene onto a page needs one.
+    run(&mut h, "import_excalidraw", json!({"path": LIB})).unwrap();
+    assert_eq!(names(&list(&mut h)).len(), before + 2);
+    let e = run(&mut h, "import_excalidraw", json!({"path": SCENE})).unwrap_err();
+    assert!(e.contains("No project is open"), "{e}");
+    run(
+        &mut h,
+        "update_library_items",
+        json!({"updates": [{"itemId": "Button", "delete": true}]}),
+    )
+    .unwrap();
+    assert_eq!(names(&list(&mut h)).len(), before + 1);
     let defs = sketch_rs::mcp::tools::definitions();
     let def = |n: &str| defs.iter().find(|t| t["name"] == n).unwrap().clone();
     assert!(def("list_library_items")["inputSchema"]["properties"]["fileId"].is_null());
