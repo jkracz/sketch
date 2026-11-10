@@ -172,6 +172,7 @@ written for Paper work here too.
 | Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens`, `create_text_styles`, `set_text_styles` |
 | Design systems | `list_design_systems`, `get_design_system` (filter by type or name), `use_design_system`, `remove_design_system`, `publish_design_system` |
 | Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `update_arrows` (rebind, reroute, heads), `create_stroke` (pencil), `select_nodes`, `undo`, `redo` |
+| Library & import | `list_library_items`, `add_library_item`, `insert_library_item`, `update_library_items` (rename, remove), `import_excalidraw` (scene onto a page or into a new project; `.excalidrawlib` into the library) |
 | Vectors & rich text | `boolean_nodes`, `flatten_nodes`, `set_vector_points` (points or SVG `d`), `set_text_range_styles` (style part of a text) |
 
 `write_html` takes HTML with inline styles: flexbox (`display:flex`, direction, gap, padding,

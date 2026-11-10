@@ -39,6 +39,9 @@ with update_arrows. Pencil strokes: create_stroke. Hand-drawn style: update_styl
 - Vectors: boolean_nodes (union, subtract, intersect, exclude), flatten_nodes, and \
 set_vector_points to edit a path's points. Bold or color part of a text with \
 set_text_range_styles.
+- The personal library holds reusable shapes for every project: list_library_items, \
+add_library_item, insert_library_item, update_library_items. import_excalidraw brings in \
+.excalidraw scenes and .excalidrawlib libraries.
 - Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
 var(--token) in update_styles and write_html styles to bind a property to a token, so later \
 token changes reach it.
@@ -223,6 +226,7 @@ pub fn definitions() -> Vec<Value> {
     v.extend(super::pages::definitions());
     v.extend(super::projects::definitions());
     v.extend(super::vectors::definitions());
+    v.extend(super::library::definitions());
     v
 }
 
@@ -939,6 +943,15 @@ Rich text: set_text_range_styles styles part of a text layer, picked by `match` 
 start/end character offsets: fontWeight, fontStyle, fontFamily, fontSize, color,
 textDecoration. reset: true returns the range to the layer's style. get_node_info lists styled
 ranges as `textRanges`. write_html can also write runs with <b>, <i> and <span style>.
+
+Personal library: reusable shapes the user keeps across projects (the Library tab).
+list_library_items shows them; add_library_item saves copies of layers as an item;
+insert_library_item places one on a page (centered on x/y, else in free space);
+update_library_items renames or removes items. Library changes save at once and are not undo
+steps, so ask before removing an item.
+
+Excalidraw: import_excalidraw takes a path or the JSON. A scene lands on the page (or becomes a
+new project with createFile: true); a .excalidrawlib adds its items to the personal library.
 
 Design tokens: get_tokens first, and reuse what's there. create_tokens adds project-wide CSS
 variables; set_tokens renames, changes or deletes them. A style whose whole value is
