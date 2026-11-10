@@ -1,10 +1,11 @@
 //! The Tokens tab of the left sidebar: add, edit, duplicate, copy and delete design tokens,
-//! with the design systems this project uses listed below its own tokens (`ui::systems`).
-//! Also the token picker the inspector opens next to a bindable property.
+//! with a column per mode, and the design systems this project uses listed below its own
+//! tokens (`ui::systems`). Also the token picker the inspector opens next to a bindable
+//! property.
 
 use super::{UiState, c32, from32};
 use crate::editor::Editor;
-use crate::model::{NodeId, SystemLink, Token, TokenKind, TokenProp, TokenValue};
+use crate::model::{Mode, NodeId, SystemLink, Token, TokenKind, TokenProp, TokenValue};
 use crate::theme::{self, Icon};
 use egui::{Popup, PopupCloseBehavior, RichText, Ui};
 
@@ -16,13 +17,17 @@ pub struct TokensUi {
     selected: Vec<String>,
     /// The token whose fields are shown under its row.
     open: Option<Draft>,
+    renaming: Option<(String, String)>,
 }
 
 /// Text being edited for the open token. It reaches the token when the field loses focus.
 struct Draft {
     id: String,
     name: String,
+    /// The first mode's value.
     value: String,
+    /// Values for the file's other modes, in order. Empty follows the first.
+    modes: Vec<String>,
     description: String,
     error: Option<String>,
 }
@@ -46,10 +51,20 @@ impl Draft {
             id: t.id.clone(),
             name: t.name.clone(),
             value: ed.tokens.css_value(t),
+            modes: (ed.tokens.modes().iter().skip(1))
+                .map(|m| own_css(ed, t, m))
+                .collect(),
             description: t.description.clone().unwrap_or_default(),
             error: None,
         }
     }
+}
+
+/// `t`'s own value in mode `m` as CSS, or empty when it follows the first mode.
+fn own_css(ed: &Editor, t: &Token, m: &Mode) -> String {
+    t.modes
+        .get(&m.id)
+        .map_or(String::new(), |v| ed.tokens.value_css(t.kind, v))
 }
 
 const ROW_H: f32 = 24.0;
@@ -104,6 +119,9 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                 .clicked()
             {
                 st.tokens.selected = ed.paste_tokens();
+            }
+            if ui.button("Add mode").clicked() {
+                ed.edit_tokens("Add mode", None, |t| t.add_mode());
             }
             ui.separator();
             super::systems::menu(ui, ed, st);
@@ -170,6 +188,11 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                         super::systems::system_header(ui, ed, st, link)
                     });
                 }
+                if !kinds.is_empty() {
+                    ui.push_id(("modes", sys.as_ref().map(|s| &s.id)), |ui| {
+                        mode_header(ui, ed, st, sys.as_ref())
+                    });
+                }
                 for (kind, list) in kinds {
                     ui.add_space(6.0);
                     super::section(ui, kind.label());
@@ -193,6 +216,86 @@ fn label(ed: &Editor, t: &Token) -> String {
     }
 }
 
+fn columns(r: egui::Rect, n: usize) -> Vec<egui::Rect> {
+    let w = (r.width() * 0.55 / n as f32).min(84.0);
+    (0..n)
+        .map(|i| {
+            let right = r.right() - 6.0 - (n - 1 - i) as f32 * w;
+            egui::Rect::from_min_max(
+                egui::pos2(right - w + 4.0, r.top()),
+                egui::pos2(right, r.bottom()),
+            )
+        })
+        .collect()
+}
+
+fn mode_header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, sys: Option<&SystemLink>) {
+    let modes: Vec<Mode> = match sys {
+        Some(l) => l.modes.clone(),
+        None => ed.tokens.modes().to_vec(),
+    };
+    // A file's only mode still shows, so it can be renamed.
+    if modes.len() < 2 && sys.is_some() {
+        return;
+    }
+    let p = theme::pal(ui);
+    let (r, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+    for (m, col) in modes.iter().zip(columns(r, modes.len())) {
+        let resp = ui.interact(col, ui.id().with(&m.id), egui::Sense::click());
+        let color = if resp.hovered() { p.text } else { p.secondary };
+        let g = ui.painter().layout_no_wrap(
+            m.name.clone(),
+            egui::FontId::proportional(theme::SECONDARY),
+            color,
+        );
+        ui.painter()
+            .with_clip_rect(col.intersect(ui.clip_rect()))
+            .galley(
+                egui::pos2(col.left(), col.center().y - g.size().y / 2.0),
+                g,
+                color,
+            );
+        if sys.is_some() {
+            resp.on_hover_text("This design system's modes. Pick one on a frame.");
+            continue;
+        }
+        let resp = resp.on_hover_text("Rename or remove this mode");
+        Popup::menu(&resp).show(|ui| mode_menu(ui, ed, st, m));
+    }
+}
+
+fn mode_menu(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, m: &Mode) {
+    let tk = &mut st.tokens;
+    if tk.renaming.as_ref().is_none_or(|(id, _)| *id != m.id) {
+        tk.renaming = Some((m.id.clone(), m.name.clone()));
+    }
+    let Some((_, text)) = &mut tk.renaming else {
+        return;
+    };
+    let field = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
+    if committed(ui, &field) && *text != m.name {
+        let name = text.clone();
+        if let Err(e) = ed.edit_tokens("Rename mode", None, |t| t.rename_mode(&m.id, &name)) {
+            ed.status = e;
+        }
+        tk.renaming = None;
+    }
+    let last = ed.tokens.modes().len() < 2;
+    if ui
+        .add_enabled(!last, egui::Button::new("Remove mode"))
+        .on_hover_text("Its values go. Frames that picked it follow the frame they sit in.")
+        .clicked()
+    {
+        if let Err(e) = ed.edit_tokens("Remove mode", None, |t| t.delete_mode(&m.id)) {
+            ed.status = e;
+        }
+        tk.renaming = None;
+        tk.open = None;
+        ui.close();
+    }
+}
+
 fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token, visible: &[String]) {
     let p = theme::pal(ui);
     let (r, resp) = ui.allocate_exact_size(
@@ -204,6 +307,27 @@ fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token, visible: &[Str
         ui.painter().rect_filled(r, 6.0, p.pressed);
     } else if resp.hovered() {
         ui.painter().rect_filled(r, 6.0, p.hover);
+    }
+    let modes = ed.tokens.modes_of(t).to_vec();
+    if modes.len() > 1 {
+        mode_cells(ui, ed, t, r, &modes);
+        let name_clip = egui::Rect::from_min_max(
+            egui::pos2(r.left() + 6.0, r.top()),
+            egui::pos2(columns(r, modes.len())[0].left() - 6.0, r.bottom()),
+        );
+        let ng = ui.painter().layout_no_wrap(
+            t.name.clone(),
+            egui::FontId::proportional(theme::BODY),
+            p.text,
+        );
+        ui.painter()
+            .with_clip_rect(name_clip.intersect(ui.clip_rect()))
+            .galley(
+                egui::pos2(name_clip.left(), r.center().y - ng.size().y / 2.0),
+                ng,
+                p.text,
+            );
+        return row_end(ui, ed, st, t, visible, &resp);
     }
     let mut x = r.left() + 6.0;
     if let Some(TokenValue::Color(c)) = ed.tokens.resolve(&t.id) {
@@ -243,6 +367,48 @@ fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token, visible: &[Str
     ui.painter()
         .with_clip_rect(name_clip.intersect(ui.clip_rect()))
         .galley(egui::pos2(x, r.center().y - ng.size().y / 2.0), ng, p.text);
+    row_end(ui, ed, st, t, visible, &resp);
+}
+
+fn mode_cells(ui: &Ui, ed: &Editor, t: &Token, r: egui::Rect, modes: &[Mode]) {
+    let p = theme::pal(ui);
+    for (i, (m, col)) in modes.iter().zip(columns(r, modes.len())).enumerate() {
+        let own = i == 0 || t.modes.contains_key(&m.id);
+        let color = if own { p.secondary } else { p.tertiary };
+        let mut x = col.left();
+        if let Some(TokenValue::Color(c)) = ed.tokens.resolve_in(&t.id, Some(&m.name)) {
+            let dot = egui::Rect::from_min_size(
+                egui::pos2(x, col.center().y - 6.0),
+                egui::vec2(12.0, 12.0),
+            );
+            ui.painter().rect_filled(dot, 3.0, c32(c));
+            ui.painter().rect_stroke(
+                dot,
+                3.0,
+                egui::Stroke::new(1.0, p.separator),
+                egui::StrokeKind::Inside,
+            );
+            x += 16.0;
+        }
+        let g = ui.painter().layout_no_wrap(
+            ed.tokens.css_value_in(t, Some(&m.name)),
+            egui::FontId::proportional(theme::SECONDARY),
+            color,
+        );
+        ui.painter()
+            .with_clip_rect(col.intersect(ui.clip_rect()))
+            .galley(egui::pos2(x, col.center().y - g.size().y / 2.0), g, color);
+    }
+}
+
+fn row_end(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    st: &mut UiState,
+    t: &Token,
+    visible: &[String],
+    resp: &egui::Response,
+) {
     if resp.clicked() {
         click(ui, ed, st, t, visible);
     }
@@ -352,6 +518,9 @@ fn locked_fields(ui: &mut Ui, ed: &Editor, t: &Token) {
     ui.add_space(3.0);
     let small = |s: String| RichText::new(s).size(theme::SECONDARY).color(p.secondary);
     ui.label(small(ed.tokens.css_value(t)));
+    for (m, v) in ed.tokens.own_mode_values(t) {
+        ui.label(small(format!("{m}: {v}")));
+    }
     if let Some(d) = &t.description {
         ui.label(small(d.clone()));
     }
@@ -396,9 +565,14 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
         d.error = r.err();
     }
 
+    let modes = ed.tokens.modes().to_vec();
+    let first = match modes.len() {
+        1 => "Value",
+        _ => modes[0].name.as_str(),
+    };
     let value = ui
         .horizontal(|ui| {
-            label(ui, "Value");
+            label(ui, first);
             let mut w = field_w;
             if let (TokenKind::Color, Some(TokenValue::Color(c))) =
                 (t.kind, &ed.tokens.resolve(&id))
@@ -429,6 +603,52 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
         d.error = r.err();
     }
 
+    d.modes.resize(modes.len().saturating_sub(1), String::new());
+    let mut mode_fields = Vec::new();
+    for (i, m) in modes.iter().enumerate().skip(1) {
+        let text = &mut d.modes[i - 1];
+        let r = ui
+            .horizontal(|ui| {
+                label(ui, &m.name);
+                let mut w = field_w;
+                if let (TokenKind::Color, Some(TokenValue::Color(c))) =
+                    (t.kind, &ed.tokens.resolve_in(&id, Some(&m.name)))
+                {
+                    let mut c2 = c32(*c);
+                    let r = ui.color_edit_button_srgba(&mut c2);
+                    if r.changed() {
+                        let key = format!("{id}/{}", m.id);
+                        ed.edit_tokens("Edit token", Some(&key), |s| {
+                            s.set_value_in(&id, &m.id, TokenValue::Color(from32(c2)))
+                        });
+                        *text = (ed.tokens.get(&id)).map_or(String::new(), |t| own_css(ed, t, m));
+                    }
+                    if r.drag_stopped() || r.lost_focus() {
+                        ed.history.seal();
+                    }
+                    w -= 30.0;
+                }
+                let hint = format!("Same as {}", modes[0].name);
+                ui.add(
+                    egui::TextEdit::singleline(text)
+                        .hint_text(hint)
+                        .desired_width(w),
+                )
+            })
+            .inner;
+        let now = ed
+            .tokens
+            .get(&id)
+            .map(|t| own_css(ed, t, m))
+            .unwrap_or_default();
+        if committed(ui, &r) && *text != now {
+            let raw = Some(text.trim()).filter(|s| !s.is_empty());
+            let res = ed.edit_tokens("Edit token", None, |s| s.update_in_mode(&id, &m.id, raw));
+            d.error = res.err();
+        }
+        mode_fields.push(r);
+    }
+
     let description = ui
         .horizontal(|ui| {
             label(ui, "Note");
@@ -454,6 +674,11 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, t: &Token) {
         }
         if !value.has_focus() {
             d.value = ed.tokens.css_value(now);
+        }
+        for (i, r) in mode_fields.iter().enumerate() {
+            if !r.has_focus() {
+                d.modes[i] = own_css(ed, now, &modes[i + 1]);
+            }
         }
         if !description.has_focus() {
             d.description = now.description.clone().unwrap_or_default();
@@ -553,10 +778,15 @@ fn picker_list(
         return;
     }
     ui.separator();
+    // Values as the selected layer would show them.
+    let mode = (ids.first())
+        .and_then(|id| ed.tokens.mode_at(&ed.doc, *id))
+        .map(String::from);
+    let mode = mode.as_deref();
     let list: Vec<Token> = ed
         .tokens
         .of_kind(prop.kind())
-        .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value(t)))
+        .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value_in(t, mode)))
         .cloned()
         .collect();
     if submitted && let Some(t) = list.first() {
@@ -570,8 +800,8 @@ fn picker_list(
         .show(ui, |ui| {
             for t in &list {
                 let on = bound.is_some_and(|b| b.id == t.id);
-                let value = ed.tokens.css_value(t);
-                let swatch = match ed.tokens.resolve(&t.id) {
+                let value = ed.tokens.css_value_in(t, mode);
+                let swatch = match ed.tokens.resolve_in(&t.id, mode) {
                     Some(TokenValue::Color(c)) => Some(c32(c)),
                     _ => None,
                 };
@@ -849,6 +1079,33 @@ pub(super) mod tests {
         h.step(vec![], &mut f);
         let d = h.st.tokens.open.as_ref().unwrap();
         assert_eq!((d.name.as_str(), d.value.as_str()), ("gutter", "32px"));
+    }
+
+    #[test]
+    fn the_dark_field_sets_and_clears_the_dark_value() {
+        let (mut h, id) = spacing_fields();
+        let mut f = fields_frame(&id);
+        focus_value(&mut h, &mut f);
+        h.step(vec![key(egui::Key::Tab)], &mut f);
+        h.step(vec![], &mut f);
+        h.step(vec![typed("12px")], &mut f);
+        h.step(vec![key(egui::Key::Enter)], &mut f);
+        h.step(vec![], &mut f);
+        let dark = |h: &Harness| h.ed.tokens.resolve_in(&id, Some("Dark"));
+        assert_eq!(dark(&h), Some(TokenValue::Number(12.0)));
+        assert_eq!(value(&h, &id), "8px", "Light keeps its value");
+        h.ed.edit_tokens("clear", None, |t| t.update_in_mode(&id, "dark", None))
+            .unwrap();
+        h.step(vec![], &mut f);
+        assert_eq!(
+            dark(&h),
+            Some(TokenValue::Number(8.0)),
+            "Dark follows Light"
+        );
+        assert_eq!(
+            h.st.tokens.open.as_ref().unwrap().modes,
+            vec![String::new()]
+        );
     }
 
     #[test]

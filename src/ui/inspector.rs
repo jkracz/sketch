@@ -1328,6 +1328,55 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         seal_on_release(ed, &r);
         picker(ui, ed, ids, TokenProp::Opacity);
     });
+    mode_row(ui, ed, ids, first);
+}
+
+/// The token mode a frame shows. Auto follows the frame it sits in.
+fn mode_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
+    if !matches!(first.kind, NodeKind::Frame { .. }) {
+        return;
+    }
+    let choices: Vec<(String, String)> = (ed.tokens.choices().iter())
+        .map(|m| (m.id.clone(), m.name.clone()))
+        .collect();
+    if choices.len() < 2 && first.mode.is_none() {
+        return;
+    }
+    let inherited = first
+        .parent
+        .and_then(|p| ed.tokens.mode_at(&ed.doc, p))
+        .or(choices.first().map(|(_, n)| n.as_str()))
+        .unwrap_or_default();
+    let auto = format!("Auto ({inherited})");
+    let current = (first.mode.as_deref()).filter(|m| ed.tokens.mode_name(m).is_some());
+    let label = current
+        .and_then(|m| ed.tokens.mode_name(m))
+        .unwrap_or(&auto)
+        .to_string();
+    let mut pick: Option<Option<String>> = None;
+    row(ui, "Mode", |ui| {
+        egui::ComboBox::from_id_salt("mode")
+            .selected_text(label)
+            .width(ui.available_width() - 4.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), &auto).clicked() {
+                    pick = Some(None);
+                }
+                for (id, name) in &choices {
+                    if ui
+                        .selectable_label(current == Some(id.as_str()), name)
+                        .clicked()
+                    {
+                        pick = Some(Some(id.clone()));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("The token values this frame and its layers show")
+    });
+    if let Some(m) = pick {
+        ed.set_frame_mode(ids, m.as_deref());
+    }
 }
 
 #[cfg(test)]

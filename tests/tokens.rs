@@ -560,3 +560,211 @@ fn m6_tokens_panel_screenshot() {
     });
     img.save(shot("milestone6_tokens.png")).unwrap();
 }
+
+#[test]
+fn modes_reach_layers_stylesheets_and_agents() {
+    let mut h = host();
+    let r = call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [
+            {"type": "color", "name": "--bg", "value": "#ffffff", "modes": {"Dark": "#111111"}},
+            {"type": "color", "name": "--card", "value": "var(--bg)"},
+            {"type": "color", "name": "--x", "value": "#000000", "modes": {"Dusk": "#000000"}},
+        ]}),
+    );
+    assert_eq!(r["tokens"][1]["result"], "created", "{r}");
+    assert!(
+        r["tokens"][2]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown mode"),
+        "{r}"
+    );
+
+    let list = call(&mut h, "get_tokens", json!({}));
+    assert_eq!(list["modes"], json!(["Light", "Dark"]));
+    assert_eq!(list["tokens"][0]["modes"], json!({"Dark": "#111111"}));
+    assert!(list["tokens"][1].get("modes").is_none(), "{list}");
+    let css = call(&mut h, "get_tokens", json!({"format": "css"}));
+    let dark = css
+        .as_str()
+        .unwrap()
+        .split_once("[data-theme=\"dark\"]")
+        .unwrap()
+        .1;
+    assert!(
+        dark.contains("--bg: #111111;") && dark.contains("--card: var(--bg);"),
+        "{css}"
+    );
+
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<div data-theme=\"dark\" style=\"background-color: var(--bg); width: 100px; height: 100px\">\
+                     <div style=\"background-color: var(--card); border: 1px solid var(--bg); width: 10px; height: 10px\"></div></div>",
+        }),
+    );
+    let frame = node(&r["createdNodeIds"][0]);
+    let child = h.ed.doc.get(frame).unwrap().children[0];
+    let dark = Color::rgb(0x11, 0x11, 0x11);
+    let n = h.ed.doc.get(child).unwrap();
+    assert_eq!(n.style.fill(), Some(dark));
+    assert_eq!(
+        n.style.stroke,
+        Some(dark),
+        "unbound var() takes the mode too"
+    );
+    assert!(n.tokens.contains_key(&TokenProp::Fill));
+
+    let set_mode = |h: &mut exec::SessionHost, mode: &str| {
+        call(
+            h,
+            "update_styles",
+            json!({"updates": [{"nodeIds": [r["createdNodeIds"][0]], "styles": {"mode": mode}}]}),
+        )
+    };
+    set_mode(&mut h, "Light");
+    assert_eq!(
+        h.ed.doc.get(child).unwrap().style.fill(),
+        Some(Color::WHITE)
+    );
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--bg", "modes": {"Dark": "#222222"}}]}),
+    );
+    set_mode(&mut h, "dark");
+    let n = h.ed.doc.get(child).unwrap();
+    assert_eq!(n.style.fill(), Some(Color::rgb(0x22, 0x22, 0x22)));
+    assert!(
+        n.tokens.contains_key(&TokenProp::Fill),
+        "switching modes keeps bindings"
+    );
+    let dir = h.session.project.as_ref().unwrap().dir.clone();
+    h.session.save(&mut h.ed).unwrap();
+    let mut reopened = exec::SessionHost::new(h.session.store.clone());
+    reopened.session.open(&mut reopened.ed, &dir).unwrap();
+    h = reopened;
+    let bg = h.ed.tokens.by_css_name("--bg").unwrap();
+    assert_eq!(
+        h.ed.tokens.resolve_in(&bg.id, Some("Dark")),
+        Some(sketch_rs::model::TokenValue::Color(Color::rgb(
+            0x22, 0x22, 0x22
+        )))
+    );
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": r["createdNodeIds"][0]}));
+    assert!(jsx.to_string().contains("data-theme=\\\"dark\\\""), "{jsx}");
+    call(
+        &mut h,
+        "set_tokens",
+        json!({"tokens": [{"name": "--bg", "modes": {"Dark": null}}]}),
+    );
+    assert_eq!(
+        h.ed.doc.get(child).unwrap().style.fill(),
+        Some(Color::WHITE)
+    );
+}
+
+#[test]
+fn full_documents_without_data_theme_write_without_warnings() {
+    let mut h = host();
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<html><body><div style=\"width: 10px; height: 10px\"></div></body></html>",
+        }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+}
+
+#[test]
+fn shapes_and_instances_keep_their_frames_mode() {
+    let mut h = host();
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [{"type": "color", "name": "--bg", "value": "#ffffff", "modes": {"Dark": "#111111"}}]}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<div data-theme=\"dark\" style=\"width: 200px; height: 200px\"></div>\
+                     <div style=\"background-color: var(--bg); width: 50px; height: 50px\"></div>",
+        }),
+    );
+    let key = |id: NodeId| {
+        let page = r["createdNodeIds"][0]
+            .as_str()
+            .unwrap()
+            .rsplit_once(':')
+            .unwrap()
+            .0;
+        format!("{page}:{}", id.0)
+    };
+    let shape = call(
+        &mut h,
+        "create_shape",
+        json!({"type": "rectangle", "parentId": r["createdNodeIds"][0], "width": 10, "height": 10,
+               "styles": {"border": "1px solid var(--bg)"}}),
+    );
+    let dark = Color::rgb(0x11, 0x11, 0x11);
+    let stroke = h.ed.doc.get(node(&shape["id"])).unwrap().style.stroke;
+    assert_eq!(stroke, Some(dark), "{shape}");
+
+    h.ed.selection = vec![node(&r["createdNodeIds"][1])];
+    h.ed.create_component();
+    let main = h.ed.selection[0];
+    h.ed.instance_of_selection();
+    let inst = h.ed.selection[0];
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(inst)], "styles": {"mode": "Dark"}}]}),
+    );
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(main)], "styles": {"opacity": 0.5}}]}),
+    );
+    assert_eq!(h.ed.doc.get(inst).unwrap().mode.as_deref(), Some("dark"));
+    assert_eq!(h.ed.doc.get(inst).unwrap().style.fill(), Some(dark));
+    // The main shows white in Light; setting white by hand still detaches.
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(inst)], "styles": {"backgroundColor": "#ffffff"}}]}),
+    );
+    let n = h.ed.doc.get(inst).unwrap();
+    assert_eq!(n.style.fill(), Some(Color::WHITE));
+    assert!(n.tokens.is_empty());
+
+    h.ed.selection = vec![main];
+    h.ed.instance_of_selection();
+    let other = h.ed.selection[0];
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(other)], "styles": {"backgroundColor": "nope", "border": "1px solid #ffffff"}}]}),
+    );
+    let overrides = &h
+        .ed
+        .doc
+        .get(other)
+        .unwrap()
+        .instance
+        .as_ref()
+        .unwrap()
+        .overrides;
+    assert!(overrides.contains(&"stroke".to_string()), "{overrides:?}");
+    assert!(
+        !overrides.contains(&"fills".to_string()),
+        "an ignored style edits nothing: {overrides:?}"
+    );
+}

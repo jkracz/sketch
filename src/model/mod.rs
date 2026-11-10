@@ -12,4 +12,4 @@ pub use node::{
 };
 pub use paint::*;
 pub use text_styles::{ResolvedStyle, StyleField, StyleInput, TextStyleDef, TextStyleRef};
-pub use tokens::{SystemLink, Token, TokenClip, TokenKind, TokenProp, TokenSet, TokenValue};
+pub use tokens::{Mode, SystemLink, Token, TokenClip, TokenKind, TokenProp, TokenSet, TokenValue};

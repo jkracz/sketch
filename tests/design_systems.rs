@@ -220,3 +220,60 @@ fn large_systems_return_counts_until_filtered() {
     );
     assert_eq!(some.as_str().unwrap().matches("px;").count(), 111);
 }
+
+#[test]
+fn modes_publish_and_frames_pick_them_by_name() {
+    let store = store();
+    let mut src = exec::SessionHost::new(store.clone());
+    src.session.create(&mut src.ed, "Acme").unwrap();
+    call(
+        &mut src,
+        "create_tokens",
+        json!({"tokens": [{"type": "color", "name": "--primary", "value": "#2f6bff", "modes": {"Dark": "#9ab8ff"}}]}),
+    );
+    call(&mut src, "publish_design_system", json!({}));
+
+    let mut h = consumer(&store);
+    call(&mut h, "use_design_system", json!({"id": "acme"}));
+    let text = call(&mut h, "get_design_system", json!({"id": "acme"}));
+    assert!(
+        text.as_str().unwrap().contains("/* Dark: #9ab8ff */"),
+        "{text}"
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<div data-theme=\"dark\" style=\"background-color: var(--acme-primary); width: 10px; height: 10px\"></div>",
+        }),
+    );
+    let n = h.ed.doc.get(node(&r["createdNodeIds"][0])).unwrap();
+    assert_eq!(n.style.fill(), Some(Color::rgb(0x9a, 0xb8, 0xff)));
+    assert!(n.tokens.contains_key(&TokenProp::Fill));
+}
+
+#[test]
+fn system_css_starts_with_the_systems_first_mode() {
+    let store = store();
+    let mut src = exec::SessionHost::new(store.clone());
+    src.session.create(&mut src.ed, "Acme").unwrap();
+    src.ed.edit_tokens("Dark first", None, |t| {
+        t.delete_mode("light").unwrap();
+        let light = t.add_mode();
+        t.rename_mode(&light, "Light").unwrap();
+    });
+    call(
+        &mut src,
+        "create_tokens",
+        json!({"tokens": [{"type": "color", "name": "--bg", "value": "#000000", "modes": {"Light": "#ffffff"}}]}),
+    );
+    call(&mut src, "publish_design_system", json!({}));
+    let css = call(
+        &mut src,
+        "get_design_system",
+        json!({"id": "acme", "format": "css"}),
+    );
+    let root = css.as_str().unwrap().split("}").next().unwrap();
+    assert!(root.contains("--acme-bg: #000000;"), "{css}");
+}

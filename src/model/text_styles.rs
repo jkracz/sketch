@@ -285,15 +285,24 @@ impl TokenSet {
         ))
     }
 
-    /// Follow every alias to a literal. None when an alias is broken.
+    /// Follow every alias to a literal in the default mode. None when an alias is broken.
     pub fn resolve_style(&self, id: &str) -> Option<ResolvedStyle> {
+        self.resolve_style_in(id, None)
+    }
+
+    /// Follow every alias to a literal in the mode named `mode`.
+    pub fn resolve_style_in(&self, id: &str, mode: Option<&str>) -> Option<ResolvedStyle> {
         let s = self.style(id)?;
-        let num = |v: &TokenValue| match self.literal(v)? {
+        let literal = |v: &TokenValue| match v {
+            TokenValue::Alias(a) => self.resolve_in(a, mode),
+            v => Some(v.clone()),
+        };
+        let num = |v: &TokenValue| match literal(v)? {
             TokenValue::Number(n) => Some(n),
             _ => None,
         };
         Some(ResolvedStyle {
-            family: match self.literal(&s.family)? {
+            family: match literal(&s.family)? {
                 TokenValue::Text(f) => f,
                 _ => return None,
             },
@@ -304,7 +313,7 @@ impl TokenSet {
                 Some(v) => Some(num(v)?),
                 None => None,
             },
-            letter_spacing: match self.literal(&s.letter_spacing)? {
+            letter_spacing: match literal(&s.letter_spacing)? {
                 TokenValue::Number(px) => LetterSpacing::Px(px),
                 TokenValue::Em(em) => LetterSpacing::Em { em },
                 _ => return None,
@@ -314,7 +323,7 @@ impl TokenSet {
 
     /// Expand `textStyle` into values and a [`css::STYLE_MARKER`] binding. Later fields win;
     /// unknown names stay for `css::apply` to report as ignored.
-    pub fn expand_styles(&self, styles: &mut Vec<(String, String)>) {
+    pub fn expand_styles(&self, styles: &mut Vec<(String, String)>, mode: Option<&str>) {
         if !styles.iter().any(|(k, _)| k == "textStyle") {
             return;
         }
@@ -323,7 +332,7 @@ impl TokenSet {
             let found = (k == "textStyle")
                 .then(|| self.style_by_name(&v))
                 .flatten()
-                .and_then(|s| Some((s.id.clone(), self.resolve_style(&s.id)?)));
+                .and_then(|s| Some((s.id.clone(), self.resolve_style_in(&s.id, mode)?)));
             match found {
                 Some((id, r)) => {
                     out.extend(r.literal_css());
@@ -333,13 +342,6 @@ impl TokenSet {
             }
         }
         *styles = out;
-    }
-
-    fn literal(&self, v: &TokenValue) -> Option<TokenValue> {
-        match v {
-            TokenValue::Alias(a) => self.resolve(a),
-            v => Some(v.clone()),
-        }
     }
 
     /// One field's value as CSS: `var(--token)` for an alias.

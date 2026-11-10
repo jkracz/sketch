@@ -988,6 +988,9 @@ fn computed_styles(ed: &mut Editor, a: &Args) -> ToolResult {
         let n = doc.get(id).unwrap();
         let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
         show_token_vars(&ed.tokens, n, &mut st);
+        if let Some(m) = ed.tokens.mode_at(doc, id) {
+            st.insert("mode".into(), json!(m));
+        }
         out.insert(node_key(ed, page, id), Value::Object(st));
     }
     text(Value::Object(out))
@@ -1024,10 +1027,57 @@ fn token_json(tokens: &TokenSet, t: &Token) -> Value {
         "type": t.kind.key(),
         "value": tokens.css_value(t),
     });
+    let modes = tokens.own_mode_values(t);
+    if !modes.is_empty() {
+        v["modes"] = Value::Object(modes.into_iter().map(|(m, css)| (m, json!(css))).collect());
+    }
     if let Some(d) = &t.description {
         v["description"] = json!(d);
     }
     v
+}
+
+fn mode_list(tokens: &TokenSet) -> String {
+    let names: Vec<&str> = tokens.choices().iter().map(|m| m.name.as_str()).collect();
+    names.join(", ")
+}
+
+/// Map mode names to local ids. None clears an override; the first mode uses `value`.
+fn mode_inputs(tokens: &TokenSet, e: &Args) -> Result<Vec<(String, Option<String>)>, String> {
+    let Some(m) = e.get("modes") else {
+        return Ok(Vec::new());
+    };
+    let m = m
+        .as_object()
+        .ok_or("`modes` must be an object of mode name to value")?;
+    let first = tokens
+        .modes()
+        .first()
+        .map(|m| m.name.clone())
+        .unwrap_or_default();
+    m.iter()
+        .map(|(name, v)| {
+            let mode = (tokens.modes().iter().skip(1))
+                .find(|m| m.name.eq_ignore_ascii_case(name.trim()))
+                .ok_or_else(|| {
+                    if first.eq_ignore_ascii_case(name.trim()) {
+                        format!("{first} is the first mode: set it with `value`.")
+                    } else {
+                        let names: Vec<&str> =
+                            tokens.modes().iter().map(|m| m.name.as_str()).collect();
+                        format!(
+                            "Unknown mode \"{name}\". This file's modes: {}.",
+                            names.join(", ")
+                        )
+                    }
+                })?;
+            let v = match v {
+                Value::Null => None,
+                v => Some(token_input(v)?),
+            };
+            Ok((mode.id.clone(), v))
+        })
+        .collect()
 }
 
 /// The project's own tokens. Design systems' tokens are left out: `get_tokens` and
@@ -1201,6 +1251,10 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
         "json" => {
             let list: Vec<Value> = chosen.iter().map(|t| token_json(tokens, t)).collect();
             let mut v = json!({"tokens": list});
+            if tokens.choices().len() > 1 {
+                let names: Vec<&str> = tokens.choices().iter().map(|m| m.name.as_str()).collect();
+                v["modes"] = json!(names);
+            }
             if !styles.is_empty() {
                 let list: Vec<Value> = styles.iter().map(|s| style_json(tokens, s)).collect();
                 v["textStyles"] = json!(list);
@@ -1246,7 +1300,16 @@ fn create_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                     let kind =
                         TokenKind::from_key(e.req_str("type")?).ok_or("unknown token type")?;
                     let value = token_input(e.get("value").ok_or("missing `value`")?)?;
-                    tokens.create(kind, e.req_str("name")?, &value, e.str("description"))
+                    let modes: Vec<(String, String)> = (mode_inputs(tokens, &e)?.into_iter())
+                        .filter_map(|(m, v)| Some((m, v?)))
+                        .collect();
+                    tokens.create_in_modes(
+                        kind,
+                        e.req_str("name")?,
+                        &value,
+                        &modes,
+                        e.str("description"),
+                    )
                 })();
                 match made {
                     Ok(id) => {
@@ -1285,12 +1348,23 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                         return Ok::<_, String>((css_name, "deleted"));
                     }
                     let value = e.get("value").map(token_input).transpose()?;
-                    tokens.update(
-                        &id,
-                        e.str("newName"),
-                        value.as_deref(),
-                        e.str("description"),
-                    )?;
+                    let modes = mode_inputs(tokens, &e)?;
+                    let before = tokens.clone();
+                    let done = tokens
+                        .update(
+                            &id,
+                            e.str("newName"),
+                            value.as_deref(),
+                            e.str("description"),
+                        )
+                        .and_then(|()| {
+                            (modes.iter())
+                                .try_for_each(|(m, v)| tokens.update_in_mode(&id, m, v.as_deref()))
+                        });
+                    if let Err(why) = done {
+                        *tokens = before;
+                        return Err(why);
+                    }
                     Ok((tokens.css_name(tokens.get(&id).unwrap()), "updated"))
                 })();
                 match done {
@@ -1443,14 +1517,18 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
         .sorted()
         .into_iter()
         .filter(|t| t.system.as_deref() == Some(l.id.as_str()))
-        .map(|t| Token {
-            id: strip(&t.id),
-            value: match &t.value {
+        .map(|t| {
+            let value = |v: &crate::model::TokenValue| match v {
                 crate::model::TokenValue::Alias(a) => crate::model::TokenValue::Alias(strip(a)),
                 v => v.clone(),
-            },
-            system: None,
-            ..t.clone()
+            };
+            Token {
+                id: strip(&t.id),
+                value: value(&t.value),
+                modes: t.modes.iter().map(|(m, v)| (strip(m), value(v))).collect(),
+                system: None,
+                ..t.clone()
+            }
         })
         .collect();
     let styles = tokens
@@ -1484,6 +1562,13 @@ fn cached_system(tokens: &TokenSet, l: &crate::model::SystemLink) -> Published {
         published: 0,
         tokens: list,
         text_styles: styles,
+        modes: (l.modes.iter())
+            .map(|m| crate::model::Mode {
+                id: strip(&m.id),
+                name: m.name.clone(),
+                aka: Vec::new(),
+            })
+            .collect(),
     }
 }
 
@@ -1552,6 +1637,9 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             "id": p.id, "name": p.name, "prefix": format!("--{}-", p.prefix),
             "version": p.release, "usage": usage,
         });
+        if !p.modes.is_empty() {
+            v["modes"] = json!(p.modes.iter().map(|m| &m.name).collect::<Vec<_>>());
+        }
         if let Some(d) = &p.description {
             v["description"] = json!(d);
         }
@@ -1604,6 +1692,13 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
         out.push_str(&format!("{d}\n"));
     }
     out.push_str(&format!("{usage}\n"));
+    if p.modes.len() > 1 {
+        let names: Vec<&str> = p.modes.iter().map(|m| m.name.as_str()).collect();
+        out.push_str(&format!(
+            "Modes: {}. Tokens show other modes' values in comments.\n",
+            names.join(", ")
+        ));
+    }
     if let Some(n) = &p.notes {
         out.push_str(&format!("\n## Usage notes\n{}\n", n.trim_end()));
     }
@@ -1623,6 +1718,9 @@ fn get_design_system(host: &mut dyn Host, a: &Args) -> ToolResult {
             out.push_str(&format!("/* {} */\n", t.kind.label()));
         }
         out.push_str(&format!("{}: {};", set.css_name(t), set.css_value(t)));
+        for (m, v) in set.own_mode_values(t) {
+            out.push_str(&format!(" /* {m}: {v} */"));
+        }
         if let Some(d) = &t.description {
             out.push_str(&format!(" /* {} */", d.replace("*/", "* /")));
         }
@@ -2030,16 +2128,24 @@ fn jsx_node(
         }
     }
     let name = n.name.replace('"', "'");
+    // Preserve inherited modes when exporting a subtree on its own.
+    let mode = match root {
+        true => tokens.mode_at(doc, id),
+        false => n.mode.as_deref().and_then(|m| tokens.mode_name(m)),
+    };
+    let theme = mode.map_or(String::new(), |m| {
+        format!(" data-theme=\"{}\"", crate::model::tokens::css_slug(m))
+    });
     match &n.kind {
         NodeKind::Frame { .. } | NodeKind::Group => {
             if n.children.is_empty() {
                 out.push_str(&format!(
-                    "{ind}<div data-name=\"{name}\" style={} />\n",
+                    "{ind}<div data-name=\"{name}\"{theme} style={} />\n",
                     style_obj(&st)
                 ));
             } else {
                 out.push_str(&format!(
-                    "{ind}<div data-name=\"{name}\" style={}>\n",
+                    "{ind}<div data-name=\"{name}\"{theme} style={}>\n",
                     style_obj(&st)
                 ));
                 for c in &n.children {
@@ -2055,7 +2161,7 @@ fn jsx_node(
                 _ => String::new(),
             };
             out.push_str(&format!(
-                "{ind}<span{class} style={}>{}</span>\n",
+                "{ind}<span{class}{theme} style={}>{}</span>\n",
                 style_obj(&st),
                 jsx_text(text)
             ));
@@ -2078,17 +2184,17 @@ fn jsx_node(
                     st.remove("background");
                     st.insert("objectFit".into(), json!("cover"));
                     out.push_str(&format!(
-                        "{ind}<img src=\"{src}\" alt=\"{name}\" style={} />\n",
+                        "{ind}<img src=\"{src}\" alt=\"{name}\"{theme} style={} />\n",
                         style_obj(&st)
                     ));
                 }
-                None => out.push_str(&format!("{ind}<div style={} />\n", style_obj(&st))),
+                None => out.push_str(&format!("{ind}<div{theme} style={} />\n", style_obj(&st))),
             }
         }
         NodeKind::Sticky { text, .. } => {
             st.insert("padding".into(), json!("16px"));
             out.push_str(&format!(
-                "{ind}<div style={}>{}</div>\n",
+                "{ind}<div{theme} style={}>{}</div>\n",
                 style_obj(&st),
                 jsx_text(text)
             ));
@@ -2499,8 +2605,8 @@ fn inherit(parent: &Styles, own: &Styles) -> Styles {
 }
 
 /// An element's own styles: the tag's defaults, then the text style its `class` names, then
-/// its inline styles, with tokens and the style expanded.
-fn own_styles(el: &Element, tokens: &TokenSet) -> Styles {
+/// its inline styles, with tokens and the style expanded in the mode named `mode`.
+fn own_styles(el: &Element, tokens: &TokenSet, mode: Option<&str>) -> Styles {
     let mut st = ua_styles(&el.tag);
     let class = el.attr("class").and_then(|c| {
         c.split_whitespace()
@@ -2510,7 +2616,7 @@ fn own_styles(el: &Element, tokens: &TokenSet) -> Styles {
         st.push(("textStyle".into(), c.to_string()));
     }
     st.extend(css::parse_inline(el.attr("style").unwrap_or("")));
-    tokens.expand(&mut st);
+    tokens.expand_in(&mut st, mode);
     st
 }
 
@@ -2554,6 +2660,7 @@ fn has_text(el: &Element) -> bool {
 fn collect_runs(
     nodes: &[Html],
     tokens: &TokenSet,
+    mode: Option<&str>,
     run: Run,
     base_fs: f64,
     out: &mut Vec<(char, Run)>,
@@ -2563,7 +2670,7 @@ fn collect_runs(
             Html::Text(t) => out.extend(t.chars().map(|ch| (ch, run.clone()))),
             Html::Element(e) if e.tag == "br" => out.push(('\u{2028}', run.clone())),
             Html::Element(e) => {
-                let st = own_styles(e, tokens);
+                let st = own_styles(e, tokens, mode);
                 let mut r = run.clone();
                 for (k, v) in &st {
                     let lower = v.to_ascii_lowercase();
@@ -2586,7 +2693,7 @@ fn collect_runs(
                         _ => {}
                     }
                 }
-                collect_runs(&e.children, tokens, r, base_fs, out);
+                collect_runs(&e.children, tokens, mode, r, base_fs, out);
             }
         }
     }
@@ -2642,6 +2749,8 @@ fn default_text_color(
 struct Builder<'t, 'a> {
     tx: &'t mut Tx<'a>,
     tokens: &'t TokenSet,
+    /// The token mode the element being built shows, by name.
+    mode: Option<String>,
     canvas: Color,
     page_id: String,
     ignored: BTreeSet<String>,
@@ -2753,7 +2862,49 @@ impl Builder<'_, '_> {
         parent: &Parent,
         index: &mut Option<usize>,
     ) -> Option<NodeId> {
-        let own = own_styles(el, self.tokens);
+        let theme = el
+            .attr("data-theme")
+            .map(|t| match self.tokens.find_choice(t) {
+                Some(m) => Some((m.id.clone(), m.name.clone())),
+                None => {
+                    self.warnings.push(format!(
+                        "data-theme=\"{t}\" names no mode. Modes: {}.",
+                        mode_list(self.tokens)
+                    ));
+                    None
+                }
+            });
+        let wrapper = matches!(el.tag.as_str(), "html" | "body");
+        let Some((mode, name)) = theme.flatten().filter(|_| !wrapper) else {
+            if wrapper && el.attr("data-theme").is_some() {
+                self.warnings.push(format!(
+                    "data-theme on <{}> is ignored. Put it on a frame.",
+                    el.tag
+                ));
+            }
+            return self.element_in_mode(el, inherited, parent, index);
+        };
+        let outer = self.mode.replace(name);
+        let made = self.element_in_mode(el, inherited, parent, index);
+        self.mode = outer;
+        match made.and_then(|id| self.tx.node_mut(id)) {
+            Some(n) if matches!(n.kind, NodeKind::Frame { .. }) => n.mode = Some(mode),
+            _ => self.warnings.push(format!(
+                "data-theme on <{}> is ignored: only frames hold a mode, and it isn't one.",
+                el.tag
+            )),
+        }
+        made
+    }
+
+    fn element_in_mode(
+        &mut self,
+        el: &Element,
+        inherited: &Styles,
+        parent: &Parent,
+        index: &mut Option<usize>,
+    ) -> Option<NodeId> {
+        let own = own_styles(el, self.tokens, self.mode.as_deref());
         match el.tag.as_str() {
             "head" | "meta" | "link" | "title" | "script" | "style" => None,
             "html" | "body" => {
@@ -2819,7 +2970,14 @@ impl Builder<'_, '_> {
             .unwrap_or(16.0);
         let pre = get(&styles, "whiteSpace").is_some_and(|v| v.starts_with("pre"));
         let mut chars = Vec::new();
-        collect_runs(&el.children, self.tokens, Run::default(), fs, &mut chars);
+        collect_runs(
+            &el.children,
+            self.tokens,
+            self.mode.as_deref(),
+            Run::default(),
+            fs,
+            &mut chars,
+        );
         let chars = collapse(chars, pre);
         if chars.is_empty() {
             return None;
@@ -3315,9 +3473,11 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             {
                 inherited.push(("color".into(), c.to_hex()));
             }
+            let mode = parent_id.and_then(|p| tokens.mode_at(tx.doc(), p).map(String::from));
             let mut b = Builder {
                 tx,
                 tokens: &tokens,
+                mode,
                 canvas,
                 page_id: page_id.clone(),
                 ignored: BTreeSet::new(),
@@ -3435,7 +3595,8 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
         Some(s) => css::from_json(s)?,
         None => Vec::new(),
     };
-    ed.tokens.expand(&mut styles);
+    let mode = parent.and_then(|p| ed.tokens.mode_at(ed.page_doc(page), p));
+    ed.tokens.expand_in(&mut styles, mode);
     let canvas = CanvasStyle::of(ed.canvas_dark).background;
     let sides = a.num("sides").map(|s| s.clamp(3.0, 64.0) as u32);
     let txt = a.str("text").unwrap_or("").to_string();
@@ -3553,20 +3714,36 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
     text(v)
 }
 
+fn mode_style(tokens: &TokenSet, v: &str) -> Result<Option<String>, String> {
+    match v.trim() {
+        "" | "inherit" | "none" => Ok(None),
+        name => tokens
+            .find_choice(name)
+            .map(|m| Some(m.id.clone()))
+            .ok_or_else(|| format!("No mode \"{name}\". Modes: {}.", mode_list(tokens))),
+    }
+}
+
 fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
     let def = page_arg(ed, a)?;
-    let mut jobs: Vec<(usize, Vec<NodeId>, Styles)> = Vec::new();
+    type Job = (usize, Vec<NodeId>, Styles, Option<Option<String>>);
+    let mut jobs: Vec<Job> = Vec::new();
     for u in a.arr("updates")? {
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, ids) = resolve_all(ed, &u.strs("nodeIds")?, def)?;
         let mut styles = css::from_json(u.get("styles").ok_or("each update needs `styles`")?)?;
-        ed.tokens.expand(&mut styles);
-        jobs.push((page, ids, styles));
+        let mode = match styles.iter().rposition(|(k, _)| k == "mode") {
+            Some(i) => Some(mode_style(&ed.tokens, &styles[i].1)?),
+            None => None,
+        };
+        styles.retain(|(k, _)| k != "mode");
+        jobs.push((page, ids, styles, mode));
     }
+    let tokens = ed.tokens.clone();
     let mut ignored: Map<String, Value> = Map::new();
     let mut warnings = Vec::new();
     let mut count = 0;
-    for (page, ids, styles) in jobs {
+    for (page, ids, raw, mode) in jobs {
         let page_id = ed.pages[page].id.clone();
         let res = ed.with_page(page, |ed| {
             ed.edit("Update styles", |tx| {
@@ -3576,7 +3753,42 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         Parent::of(tx.doc(), &page_id, tx.doc().get(*id).and_then(|n| n.parent));
                     let old = tx.doc().get(*id).unwrap().rect;
                     let mut n = tx.doc().get(*id).unwrap().clone();
-                    let applied = css::apply(&mut n, &styles, &parent.ctx());
+                    let frame = matches!(n.kind, NodeKind::Frame { .. });
+                    if let Some(m) = &mode
+                        && frame
+                    {
+                        n.mode = m.clone();
+                        // Like the inspector, so component sync keeps the instance's mode.
+                        if let Some(l) = &mut n.instance
+                            && !l.overrides.iter().any(|o| o == "mode")
+                        {
+                            l.overrides.push("mode".into());
+                        }
+                        *tx.node_mut(*id).unwrap() = n.clone();
+                    }
+                    let mut styles = raw.clone();
+                    tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
+                    let mut applied = css::apply(&mut n, &styles, &parent.ctx());
+                    // Like the inspector, a bindable field edited on an instance layer stops
+                    // following the main component.
+                    let edited: Vec<&str> = (raw.iter().map(|(k, _)| k.as_str()))
+                        .filter(|k| !applied.ignored.iter().any(|i| i == k))
+                        .filter_map(|k| match k {
+                            "border" => Some(TokenProp::Stroke),
+                            k => TokenProp::from_css_key(k, &n),
+                        })
+                        .map(|p| crate::editor::structure::override_key(p.field()))
+                        .collect();
+                    if let Some(l) = &mut n.instance {
+                        for k in edited {
+                            if !l.overrides.iter().any(|o| o == k) {
+                                l.overrides.push(k.into());
+                            }
+                        }
+                    }
+                    if mode.is_some() && !frame {
+                        applied.ignored.push("mode".into());
+                    }
                     let mut warn = None;
                     if let Some((src, mode)) = &applied.image {
                         match image_asset(src) {
@@ -3957,6 +4169,7 @@ mod tests {
         collect_runs(
             &p.children,
             &TokenSet::default(),
+            None,
             Run::default(),
             16.0,
             &mut chars,
