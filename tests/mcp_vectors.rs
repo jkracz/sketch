@@ -231,7 +231,12 @@ fn text_ranges_style_matches_and_offsets_and_reset() {
             {"nodeId": t, "start": 0, "end": 4, "styles": {"fontStyle": "italic", "textDecoration": "underline"}},
         ]}),
     );
-    let ranges = r["updated"][1]["textRanges"].as_array().unwrap();
+    assert_eq!(
+        r["updated"].as_array().unwrap().len(),
+        1,
+        "one entry per layer"
+    );
+    let ranges = r["updated"][0]["textRanges"].as_array().unwrap();
     assert_eq!(ranges[0]["text"], "Ship");
     assert_eq!(ranges[0]["styles"]["fontStyle"], "italic");
     let n = h.ed.doc.get(num(&t)).unwrap();

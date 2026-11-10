@@ -734,7 +734,12 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 }
             })
         });
+        let mut seen = Vec::new();
         for (id, _) in &list {
+            if seen.contains(id) {
+                continue;
+            }
+            seen.push(*id);
             let n = ed.page_doc(page).get(*id).unwrap();
             results.push(json!({
                 "id": super::exec::node_key(ed, page, *id),
@@ -932,7 +937,12 @@ fn update_arrows(ed: &mut Editor, a: &Args) -> ToolResult {
                 }
             })
         });
+        let mut seen = Vec::new();
         for (id, _) in &list {
+            if seen.contains(id) {
+                continue;
+            }
+            seen.push(*id);
             let n = ed.page_doc(page).get(*id).unwrap();
             let mut v = json!({"id": super::exec::node_key(ed, page, *id)});
             node_details(ed, page, n, &mut v);
