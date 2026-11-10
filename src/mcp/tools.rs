@@ -7,6 +7,8 @@
 use crate::model::TokenKind;
 use serde_json::{Map, Value, json};
 
+mod components;
+
 pub const INSTRUCTIONS: &str = "\
 Sketch is a local design and whiteboard app with an infinite canvas. These tools read and \
 edit the project open in the running app; every change is one undo step and shows up live.
@@ -38,6 +40,10 @@ update_styles; create_text_styles and set_text_styles manage them.
 - Effect styles name a list of shadows and blurs, like Elevation/2. get_tokens lists them as \
 CSS variables. Apply one with box-shadow: var(--elevation-2) in write_html or \
 {\"effectStyle\": \"elevation-2\"} in update_styles.
+- Components: create_component makes a main from layers; place instances of it with \
+<x-sketch-instance component=\"Name\"/> in write_html. Edits to an instance's layers are \
+overrides; reset_overrides undoes them and detach_instances turns instances into plain layers. \
+get_basic_info lists the file's components; get_node_info shows an instance's main.
 - Design systems are token sets and components other projects publish. list_design_systems \
 gives a short summary of each; get_design_system loads one system's usage notes, tokens and \
 component names (filter by types or namePattern to load less); use_design_system lets the open \
@@ -199,7 +205,7 @@ fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool
 pub fn definitions() -> Vec<Value> {
     let node_id = |d: &str| json!({"type": "string", "description": d});
     let ids = |d: &str| json!({"type": "array", "items": {"type": "string"}, "description": d});
-    vec![
+    let mut all = vec![
         // ------------------------------------------------------------ projects and pages
         tool(
             "list_resources",
@@ -298,7 +304,8 @@ pub fn definitions() -> Vec<Value> {
             "get_basic_info",
             "Essential context about the open project: project name, the page, node count, \
              artboards (top-level frames) with ids, sizes and world positions, other top-level \
-             layers, fonts, and `pages` with the active one marked isActive.\n\
+             layers, fonts, `pages` with the active one marked isActive, and `components`: the \
+             file's main components on every page, with ids, names and sizes.\n\
              - worldX/worldY are world positions; x/y are relative to the parent.\n\
              - Pass pageId to inspect another page without switching the user's view.",
             json!({"pageId": page_id()}),
@@ -316,7 +323,11 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "get_node_info",
             "Details of one node: type, name, size, visibility, lock state, parent, children ids, \
-             text content, x/y (relative to parent) and worldX/worldY. Errors if it doesn't exist.",
+             text content, x/y (relative to parent) and worldX/worldY. Errors if it doesn't exist.\n\
+             - A main component has component: true and instanceCount.\n\
+             - An instance has instanceOf (its component's name) and, for the file's own \
+             components, mainComponentId. A layer inside one has instanceRootId. overrides lists \
+             what was changed on that layer.",
             json!({"nodeId": node_id("The node to inspect.")}),
             &["nodeId"],
             true,
@@ -508,9 +519,11 @@ pub fn definitions() -> Vec<Value> {
              - layer-name=\"...\" names layers; <x-sketch-clone node-id=\"ID\" style=\"...\"/> \
              clones an existing node.\n\
              - <x-sketch-instance component=\"Button\" style=\"...\"/> places an instance of \
-             a component from a design system the file uses (see get_design_system), at its own \
-             size unless style sets one. \"System/Name\" picks between systems. The result \
-             lists each instance's text layers for set_text_content.\n\
+             one of the file's own components (by name or main id, see get_basic_info) or of a \
+             component from a design system the file uses (see get_design_system), at its own \
+             size unless style sets one. The file's own component wins a name clash; \
+             \"System/Name\" picks a system's. The result lists each instance's text layers \
+             for set_text_content.\n\
              - class=\"heading-l\" applies that text style (see get_tokens); inline styles \
              after it override single fields. Text inside the element inherits it.\n\
              - box-shadow: var(--elevation-2) applies that effect style (see get_tokens), with \
@@ -834,7 +847,9 @@ pub fn definitions() -> Vec<Value> {
             &[],
             false,
         ),
-    ]
+    ];
+    all.extend(components::definitions());
+    all
 }
 
 pub const GUIDE_INSTRUCTIONS: &str = "\
@@ -916,6 +931,18 @@ file's own tokens and one line per system; pass system to see a system's tokens.
 publish_design_system publishes the open file's own tokens, styles and main components; write
 notes that say which token, style or component to use where.
 
+Components: build one as a frame with write_html, then create_component({nodeIds: [frame],
+name: \"Button/Primary\"}). Several layers, or a non-frame, are wrapped in a new frame. Place
+instances with <x-sketch-instance component=\"Button/Primary\"/> in write_html, on any page
+and inside any flex layout; pass the main's id instead of the name when two share it.
+get_basic_info lists the file's components. Edit the main (update_styles, write_html,
+set_text_content) to change every instance. update_styles, set_text_content and rename_nodes
+on an instance's layers make overrides, which survive edits to the main; get_node_info lists
+them, reset_overrides clears them, and detach_instances turns an instance into plain layers.
+A component can't hold an instance of itself.
+To build a component library: make each main, place instances to check them, then
+publish_design_system with notes on which component to use where.
+
 Design system components: get_design_system lists each as `Name WxH`; pass component: \"Name\"
 to read one's layers as JSX before using it. After use_design_system, place one with
 <x-sketch-instance component=\"Button\"/> in write_html, inside any frame and flex layout.
@@ -934,7 +961,8 @@ p/h1–h6/span/label/a/strong/em/code/pre (elements holding only text) → text 
 frame around them when they have a background, border, padding or box-shadow); img → image
 rectangle;
 svg → vector layers; br → line break; x-sketch-clone node-id=ID → copy of an existing layer;
-x-sketch-instance component=Name → instance of a design system component (see get_design_system).
+x-sketch-instance component=Name → instance of one of the file's components (see get_basic_info)
+or of a design system's (see get_design_system).
 
 Default sizes (like CSS): h1 32px bold, h2 24px bold, h3 20px bold, h4–h6 16px bold, p 16px,
 small 13px, code/pre 14px; color is inherited, default black.

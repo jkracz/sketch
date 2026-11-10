@@ -2006,7 +2006,9 @@ impl Editor {
             }
             A::Group => self.group_selection(),
             A::Ungroup => self.ungroup_selection(),
-            A::CreateComponent => self.create_component(),
+            A::CreateComponent => {
+                self.create_component();
+            }
             A::DetachInstance => self.detach_instance(),
             A::AddAutoLayout => self.add_auto_layout(),
             A::RemoveAutoLayout => self.remove_auto_layout(),
@@ -2324,17 +2326,27 @@ impl Editor {
     }
 
     fn wrap_in_frame(&mut self) {
+        if let Some(f) = self.frame_selection("Frame selection", |_| {}) {
+            self.selection = vec![f];
+        }
+    }
+
+    /// Includes `finish` in the frame's undo step. Returns `None` for an empty selection or
+    /// layers with different parents.
+    pub(super) fn frame_selection(
+        &mut self,
+        label: &str,
+        finish: impl FnOnce(&mut Node),
+    ) -> Option<NodeId> {
         let ids = self.top_selection();
-        let Some(b) = self.selection_bounds() else {
-            return;
-        };
+        let b = self.selection_bounds()?;
         let parent = self.doc.get(ids[0]).and_then(|n| n.parent);
         if ids
             .iter()
             .any(|id| self.doc.get(*id).and_then(|n| n.parent) != parent)
         {
             self.status = "Selection must share a parent".into();
-            return;
+            return None;
         }
         let index = ids
             .iter()
@@ -2342,7 +2354,7 @@ impl Editor {
             .max()
             .map(|i| i + 1);
         let n_frames = self.doc.nodes.values().filter(|n| n.is_frame()).count();
-        let frame = self.edit("Frame selection", |tx| {
+        Some(self.edit(label, |tx| {
             let fid = tx.alloc_id();
             let o = tx.doc().parent_origin(parent);
             let mut f = Node::new(
@@ -2352,13 +2364,13 @@ impl Editor {
             );
             f.name = format!("Frame {}", n_frames + 1);
             f.style.set_fill(None);
+            finish(&mut f);
             tx.insert(f, parent, index);
             for id in &ids {
                 tx.reparent(*id, Some(fid), None);
             }
             fid
-        });
-        self.selection = vec![frame];
+        }))
     }
 
     // ------------------------------------------------------------------ programmatic API
