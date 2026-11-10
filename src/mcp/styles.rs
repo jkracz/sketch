@@ -42,7 +42,9 @@ pub(super) fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
 const SHADOW_KEYS: [&str; 7] = ["type", "x", "y", "blur", "spread", "color", "visible"];
 
 fn kind(s: &str) -> Option<EffectKind> {
-    let key: String = (s.trim().chars())
+    let key: String = s
+        .trim()
+        .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect();
@@ -76,17 +78,19 @@ fn effect_input(tokens: &TokenSet, v: &Value) -> Result<(Effect, Option<String>)
         )
     })?;
     let mut out = Effect::new(kind);
-    let allowed: &[&str] = match kind.is_shadow() {
-        true => &SHADOW_KEYS,
-        false => &["type", "blur", "visible"],
+    let allowed: &[&str] = if kind.is_shadow() {
+        &SHADOW_KEYS
+    } else {
+        &["type", "blur", "visible"]
     };
     if let Some(k) = m.keys().find(|k| !allowed.contains(&k.as_str())) {
-        return Err(match SHADOW_KEYS.contains(&k.as_str()) {
-            true => format!("`{k}` applies to shadows only; a {ty} takes blur and visible."),
-            false => format!(
+        return Err(if SHADOW_KEYS.contains(&k.as_str()) {
+            format!("`{k}` applies to shadows only; a {ty} takes blur and visible.")
+        } else {
+            format!(
                 "Unknown effect field `{k}`. Fields: {}.",
                 allowed.join(", ")
-            ),
+            )
         });
     }
     let num = |k: &str| -> Result<Option<f64>, String> {
@@ -132,7 +136,8 @@ fn effect_input(tokens: &TokenSet, v: &Value) -> Result<(Effect, Option<String>)
 }
 
 fn effects_input(tokens: &TokenSet, e: &Args) -> Result<Vec<(Effect, Option<String>)>, String> {
-    (e.arr("effects")?.iter())
+    e.arr("effects")?
+        .iter()
         .enumerate()
         .map(|(i, v)| effect_input(tokens, v).map_err(|m| format!("effects[{i}]: {m}")))
         .collect()
@@ -153,7 +158,10 @@ fn effect_json(e: &Effect, color: impl FnOnce() -> String) -> Value {
 
 /// A style's effects, colors as `var(--token)` where a token gives them.
 pub fn style_effects_json(tokens: &TokenSet, s: &EffectStyleDef) -> Value {
-    let list: Vec<Value> = (s.effects.iter().enumerate())
+    let list: Vec<Value> = s
+        .effects
+        .iter()
+        .enumerate()
         .map(|(i, e)| {
             effect_json(&e.effect, || match tokens.effect_style_color_token(s, i) {
                 Some(t) => format!("var({})", tokens.css_name(t)),
@@ -166,7 +174,11 @@ pub fn style_effects_json(tokens: &TokenSet, s: &EffectStyleDef) -> Value {
 
 /// A layer's effects, hidden ones included. None without any.
 pub fn layer_effects_json(tokens: &TokenSet, n: &Node) -> Option<Value> {
-    let list: Vec<Value> = (n.style.effects.iter().enumerate())
+    let list: Vec<Value> = n
+        .style
+        .effects
+        .iter()
+        .enumerate()
         .map(|(i, e)| effect_json(e, || shadow_color(tokens, n, i, e.color)))
         .collect();
     (!list.is_empty()).then(|| json!(list))
@@ -189,7 +201,7 @@ fn set_effects(ed: &mut Editor, a: &Args) -> ToolResult {
                 for id in &ids {
                     let mode = tokens.mode_at(tx.doc(), *id);
                     let Some(n) = tx.node_mut(*id) else { continue };
-                    let list = (effects.iter()).map(|(e, t)| {
+                    let list = effects.iter().map(|(e, t)| {
                         let mut e = *e;
                         let color = t.as_deref().and_then(|t| tokens.resolve_in(t, mode));
                         if let Some(TokenValue::Color(c)) = color {
@@ -211,7 +223,8 @@ fn set_effects(ed: &mut Editor, a: &Args) -> ToolResult {
 // ------------------------------------------------------------------- effect styles
 
 fn style_input(tokens: &TokenSet, e: &Args) -> Result<Vec<StyleEffect>, String> {
-    Ok((effects_input(tokens, e)?.into_iter())
+    Ok(effects_input(tokens, e)?
+        .into_iter()
         .map(|(effect, color_token)| StyleEffect {
             effect,
             color_token,
@@ -225,7 +238,8 @@ fn create_effect_styles(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("`styles` needs at least one entry".into());
     }
     let results: Vec<Value> = ed.edit_tokens("Create effect styles", None, |tokens| {
-        (entries.iter())
+        entries
+            .iter()
             .map(|e| {
                 let made = (|| {
                     let e = Args(e.as_object().ok_or("each style must be an object")?);
@@ -251,7 +265,8 @@ fn set_effect_styles(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("`styles` needs at least one entry".into());
     }
     let results: Vec<Value> = ed.edit_tokens("Update effect styles", None, |tokens| {
-        (entries.iter())
+        entries
+            .iter()
             .map(|e| {
                 let done = (|| {
                     let e = Args(e.as_object().ok_or("each style must be an object")?);
@@ -303,8 +318,10 @@ fn own_mode(tokens: &TokenSet, name: &str) -> Result<String, String> {
         return Ok(m.id.clone());
     }
     let names: Vec<&str> = tokens.modes().iter().map(|m| m.name.as_str()).collect();
-    let system =
-        (tokens.systems().iter()).find(|s| s.modes.iter().any(|m| css_slug(&m.name) == slug));
+    let system = tokens
+        .systems()
+        .iter()
+        .find(|s| s.modes.iter().any(|m| css_slug(&m.name) == slug));
     Err(match system {
         Some(s) => format!(
             "\"{name}\" is a mode of the {} design system, so it can't be changed in this \
@@ -325,7 +342,8 @@ fn create_modes(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("`names` needs at least one mode name".into());
     }
     let results: Vec<Value> = ed.edit_tokens("Add modes", None, |tokens| {
-        (names.iter())
+        names
+            .iter()
             .map(|name| {
                 let name = name.trim();
                 if own_mode(tokens, name).is_ok() {
@@ -351,7 +369,8 @@ fn set_modes(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("`modes` needs at least one entry".into());
     }
     let results: Vec<Value> = ed.edit_tokens("Edit modes", None, |tokens| {
-        (entries.iter())
+        entries
+            .iter()
             .map(|e| {
                 let done = (|| {
                     let e = Args(e.as_object().ok_or("each mode must be an object")?);
