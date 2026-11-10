@@ -2249,10 +2249,13 @@ fn check_components(host: &mut dyn Host, a: &Args) -> Result<(), String> {
     let mut wanted = Vec::new();
     names(&html::parse(a.str("html").unwrap_or("")), &mut wanted);
     let ed = host.editor();
-    for c in &wanted {
-        components::find_main(ed, c)?;
+    let mut unresolved = Vec::new();
+    for c in wanted {
+        if components::find_main(ed, &c)?.is_none() {
+            unresolved.push(c);
+        }
     }
-    wanted.retain(|c| components::find_main(ed, c).is_ok_and(|m| m.is_none()));
+    let mut wanted = unresolved;
     let tokens = &ed.tokens;
     wanted.retain(|c| tokens.find_component(c).is_none());
     if wanted.is_empty() {
@@ -3200,7 +3203,6 @@ struct Builder<'t, 'a> {
     warnings: Vec<String>,
     /// In placement order.
     instances: Vec<NodeId>,
-    /// The file's own mains this call places.
     local: &'t components::LocalMains,
 }
 
@@ -3779,7 +3781,7 @@ impl Builder<'_, '_> {
         if let Some(i) = index {
             *i += 1;
         }
-        // A local main's canvas position isn't the instance's; root placement picks a spot.
+        // Discard the main's position so root placement can find free space.
         let r = &mut self.tx.node_mut(id).unwrap().rect;
         (r.x, r.y) = (0.0, 0.0);
         let before = self.tx.doc().get(id).unwrap().clone();

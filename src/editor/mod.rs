@@ -2331,8 +2331,8 @@ impl Editor {
         }
     }
 
-    /// Wrap the top-level selection in a new frame in one undo step, after `finish` edits the
-    /// frame. `None` when nothing is selected or the layers don't share a parent.
+    /// Includes `finish` in the frame's undo step. Returns `None` for an empty selection or
+    /// layers with different parents.
     pub(super) fn frame_selection(
         &mut self,
         label: &str,

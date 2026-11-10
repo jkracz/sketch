@@ -478,8 +478,8 @@ impl Editor {
         self.create_component_named(None)
     }
 
-    /// [`Editor::create_component`] in one undo step, naming the component `name` when given.
-    /// `None` when nothing is selected or the selected layers don't share a parent.
+    /// Creation and naming share one undo step. Returns `None` for an empty selection or
+    /// layers with different parents.
     pub fn create_component_named(&mut self, name: Option<&str>) -> Option<NodeId> {
         let ids = self.top_selection();
         if ids.is_empty() {

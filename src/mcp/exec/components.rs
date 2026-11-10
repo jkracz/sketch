@@ -1,6 +1,4 @@
-//! The file's own components over MCP: make mains, place their instances from write_html,
-//! detach instances and reset their overrides. Each tool runs the editor action the inspector
-//! runs, on the page the nodes are on, and leaves the user's selection as it was.
+//! Component tools preserve the user's page and selection.
 
 use super::{Args, INSTANCE_TAG, ToolResult, node_key, page_arg, resolve, resolve_all, text};
 use crate::editor::Editor;
@@ -10,10 +8,8 @@ use crate::model::{Document, Node, NodeId};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
-/// At most this many mains in get_basic_info.
 const MAX_LISTED: usize = 200;
 
-/// Run `f` on page `page` with `ids` selected, then give the page its selection back.
 fn with_selection<R>(
     ed: &mut Editor,
     page: usize,
@@ -30,7 +26,6 @@ fn with_selection<R>(
     })
 }
 
-/// Group node keys by the page they're on, in the order given.
 fn by_page(ed: &Editor, keys: &[String], def: usize) -> Result<Vec<(usize, Vec<NodeId>)>, String> {
     let mut out: Vec<(usize, Vec<NodeId>)> = Vec::new();
     for k in keys {
@@ -44,7 +39,6 @@ fn by_page(ed: &Editor, keys: &[String], def: usize) -> Result<Vec<(usize, Vec<N
     Ok(out)
 }
 
-/// The page and node of the main a link points at, when that node is on a page of this file.
 fn linked_node(ed: &Editor, page: usize, n: &Node) -> Option<(usize, NodeId)> {
     let l = n.instance.as_ref()?;
     if l.component.is_some() {
@@ -57,20 +51,19 @@ fn linked_node(ed: &Editor, page: usize, n: &Node) -> Option<(usize, NodeId)> {
     ed.page_doc(mp).get(l.main).map(|m| (mp, m.id))
 }
 
-/// Whether `n` is the root of an instance: its link points at a main component, here or in a
-/// design system.
+// Instance roots link to main components; child layers link to ordinary nodes.
 fn is_root(ed: &Editor, page: usize, n: &Node) -> bool {
     let Some(l) = &n.instance else { return false };
     match &l.component {
-        Some(c) => {
-            (ed.tokens.component(c)).is_some_and(|c| c.doc.get(l.main).is_some_and(|m| m.component))
-        }
+        Some(c) => ed
+            .tokens
+            .component(c)
+            .is_some_and(|c| c.doc.get(l.main).is_some_and(|m| m.component)),
         None => linked_node(ed, page, n)
             .is_some_and(|(mp, m)| ed.page_doc(mp).get(m).is_some_and(|m| m.component)),
     }
 }
 
-/// The instance root `id` is a layer of: itself or its nearest ancestor that is one.
 fn root_of(ed: &Editor, page: usize, id: NodeId) -> Option<NodeId> {
     let doc = ed.page_doc(page);
     std::iter::once(id)
@@ -78,10 +71,6 @@ fn root_of(ed: &Editor, page: usize, id: NodeId) -> Option<NodeId> {
         .find(|a| doc.get(*a).is_some_and(|n| is_root(ed, page, n)))
 }
 
-// ------------------------------------------------------------------------------ reading
-
-/// Component facts for get_node_info: what an instance comes from, the instance a layer
-/// belongs to, its overrides, and how many instances a main has.
 pub(super) fn describe(ed: &Editor, page: usize, id: NodeId, v: &mut Value) {
     let doc = ed.page_doc(page);
     let n = doc.get(id).unwrap();
@@ -103,7 +92,6 @@ pub(super) fn describe(ed: &Editor, page: usize, id: NodeId, v: &mut Value) {
     }
 }
 
-/// The name of the file's own main that instance root `n` comes from.
 pub(super) fn main_name(ed: &Editor, page: usize, n: &Node) -> Option<String> {
     let (mp, m) = linked_node(ed, page, n)?;
     let m = ed.page_doc(mp).get(m)?;
@@ -113,17 +101,20 @@ pub(super) fn main_name(ed: &Editor, page: usize, n: &Node) -> Option<String> {
 fn instance_count(ed: &Editor, page: usize, main: NodeId) -> usize {
     (0..ed.pages.len())
         .map(|p| {
-            (ed.page_doc(p).nodes.values())
+            ed.page_doc(p)
+                .nodes
+                .values()
                 .filter(|n| linked_node(ed, p, n) == Some((page, main)))
                 .count()
         })
         .sum()
 }
 
-/// Every main component in the file, on every page, for get_basic_info.
 pub(super) fn list(ed: &Editor) -> Value {
     let all = mains(ed);
-    let listed: Vec<Value> = (all.iter().take(MAX_LISTED))
+    let listed: Vec<Value> = all
+        .iter()
+        .take(MAX_LISTED)
         .map(|(p, id)| {
             let n = ed.page_doc(*p).get(*id).unwrap();
             json!({
@@ -139,22 +130,23 @@ pub(super) fn list(ed: &Editor) -> Value {
     }
 }
 
-/// Every main component, page by page, in name order within a page.
 fn mains(ed: &Editor) -> Vec<(usize, NodeId)> {
     let mut out = Vec::new();
     for p in 0..ed.pages.len() {
         let doc = ed.page_doc(p);
         let mut here: Vec<&Node> = doc.nodes.values().filter(|n| n.component).collect();
         here.sort_by(|a, b| {
-            (a.name.to_lowercase().cmp(&b.name.to_lowercase())).then(a.id.0.cmp(&b.id.0))
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.id.0.cmp(&b.id.0))
         });
         out.extend(here.into_iter().map(|n| (p, n.id)));
     }
     out
 }
 
-/// The file's own main named by `key`: a main's node id, or its exact name ignoring case.
-/// `Ok(None)` when the file has no such main; an error when several mains share the name.
+/// Accepts node ids or case-insensitive names; duplicate names return an error.
 pub(super) fn find_main(ed: &Editor, key: &str) -> Result<Option<(usize, NodeId)>, String> {
     let key = key.trim();
     if key.contains(':')
@@ -163,9 +155,12 @@ pub(super) fn find_main(ed: &Editor, key: &str) -> Result<Option<(usize, NodeId)
     {
         return Ok(Some((p, id)));
     }
-    let named: Vec<(usize, NodeId)> = (mains(ed).into_iter())
+    let named: Vec<(usize, NodeId)> = mains(ed)
+        .into_iter()
         .filter(|(p, id)| {
-            (ed.page_doc(*p).get(*id)).is_some_and(|n| n.name.trim().eq_ignore_ascii_case(key))
+            ed.page_doc(*p)
+                .get(*id)
+                .is_some_and(|n| n.name.trim().eq_ignore_ascii_case(key))
         })
         .collect();
     match named[..] {
@@ -175,7 +170,8 @@ pub(super) fn find_main(ed: &Editor, key: &str) -> Result<Option<(usize, NodeId)
             "{} components are named `{key}`: {}. Pass the main's id as component=\"…\", or \
              rename one with rename_nodes.",
             named.len(),
-            (named.iter())
+            named
+                .iter()
                 .map(|(p, id)| format!("{} on page {}", node_key(ed, *p, *id), ed.pages[*p].name))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -183,23 +179,15 @@ pub(super) fn find_main(ed: &Editor, key: &str) -> Result<Option<(usize, NodeId)
     }
 }
 
-// ------------------------------------------------------------------------------ write_html
-
-/// The file's own mains that one write_html call places, resolved before the edit starts so
-/// mains on other pages can be read while the target page is being edited.
+/// Resolves mains before the edit so write_html can read other pages.
 #[derive(Default)]
 pub(super) struct LocalMains {
-    /// By the `component` attribute as written (trimmed).
     by_key: HashMap<String, (Option<String>, NodeId)>,
-    /// Documents of other pages that hold mains, by page id.
     docs: HashMap<String, Document>,
 }
 
 impl LocalMains {
-    /// Resolve every `<x-sketch-instance component>` in `tree` that names one of the file's
-    /// own mains. `target` is where the HTML goes on `page`: a main can't be placed inside
-    /// itself, directly or through its instances. With `replace`, the target is removed first,
-    /// so it can't hold a main the HTML places.
+    /// Rejects self-nesting and replacement that would delete a referenced main.
     pub(super) fn resolve(
         ed: &Editor,
         tree: &[Html],
@@ -214,7 +202,8 @@ impl LocalMains {
             return Ok(out);
         }
         let doc = ed.page_doc(page);
-        let around: HashSet<(usize, NodeId)> = (target.into_iter())
+        let around: HashSet<(usize, NodeId)> = target
+            .into_iter()
             .flat_map(|t| std::iter::once(t).chain(doc.ancestors(t)))
             .filter(|a| doc.get(*a).is_some_and(|n| n.component))
             .map(|a| (page, a))
@@ -242,7 +231,7 @@ impl LocalMains {
             }
             let page_id = (mp != page).then(|| ed.pages[mp].id.clone());
             if let Some(id) = &page_id {
-                (out.docs)
+                out.docs
                     .entry(id.clone())
                     .or_insert_with(|| ed.page_doc(mp).clone());
             }
@@ -251,7 +240,6 @@ impl LocalMains {
         Ok(out)
     }
 
-    /// Where to instantiate the main `key` names from, and the main's id.
     pub(super) fn get(&self, key: &str) -> Option<(Source<'_>, NodeId)> {
         let (page, main) = self.by_key.get(key.trim())?;
         let src = Source {
@@ -274,7 +262,6 @@ fn wanted(nodes: &[Html], out: &mut Vec<String>) {
     }
 }
 
-/// Whether main `m` is one of `set`, or holds an instance of one of them at any depth.
 fn holds_any(
     ed: &Editor,
     m: (usize, NodeId),
@@ -288,15 +275,13 @@ fn holds_any(
         return false;
     }
     let doc = ed.page_doc(m.0);
-    (doc.subtree(m.1).into_iter()).any(|id| {
+    doc.subtree(m.1).into_iter().any(|id| {
         let n = doc.get(id).unwrap();
         id != m.1
             && is_root(ed, m.0, n)
             && linked_node(ed, m.0, n).is_some_and(|inner| holds_any(ed, inner, set, depth + 1))
     })
 }
-
-// ------------------------------------------------------------------------------ tools
 
 pub(super) fn create_component(ed: &mut Editor, a: &Args) -> ToolResult {
     let (page, ids) = resolve_all(ed, &a.strs("nodeIds")?, page_arg(ed, a)?)?;
