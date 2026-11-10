@@ -836,7 +836,6 @@ fn instances_of_mains_on_other_pages_keep_their_token_mode_on_reopen() {
     ed.add_page();
     key(&mut ed, sketch_rs::editor::Key::Char('v'), cmd);
     let inst = ed.selection[0];
-    // Dark on the instance, as the inspector sets it.
     ed.edit("mode", |tx| {
         let n = tx.node_mut(inst).unwrap();
         n.mode = Some(dark.clone());

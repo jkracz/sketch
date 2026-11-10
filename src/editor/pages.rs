@@ -348,7 +348,7 @@ impl Editor {
         r
     }
 
-    /// The page `doc` holds: the active one, or the one [`Editor::with_page`] lent it.
+    /// The page held in `doc`, which may differ from the visible page during `with_page`.
     pub fn current_page(&self) -> usize {
         self.lent_page.unwrap_or(self.active_page)
     }
@@ -362,7 +362,6 @@ impl Editor {
         }
     }
 
-    /// The document of the page with this id.
     pub fn page_doc_by_id(&self, id: &str) -> Option<&Document> {
         let i = self.pages.iter().position(|p| p.id == id)?;
         Some(self.page_doc(i))

@@ -64,7 +64,7 @@ impl Session {
         if !updates.is_empty() {
             ed.status = updates.join(" ");
         }
-        // With the tokens in place, since synced layers keep their bindings.
+        // Load tokens before syncing layers that bind to them.
         ed.sync_page_instances(ed.active_page);
         self.project = Some(p);
         self.dirty_since = None;

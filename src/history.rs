@@ -223,8 +223,7 @@ pub struct History {
 }
 
 impl History {
-    /// One past the highest id any change can recreate, so layers added outside the history
-    /// (instances synced from another page) never take an id a redo will need.
+    /// Reserve ids that undo or redo can recreate when adding layers outside history.
     pub fn id_ceiling(&self) -> u64 {
         let ids = (self.undo.iter().chain(&self.redo)).map(|c| c.next_id.0.max(c.next_id.1));
         ids.max().unwrap_or(0)

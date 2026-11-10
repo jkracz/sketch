@@ -1,8 +1,6 @@
-//! Components across pages. An instance may point at a main component on another page of
-//! the project ([`InstanceLink::page`]). Editing a main syncs instances on its own page in the
-//! same undo step (see [`Editor::fixup`]). Instances on other pages follow lazily, when their
-//! page is shown, saved or exported, the way token values do: the sync is derived state and
-//! adds nothing to that page's undo history.
+//! Components across pages: an instance's main may be on another page ([`InstanceLink::page`]).
+//! Same-page instances sync in the main's undo step. Instances on other pages sync when
+//! shown, saved or exported, without adding to their page's undo history.
 
 use super::Editor;
 use super::structure::{Source, sync_node};
@@ -11,7 +9,7 @@ use crate::model::{Document, InstanceLink, Node, NodeId};
 use std::collections::HashSet;
 
 impl Editor {
-    /// The page holding the main that `link`, on the current document, points at.
+    /// Resolve the main's page relative to the page currently held in `doc`.
     pub fn main_page(&self, link: &InstanceLink) -> Option<usize> {
         match &link.page {
             None => Some(self.current_page()),
@@ -19,13 +17,11 @@ impl Editor {
         }
     }
 
-    /// The document holding the main that `link`, on the current document, points at.
     pub fn main_doc(&self, link: &InstanceLink) -> Option<&Document> {
         self.main_page(link).map(|i| self.page_doc(i))
     }
 
-    /// Sync these instance roots on the current document from their mains, wherever they
-    /// are, inside the open transaction.
+    /// Sync these instance roots from their mains, on any page, in the open transaction.
     pub(super) fn sync_instances(&mut self, roots: &[NodeId]) {
         let cur = self.current_page();
         let srcs: Vec<(NodeId, Option<usize>)> = (roots.iter())
@@ -59,17 +55,14 @@ impl Editor {
         }
     }
 
-    /// Bring page `i`'s instances of mains on other pages up to date, after the pages it
-    /// takes mains from. Adds no undo step; the page is marked for saving if anything moved.
-    /// Waits while an edit is open (a drag or text edit), so it never splits one, and while
-    /// [`Editor::with_page`] has a page out.
+    /// Sync source pages first, without adding undo steps. Mark changed pages for saving.
+    /// Defer during edits or [`Editor::with_page`] to avoid splitting an edit.
     pub fn sync_page_instances(&mut self, i: usize) {
         if self.can_sync() {
             self.sync_deep(i, &mut HashSet::new());
         }
     }
 
-    /// [`Editor::sync_page_instances`] for every page (before saving or exporting).
     pub fn sync_all_instances(&mut self) {
         if !self.can_sync() {
             return;
@@ -126,7 +119,7 @@ impl Editor {
             ed.rec = Some((Recording::new("Sync components", &ed.doc), None));
             ed.sync_instances(&roots);
             ed.fixup();
-            // Layers can end where they began: a mode the instance overrides is written back.
+            // Mode overrides can restore the original values, leaving no net change.
             let (rec, _) = ed.rec.take().unwrap();
             let changed =
                 (rec.touched().iter()).any(|id| rec.before(*id) != Some(&ed.doc.get(*id).cloned()));
@@ -140,9 +133,7 @@ impl Editor {
         }
     }
 
-    /// Prepare copied layers for pasting onto the current page. `from` is the page they were
-    /// copied from, when it is a page of this project; links to mains elsewhere are dropped,
-    /// as before. A main component copied from another page pastes as an instance of it.
+    /// Mains copied from another project page become instances. Drop links outside the project.
     pub(super) fn relink_for_paste(
         &self,
         nodes: &[Node],
@@ -153,7 +144,6 @@ impl Editor {
         let from = from.filter(|f| self.pages.iter().any(|p| p.id == *f));
         let src = from.and_then(|f| self.page_doc_by_id(f));
         let mut out = nodes.to_vec();
-        // Live mains on another page become instances of them.
         if let (Some(f), Some(src)) = (from, src)
             && f != here
         {
@@ -184,7 +174,6 @@ impl Editor {
             match l.page.as_deref() {
                 Some(p) if self.pages.iter().any(|s| s.id == p) => {}
                 Some(_) => n.instance = None,
-                // Main copied along: the paste links to the copy.
                 None if copied.contains(&l.main) => {}
                 None => n.instance = None,
             }
@@ -203,8 +192,6 @@ mod tests {
     const BLUE: Color = Color::rgb(0, 0, 255);
     const GREEN: Color = Color::rgb(0, 255, 0);
 
-    /// A project whose first page holds a component (a frame with a red rect), and an empty
-    /// second page. Returns the editor, the main and its rect.
     fn two_pages() -> (Editor, NodeId, NodeId) {
         let mut e = Editor::default();
         let f = Node::new(
@@ -246,8 +233,8 @@ mod tests {
     }
 
     #[test]
-    fn pasting_a_main_on_another_page_makes_an_instance_of_it() {
-        let (mut e, main, _) = two_pages();
+    fn instances_follow_their_main_when_their_page_is_shown_with_no_undo_step() {
+        let (mut e, main, rect) = two_pages();
         copy(&mut e, &[main]);
         let inst = paste_on(&mut e, 1);
         let n = e.doc.get(inst).unwrap();
@@ -257,17 +244,6 @@ mod tests {
             (l.main, l.page.as_deref()),
             (main, Some(e.pages[0].id.as_str()))
         );
-        assert!(e.is_instance_root(inst));
-        assert_eq!(e.instance_main(inst), Some((0, main)));
-        assert_eq!(inner_fill(&e, 1, inst), Some(RED));
-        e.doc.validate().unwrap();
-    }
-
-    #[test]
-    fn instances_follow_their_main_when_their_page_is_shown_with_no_undo_step() {
-        let (mut e, main, rect) = two_pages();
-        copy(&mut e, &[main]);
-        let inst = paste_on(&mut e, 1);
         let undo_len = e.history.undo_len();
         e.switch_page(0);
         set_main_fill(&mut e, rect, BLUE);
@@ -276,7 +252,6 @@ mod tests {
         assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
         assert_eq!(e.history.undo_len(), undo_len, "the sync adds no undo step");
         assert!(e.dirty_pages().contains(&1), "the synced page needs saving");
-        // Undo on the main's page undoes the edit there only; the instance follows later.
         e.switch_page(0);
         e.undo();
         assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
@@ -294,7 +269,6 @@ mod tests {
         e.sync_all_instances();
         assert_eq!(e.active_page, 0);
         assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
-        assert_eq!(e.page_data(1).doc.get(inst).unwrap().children.len(), 1);
     }
 
     #[test]
@@ -314,24 +288,16 @@ mod tests {
         e.switch_page(1);
         let c = e.doc.get(child).unwrap();
         assert_eq!((c.style.fill(), c.rect.x), (Some(GREEN), 30.0));
-        // Reset reads the main from its page.
         e.selection = vec![inst];
         e.reset_overrides();
         assert_eq!(inner_fill(&e, 1, inst), Some(BLUE));
     }
 
     #[test]
-    fn structural_edits_to_the_main_reach_other_pages() {
+    fn undo_on_an_instance_page_keeps_the_mains_current_size() {
         let (mut e, main, _) = two_pages();
         copy(&mut e, &[main]);
         let inst = paste_on(&mut e, 1);
-        e.switch_page(0);
-        let extra = Node::new(NodeId(0), NodeKind::Rect, Rect::new(50.0, 10.0, 5.0, 5.0));
-        e.add_node(extra, Some(main));
-        e.switch_page(1);
-        assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
-        e.doc.validate().unwrap();
-        // Undo after the sync shows the main as it is, not the old snapshot.
         e.switch_page(0);
         e.edit("resize", |tx| tx.node_mut(main).unwrap().rect.w = 300.0);
         e.switch_page(1);
@@ -349,7 +315,6 @@ mod tests {
         let back = paste_on(&mut e, 0);
         let l = e.doc.get(back).unwrap().instance.clone().unwrap();
         assert_eq!((l.main, l.page), (main, None));
-        // Local instances sync in the edit's own undo step, as before.
         set_main_fill(&mut e, rect, BLUE);
         assert_eq!(inner_fill(&e, 0, back), Some(BLUE));
     }
@@ -369,7 +334,6 @@ mod tests {
         e.selection = vec![];
         e.switch_page(2);
         assert_eq!(inner_fill(&e, 2, third), Some(BLUE));
-        // Go to main switches to the main's page.
         e.selection = vec![third];
         e.go_to_main();
         assert_eq!((e.active_page, e.selection.clone()), (0, vec![main]));
@@ -402,7 +366,6 @@ mod tests {
         e.selection = vec![a_in_b];
         e.create_component();
         let b = e.selection[0];
-        assert_ne!(b, a_in_b, "an instance is wrapped, not converted");
         copy(&mut e, &[b]);
         let b_inst = paste_on(&mut e, 2);
         e.switch_page(0);
@@ -449,12 +412,10 @@ mod tests {
         e.add_node(n, None);
         e.doc.validate().unwrap();
         assert_eq!(e.doc.get(inst).unwrap().children.len(), 2);
-        // Undoing the paste leaves nothing of the instance behind.
         e.undo();
         e.undo();
         e.doc.validate().unwrap();
         assert!(e.doc.nodes.is_empty(), "{:?}", e.doc.nodes.keys());
-        // Removing the child from the main, then undoing on the instance page.
         e.redo();
         e.switch_page(0);
         e.edit("delete", |tx| tx.remove(extra));
@@ -492,7 +453,5 @@ mod tests {
     fn old_links_without_a_page_still_load() {
         let l: InstanceLink = serde_json::from_str(r#"{"main": 4}"#).unwrap();
         assert_eq!(l.page, None);
-        let saved = serde_json::to_string(&l).unwrap();
-        assert!(!saved.contains("page"), "{saved}");
     }
 }

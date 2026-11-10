@@ -162,9 +162,8 @@ impl Document {
         Rect::union_all(&rects)
     }
 
-    /// Mend the tree after undo or redo replayed snapshots over changes made outside the
-    /// history (instances synced from another page): drop references to missing nodes and
-    /// nodes no longer reachable, and keep `next_id` above every id in use.
+    /// Mend the tree after undo or redo replayed snapshots over a component sync made
+    /// outside the history: drop dangling and unreachable nodes, keep `next_id` past them.
     pub fn prune(&mut self) {
         let nodes = &self.nodes;
         self.root.retain(|id| nodes.contains_key(id));

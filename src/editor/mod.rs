@@ -452,7 +452,6 @@ impl Editor {
         self.sync_tokens();
         // They also hold sizes measured before a font arrived.
         self.refit_font_text();
-        // And instances of mains on other pages as they were then.
         self.sync_page_instances(self.active_page);
     }
 
@@ -2250,10 +2249,9 @@ impl Editor {
         self.status = format!("Pasted {} layer(s)", self.selection.len());
     }
 
-    /// Insert copies of subtrees. `world[i]` is root `i`'s world rect. `from` is the page
-    /// they were copied from: the current page keeps the original parents and references to
-    /// layers outside the copied set, and another page of this project keeps instances linked
-    /// to their main components there.
+    /// Insert subtree copies using `world[i]` as root `i`'s world rect.
+    /// Same-page copies keep parents and external references. Copies from other project
+    /// pages keep links to their mains. `from` identifies the source page.
     pub fn insert_subtrees(
         &mut self,
         label: &str,
@@ -2268,7 +2266,6 @@ impl Editor {
         let nodes = self.relink_for_paste(nodes, roots, from);
         let ids = self.edit(label, |tx| {
             let ids = insert_subtrees_tx(tx, &nodes, roots, world, offset, same_page);
-            // Instances whose main is on this page link to it as a local main.
             let local: Vec<NodeId> = (ids.iter().flat_map(|r| tx.doc().subtree(*r)))
                 .filter(|id| {
                     (tx.doc().get(*id).and_then(|n| n.instance.as_ref()))
@@ -2435,7 +2432,7 @@ pub fn insert_subtrees_tx(
                 }
             }
         }
-        // Links to another page's main are kept; `Editor::insert_subtrees` settles them.
+        // Explicit page links bypass id remapping, even when they point back to this page.
         if let Some(l) = &mut c.instance
             && l.page.is_none()
         {

@@ -131,17 +131,15 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     }
 }
 
-/// Where sync reads an instance's main nodes from.
 #[derive(Clone, Copy)]
 pub(super) struct Source<'a> {
     /// The main's page document, or `None` for the document being edited.
     pub doc: Option<&'a Document>,
-    /// The main's page id when it is another page (written into new instance links).
+    /// Copied into new instance links; `None` keeps links local.
     pub page: Option<&'a str>,
 }
 
 impl Source<'_> {
-    /// Mains on the page being edited.
     pub const LOCAL: Source<'static> = Source {
         doc: None,
         page: None,
@@ -273,8 +271,8 @@ impl Editor {
             .filter(|id| self.doc.get(*id).is_some_and(|n| n.is_group()))
             .collect();
         groups.sort_by_key(|g| std::cmp::Reverse(depth(self, *g)));
-        // 2. Components touched (self or ancestor is a main component). Instances on other
-        // pages follow when their page is next shown, saved or exported.
+        // 2. Components touched (self or ancestor is a main component). Other pages sync
+        // later (see `components.rs`).
         let comps: Vec<NodeId> = cands
             .iter()
             .copied()
@@ -574,7 +572,6 @@ impl Editor {
         self.instance_main(id).is_some()
     }
 
-    /// The page and id of the main component an instance root points to.
     pub fn instance_main(&self, id: NodeId) -> Option<(usize, NodeId)> {
         let l = self.doc.get(id)?.instance.as_ref()?;
         let page = self.main_page(l)?;
@@ -582,7 +579,6 @@ impl Editor {
         main.component.then_some((page, main.id))
     }
 
-    /// Select the main component of the selected instance, on whichever page it is.
     pub fn go_to_main(&mut self) {
         if let Some((page, m)) = self
             .selection
