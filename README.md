@@ -405,7 +405,8 @@ Known gaps), ⏳ planned in a later milestone, ❌ not planned.
   sits. Sketch doesn't draw a background blur on a layer inside one that has a layer blur.
   In `get_jsx`, a layer that exports as inline SVG writes its drop shadows as
   `filter: drop-shadow()`, which has no spread, and leaves out its inner shadows and
-  background blur.
+  background blur. With several drop shadows on such a layer, a browser also draws each
+  later shadow's shadow of the earlier ones, because CSS chains filters.
   Box shadows cost no extra render pass. Shape shadows and layer blurs share atlas pages at
   three passes a page, and each background blur in view adds about four. `tests/perf.rs`
   measures all of these.

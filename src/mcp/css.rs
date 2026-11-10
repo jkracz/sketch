@@ -636,7 +636,8 @@ pub fn shadows_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<S
 /// The effects of a layer that exports as inline SVG, as one `filter` for the element around
 /// it. `drop-shadow()` follows the shape, as the canvas does, and takes the Gaussian's sigma.
 /// It has no spread, and nothing in `filter` draws an inner shadow or a background blur, so
-/// those are left out.
+/// those are left out. CSS feeds each filter the one before it, so with several drop shadows
+/// a browser also draws each later shadow's shadow of the earlier ones.
 pub fn shape_filter_css(n: &Node, color: impl Fn(usize, Color) -> String) -> Option<String> {
     let mut parts: Vec<String> = (n.style.effects.iter().enumerate())
         .filter(|(_, e)| e.visible && e.kind == EffectKind::DropShadow)
