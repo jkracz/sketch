@@ -7,6 +7,8 @@
 //!
 //! * [`server`]: the rmcp HTTP service (runs on its own Tokio thread).
 //! * [`exec`]: runs one tool call against a [`exec::Host`] (the app, or a headless session).
+//! * [`layers`]: layer commands (lock, group, flip, align...); [`layer_css`]: style keys for
+//!   layer properties CSS has no name for.
 //! * [`library`]: the personal library and Excalidraw import.
 //! * [`vectors`]: booleans, path points, text ranges, arrow edits and pencil strokes.
 //! * [`tools`]: tool names, descriptions and schemas; [`css`] and [`html`]: the style and
@@ -17,6 +19,8 @@
 pub mod css;
 pub mod exec;
 pub mod html;
+mod layer_css;
+mod layers;
 pub mod library;
 pub mod pages;
 pub mod projects;

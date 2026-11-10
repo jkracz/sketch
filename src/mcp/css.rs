@@ -6,7 +6,7 @@
 //! `TextStyle`, `AutoLayout` and `LayoutChild`, reports the rest as ignored, and turns nodes
 //! back into CSS for `get_computed_styles` / `get_jsx`.
 
-use crate::geom::v2;
+use crate::geom::{V2, v2};
 use crate::model::TokenProp;
 use crate::model::effects::{blur_sigma, edit_effects};
 use crate::model::rough::{FillStyle, Rough};
@@ -406,14 +406,15 @@ pub fn color_css(c: Color) -> String {
     }
 }
 
-/// `linear-gradient(...)` / `radial-gradient(...)` as a paint.
-pub fn gradient(s: &str) -> Option<Paint> {
+/// `linear-gradient(...)` / `radial-gradient(...)` as a paint on a `w`×`h` box.
+pub fn gradient(s: &str, w: f64, h: f64) -> Option<Paint> {
     let (name, _) = func_args(s)?;
     let open = s.find('(')?;
     let inner = s[open + 1..].trim().strip_suffix(')')?;
     let args = split_top(inner, ',');
     let mut stops_src: &[String] = &args;
     let mut angle = 180.0f64; // to bottom
+    let (mut center, mut radius) = (v2(0.5, 0.5), v2(0.5, 0.5));
     if name == "linear-gradient" {
         let first = args.first()?.to_ascii_lowercase();
         if let Some(d) = first.strip_suffix("deg") {
@@ -434,10 +435,10 @@ pub fn gradient(s: &str) -> Option<Paint> {
             stops_src = &args[1..];
         }
     } else if name == "radial-gradient" {
-        if args
-            .first()
-            .is_some_and(|a| color(&split_ws(a)[0]).is_none())
+        if let Some(first) = args.first()
+            && color(&split_ws(first)[0]).is_none()
         {
+            (center, radius) = radial_shape(first, w, h)?;
             stops_src = &args[1..];
         }
     } else {
@@ -473,10 +474,90 @@ pub fn gradient(s: &str) -> Option<Paint> {
     } else {
         Paint::Radial {
             stops,
-            center: v2(0.5, 0.5),
-            radius: v2(0.5, 0.5),
+            center,
+            radius,
         }
     })
+}
+
+/// The `[circle | ellipse] [size] [at position]` argument of `radial-gradient`, as a center
+/// and x/y radii in fractions of a `w`×`h` box. Without a size the radii are 50% 50%, which
+/// is how Sketch has always read a bare radial gradient.
+fn radial_shape(arg: &str, w: f64, h: f64) -> Option<(V2, V2)> {
+    let lower = arg.to_ascii_lowercase();
+    let parts = split_ws(&lower);
+    let at = parts.iter().position(|p| p == "at").unwrap_or(parts.len());
+    let (shape, pos) = (&parts[..at], parts.get(at + 1..).unwrap_or_default());
+    if at < parts.len() && pos.is_empty() {
+        return None;
+    }
+    let circle = shape.iter().any(|p| p == "circle");
+    let size: Vec<&String> = shape
+        .iter()
+        .filter(|p| *p != "circle" && *p != "ellipse")
+        .collect();
+    // A px value as a fraction of one side; unknown sizes read as a 100px box.
+    let side = |v: f64| if v > 0.0 { v } else { 100.0 };
+    let (w, h) = (side(w), side(h));
+    let frac = |p: &str, len: f64| percent(p).or_else(|| length(p, 16.0).map(|v| v / len));
+    let mut c = v2(0.5, 0.5);
+    let keyword = |p: &str| match p {
+        "left" | "top" => Some(0.0),
+        "center" => Some(0.5),
+        "right" | "bottom" => Some(1.0),
+        _ => None,
+    };
+    match pos {
+        [] => {}
+        [p] => match p.as_str() {
+            "top" | "bottom" => c.y = keyword(p)?,
+            _ => c.x = keyword(p).or_else(|| frac(p, w))?,
+        },
+        [a, b] => {
+            // `top left` names y first.
+            let (x, y) = if matches!(a.as_str(), "top" | "bottom")
+                || matches!(b.as_str(), "left" | "right")
+            {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            c = v2(
+                keyword(x).or_else(|| frac(x, w))?,
+                keyword(y).or_else(|| frac(y, h))?,
+            );
+        }
+        _ => return None,
+    }
+    // Distances from the center to the near and far sides, in px.
+    let near = v2(c.x.min(1.0 - c.x) * w, c.y.min(1.0 - c.y) * h);
+    let far = v2(c.x.max(1.0 - c.x) * w, c.y.max(1.0 - c.y) * h);
+    let px = match size.as_slice() {
+        [] => return Some((c, v2(0.5, 0.5))),
+        [k] if matches!(
+            k.as_str(),
+            "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner"
+        ) =>
+        {
+            let d = if k.starts_with("closest") { near } else { far };
+            match (circle, k.ends_with("corner")) {
+                (false, false) => d,
+                // An ellipse through the corner keeps the shape of the side ellipse.
+                (false, true) => d * std::f64::consts::SQRT_2,
+                (true, true) => v2(d.x.hypot(d.y), d.x.hypot(d.y)),
+                (true, false) if k.starts_with("closest") => v2(d.x.min(d.y), d.x.min(d.y)),
+                (true, false) => v2(d.x.max(d.y), d.x.max(d.y)),
+            }
+        }
+        [r] => {
+            let rx = frac(r, w)? * w;
+            let ry = if circle { rx } else { frac(r, h)? * h };
+            v2(rx, ry)
+        }
+        [rx, ry] if !circle => v2(frac(rx, w)? * w, frac(ry, h)? * h),
+        _ => return None,
+    };
+    Some((c, v2(px.x / w, px.y / h)))
 }
 
 fn gradient_css(p: &Paint) -> Option<String> {
@@ -494,7 +575,25 @@ fn gradient_css(p: &Paint) -> Option<String> {
                 .rem_euclid(360.0);
             Some(format!("linear-gradient({}deg, {})", a.round(), stops(s)))
         }
-        Paint::Radial { stops: s, .. } => Some(format!("radial-gradient({})", stops(s))),
+        Paint::Radial {
+            stops: s,
+            center,
+            radius,
+        } => {
+            let pct = |v: f64| format!("{}%", (v * 1000.0).round() / 10.0);
+            let shape = if (*center, *radius) == (v2(0.5, 0.5), v2(0.5, 0.5)) {
+                String::new()
+            } else {
+                format!(
+                    "ellipse {} {} at {} {}, ",
+                    pct(radius.x),
+                    pct(radius.y),
+                    pct(center.x),
+                    pct(center.y)
+                )
+            };
+            Some(format!("radial-gradient({shape}{})", stops(s)))
+        }
         _ => None,
     }
 }
@@ -905,6 +1004,9 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             if !stale && let Some(prop) = TokenProp::from_css_key(key, n) {
                 n.tokens.insert(prop, v.to_string());
             }
+            continue;
+        }
+        if super::layer_css::owns(k) {
             continue;
         }
         let lower = v.to_ascii_lowercase();
@@ -1404,6 +1506,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
+    super::layer_css::apply(n, styles, ctx, &mut a);
     // Named styles win over literals so computed styles apply back without losing effects.
     if let Some(v) = named_style {
         apply_effect_style(n, "effectStyle", v, &mut a);
@@ -1482,7 +1585,7 @@ fn apply_background(n: &mut Node, k: &str, v: &str, a: &mut Applied) -> bool {
     for layer in split_top(v, ',').iter().rev() {
         if let Some(c) = color(layer) {
             fills.push(Paint::solid(c));
-        } else if let Some(g) = gradient(layer) {
+        } else if let Some(g) = gradient(layer, n.rect.w, n.rect.h) {
             fills.push(g);
         } else if let Some(u) = url(layer) {
             a.image = Some((u, ImageMode::Fill));
@@ -1672,9 +1775,9 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
         }
     }
     // A bound zero still shows, so readers can see the token that owns it.
-    if let Some(s) = n.style.stroke
-        && (n.style.stroke_width > 0.0 || n.tokens.contains_key(&TokenProp::StrokeWidth))
-    {
+    let stroked = n.style.stroke.is_some()
+        && (n.style.stroke_width > 0.0 || n.tokens.contains_key(&TokenProp::StrokeWidth));
+    if let Some(s) = n.style.stroke.filter(|_| stroked) {
         let kind = if n.style.dash.is_empty() {
             "solid"
         } else if n.style.dash[0] <= n.style.stroke_width * 1.5 {
@@ -1728,6 +1831,7 @@ pub fn computed(n: &Node, parent_layout: Option<&AutoLayout>, is_root: bool) -> 
             .into(),
         );
     }
+    super::layer_css::computed(n, is_root, stroked, &mut m);
     m
 }
 
@@ -1844,7 +1948,8 @@ mod tests {
 
     #[test]
     fn gradients_and_sketch() {
-        let Some(Paint::Linear { stops, from, to }) = gradient("linear-gradient(90deg, red, blue)")
+        let Some(Paint::Linear { stops, from, to }) =
+            gradient("linear-gradient(90deg, red, blue)", 100.0, 100.0)
         else {
             panic!()
         };

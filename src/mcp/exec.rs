@@ -356,6 +356,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "detach_instances" => components::detach_instances(ed, &a),
                 "reset_overrides" => components::reset_overrides(ed, &a),
                 n if super::styles::TOOLS.contains(&n) => super::styles::call(ed, n, &a),
+                n if super::layers::TOOLS.contains(&n) => super::layers::call(ed, n, &a),
                 "finish_working_on_nodes" => {
                     host.save()?;
                     text(json!({"ok": true, "saved": host.project().is_some()}))
