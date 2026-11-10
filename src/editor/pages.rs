@@ -192,8 +192,8 @@ impl Editor {
         at
     }
 
-    /// Copy page `i` to just after it without leaving the current page (agents duplicating
-    /// pages). Nodes keep their numbers, so only the page part of their ids changes.
+    /// Copy page `i` to just after it without leaving the current page.
+    /// Nodes keep their numbers, so only the page part of their ids changes.
     pub fn duplicate_page_in_background(&mut self, i: usize, name: Option<&str>) -> usize {
         self.commit();
         let src = self.page_data(i);

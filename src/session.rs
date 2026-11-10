@@ -221,7 +221,7 @@ impl Session {
     }
 
     /// Close the project: final save; the caller then shows the home screen.
-    /// Save and close. A failed save keeps the project open, so its work isn't dropped.
+    /// If saving fails, keep the project open.
     pub fn close(&mut self, ed: &mut Editor) -> Result<(), FormatError> {
         self.save_all(ed)?;
         self.project = None;

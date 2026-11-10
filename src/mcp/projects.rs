@@ -47,13 +47,12 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "trash_resources",
-            "Moves projects and folders to the trash, as Move to Trash does in the app. Trashing a \
-             folder trashes its projects, and restoring any of them brings the folder back. \
-             Trashed projects vanish from list_resources, and a design system a trashed project \
-             publishes stops being available. Only the user can delete forever or empty the \
-             trash. Trashing the project open in the app saves and closes it first, and the app \
-             shows the home screen. Every id is checked first: if any can't be trashed, nothing \
-             is. Returns the trashed items.",
+            "Moves projects and folders to the trash. Trashing a folder trashes its projects, \
+             and restoring any of them brings the folder back. Trashed projects disappear from \
+             list_resources, and their published design systems become unavailable. Only the \
+             user can delete forever or empty the trash. Trashing the open project saves and \
+             closes it first, then shows the home screen. Every id is resolved before trashing \
+             starts; an unknown or ambiguous id changes nothing. Returns the trashed items.",
             json!({"resourceIds": keys("Project or folder ids, names or Folder/Project locations from list_resources.")}),
             &["resourceIds"],
             false,
@@ -80,15 +79,14 @@ pub fn definitions() -> Vec<Value> {
         ),
     ];
     for t in &mut v {
-        let name = t["name"].as_str().unwrap_or_default().to_string();
-        if matches!(
-            name.as_str(),
-            "list_trash" | "trash_resources" | "restore_resources"
-        ) && let Some(p) = t["inputSchema"]["properties"].as_object_mut()
+        let name = t["name"].as_str().unwrap_or_default();
+        let destructive = name == "trash_resources";
+        if matches!(name, "list_trash" | "trash_resources" | "restore_resources")
+            && let Some(p) = t["inputSchema"]["properties"].as_object_mut()
         {
             p.remove("fileId");
         }
-        if name == "trash_resources" {
+        if destructive {
             t["annotations"]["destructiveHint"] = json!(true);
         }
     }
@@ -116,7 +114,7 @@ fn file_json(dir: &std::path::Path, host: &dyn Host) -> Result<Value, String> {
     let mut v = json!({
         "fileId": m.id,
         "name": m.name,
-        "location": entry.as_ref().map_or(m.name.clone(), location),
+        "location": entry.as_ref().map_or_else(|| m.name.clone(), location),
         "path": dir,
     });
     if let Some(f) = entry.and_then(|e| e.folder) {
@@ -158,7 +156,7 @@ fn trash_json(e: &TrashEntry) -> Value {
     })
 }
 
-fn list_trash(host: &mut dyn Host) -> ToolResult {
+fn list_trash(host: &dyn Host) -> ToolResult {
     let items: Vec<Value> = host.store().list_trash().iter().map(trash_json).collect();
     text(json!({"items": items}))
 }
@@ -169,9 +167,8 @@ enum Doomed {
 }
 
 fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
-    let open = host.project().map(|p| p.dir.clone());
-    let store = host.store().clone();
-    let store = &store;
+    let open = host.project().map(|p| &p.dir);
+    let store = host.store();
     let mut closes_open = false;
     let mut doomed: Vec<Doomed> = Vec::new();
     for key in a.strs("resourceIds")? {
@@ -185,7 +182,7 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
             (None, Ok(f)) => Doomed::Folder(f),
             (None, Err(_)) => return Err(format!("`{key}` not found (see list_resources)")),
         };
-        if let Some(o) = &open {
+        if let Some(o) = open {
             closes_open |= match &item {
                 Doomed::File(d) => same_dir(d, o),
                 Doomed::Folder(f) => o.parent().is_some_and(|p| same_dir(p, &f.dir)),
@@ -213,7 +210,7 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
             .is_some_and(|p| folders.iter().any(|f| same_dir(f, p))),
         Doomed::Folder(_) => true,
     });
-    // As in the app, where the user goes home before trashing the project they had open.
+    // Save and close before moving the open project to the trash.
     if closes_open {
         host.close_project()?;
     }
@@ -222,11 +219,12 @@ fn trash_resources(host: &mut dyn Host, a: &Args) -> ToolResult {
         let r = match &d {
             Doomed::File(dir) => {
                 let m = Project::open(dir).map_err(|e| e.to_string())?.manifest;
-                store
+                host.store()
                     .trash(dir)
                     .map(|_| json!({"type": "file", "id": m.id, "name": m.name}))
             }
-            Doomed::Folder(f) => store
+            Doomed::Folder(f) => host
+                .store()
                 .trash_folder(&f.dir)
                 .map(|()| json!({"type": "folder", "id": f.id, "name": f.name})),
         };
@@ -319,18 +317,18 @@ fn unpublish(host: &mut dyn Host, a: &Args) -> ToolResult {
     check_file(host, a)?;
     let store = host.store().clone();
     let ed = host.editor();
-    let name = ed
+    let published = ed
         .published
         .as_ref()
-        .map(|l| l.name.clone())
         .ok_or("The open file hasn't published a design system.")?;
     if !crate::systems::Registry::in_store(&store)
         .list()
         .iter()
-        .any(|p| ed.published.as_ref().is_some_and(|l| l.id == p.id))
+        .any(|p| published.id == p.id)
     {
-        return Err(format!("{name} isn't published right now."));
+        return Err(format!("{} isn't published right now.", published.name));
     }
+    let name = published.name.clone();
     ed.status = crate::systems::unpublish(&store, ed)?;
     text(json!({
         "name": name,

@@ -21,7 +21,7 @@ parentId to create_file or move_resources. If it isn't listed, call create_folde
 returns the existing folder when the name is taken. parentId \"root\" is the top level. Two \
 folders can hold projects with the same name, so prefer ids or Folder/Project keys.
 - duplicate_file copies a project. trash_resources moves projects and folders to the trash; \
-list_trash and restore_resources bring them back. Only the user can delete forever.
+list_trash lists them and restore_resources brings them back. Only the user can delete forever.
 - Pages: create_page, rename_pages, duplicate_page, arrange_pages (reorder), delete_pages. \
 move_to_page moves or copies layers to another page.
 - For details read get_guide({ topic: \"sketch-rs-mcp-instructions\" }) once per session.

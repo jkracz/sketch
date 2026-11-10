@@ -26,8 +26,8 @@ pub fn definitions() -> Vec<Value> {
             "delete_pages",
             "Deletes pages and everything on them. This can't be undone, so only delete pages the \
              user asked to remove. A project keeps at least one page. Deleting the page the user \
-             is viewing shows the next one. Every id is checked first: if any is unknown, nothing \
-             is deleted. Returns the deleted pages and the pages left.",
+             is viewing shows a neighboring page. Every id is checked first: if any is unknown, \
+             nothing is deleted. Returns the deleted pages and the pages left.",
             json!({"pageIds": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Page ids or names from get_basic_info."}}),
             &["pageIds"],
             false,
@@ -90,7 +90,7 @@ fn page_list(ed: &Editor) -> Value {
     let list: Vec<Value> = (ed.pages.iter().enumerate())
         .map(|(i, p)| json!({"pageId": p.id, "name": p.name, "isActive": i == ed.active_page}))
         .collect();
-    json!(list)
+    Value::Array(list)
 }
 
 /// Page indices for `keys`, each once, in the order given.
@@ -162,8 +162,8 @@ fn arrange_pages(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({"pages": page_list(ed)}))
 }
 
-/// The listed layers without those inside another listed layer, in page order.
-fn top_level(doc: &crate::model::Document, ids: &[NodeId]) -> Vec<NodeId> {
+/// The listed layers without those inside another listed layer, in input order.
+fn top_level(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     let mut roots: Vec<NodeId> = Vec::new();
     for id in ids {
         if !roots.contains(id) && !ids.iter().any(|o| o != id && doc.is_ancestor(*o, *id)) {
@@ -207,14 +207,14 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
     };
     let copy = a.get("copy").and_then(Value::as_bool) == Some(true);
 
-    // What a copy to the clipboard holds.
     let doc = ed.page_doc(src);
     let roots = top_level(doc, &ids);
-    let nodes: Vec<Node> = (roots.iter())
-        .flat_map(|r| doc.subtree(*r))
-        .filter_map(|id| doc.get(id).cloned())
-        .collect();
     let old_order: Vec<Vec<NodeId>> = roots.iter().map(|r| doc.subtree(*r)).collect();
+    let nodes: Vec<Node> = old_order
+        .iter()
+        .flatten()
+        .filter_map(|id| doc.get(*id).cloned())
+        .collect();
     let world: Vec<Rect> = match parent {
         // Same x/y inside the new parent as inside the old one.
         Some(p) => {

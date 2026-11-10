@@ -1,5 +1,4 @@
-//! Pages, projects, trash and design-system tools over MCP: everything a person does from the
-//! Pages list, a project card's menu and the Trash, done by an agent.
+//! MCP coverage for pages, project duplication, trash, unpublishing and export backgrounds.
 
 use serde_json::{Value, json};
 use sketch_rs::geom::v2;

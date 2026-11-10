@@ -128,7 +128,7 @@ impl Host for SessionHost {
 
 // ------------------------------------------------------------------------------ arguments
 
-pub(super) struct Args<'a>(pub(super) &'a Map<String, Value>);
+pub(super) struct Args<'a>(&'a Map<String, Value>);
 
 impl<'a> Args<'a> {
     pub(super) fn get(&self, k: &str) -> Option<&'a Value> {
@@ -141,14 +141,14 @@ impl<'a> Args<'a> {
         self.str(k)
             .ok_or_else(|| format!("missing required string argument `{k}`"))
     }
-    pub(super) fn num(&self, k: &str) -> Option<f64> {
+    fn num(&self, k: &str) -> Option<f64> {
         self.get(k).and_then(|v| match v {
             Value::Number(n) => n.as_f64(),
             Value::String(s) => s.trim().trim_end_matches("px").parse().ok(),
             _ => None,
         })
     }
-    pub(super) fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
+    fn arr(&self, k: &str) -> Result<&'a Vec<Value>, String> {
         self.get(k)
             .and_then(Value::as_array)
             .ok_or_else(|| format!("missing required array argument `{k}`"))
