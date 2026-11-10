@@ -87,6 +87,13 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
             }) {
                 continue;
             }
+            // A layer blur spreads the layer and everything inside it, up to the exported root.
+            let mut spread = draw::layer_blur_reach(nd);
+            let outer = doc.ancestors(id);
+            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
+            for a in outer[..exported].iter().filter_map(|a| doc.get(*a)) {
+                spread += draw::layer_blur_reach(a);
+            }
             if nd.is_group() {
                 // A group paints nothing itself. It casts its shadows from what its children
                 // paint, their own shadows included.
@@ -97,7 +104,7 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
                     && let Some(cast) = Rect::union_all(&painted(doc, &nd.children, true))
                 {
                     for e in shadows {
-                        let reach = draw::blur_reach(e.sigma()) + draw::layer_blur_reach(nd);
+                        let reach = draw::blur_reach(e.sigma()) + spread;
                         rects.push(cast.translate(v2(e.x, e.y)).inflate(reach));
                     }
                 }
@@ -106,13 +113,6 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
             if !effects {
                 rects.push(draw::draw_bounds(nd, wr));
                 continue;
-            }
-            // A layer blur spreads the layer and everything inside it, up to the exported root.
-            let mut spread = draw::layer_blur_reach(nd);
-            let outer = doc.ancestors(id);
-            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
-            for a in outer[..exported].iter().filter_map(|a| doc.get(*a)) {
-                spread += draw::layer_blur_reach(a);
             }
             rects.push(draw::shadow_bounds(nd, wr).inflate(spread));
         }

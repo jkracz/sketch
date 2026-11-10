@@ -636,21 +636,40 @@ pub fn cast_ops(n: &Node, wr: Rect, d: f64, tol: f64) -> Option<(Vec<DrawOp>, f6
         return Some((vec![solid(grown)], fill_alpha));
     }
     let ink = matches!(n.kind, NodeKind::Stroke { .. });
-    if is_area(n) && (ink || !n.style.fills.is_empty()) {
+    // A fill you can't see casts nothing, so the stroke casts the shadow.
+    if is_area(n) && (ink || fill_alpha > 0.0) {
         // A stroke outside the outline is part of what the layer paints.
         let op = spread_op(n, wr, stroke_reach(n).0 + d, tol)?;
         return Some((vec![op], if ink { 1.0 } else { fill_alpha }));
     }
+    // Strokes only: a hollow shape, a line, or a connector with its heads.
     let color = n.style.stroke?;
-    let width = n.style.stroke_width + 2.0 * d;
-    let line = matches!(n.kind, NodeKind::Line { .. } | NodeKind::Connector { .. });
-    let ops = (width > 0.0).then(|| DrawOp::Stroke {
-        path: stroke_path(n, wr).unwrap_or_default(),
-        color: [1.0; 4],
-        width,
-        cap: if line { Cap::Round } else { n.style.cap },
-        join: n.style.join,
-        dash: n.style.dash.clone(),
+    let mut ops = Vec::new();
+    if matches!(n.kind, NodeKind::Connector { .. }) {
+        connector_ops(n, wr, 1.0, &mut ops, false);
+    } else if let Some(path) = stroke_path(n, wr) {
+        let line = matches!(n.kind, NodeKind::Line { .. });
+        ops.push(DrawOp::Stroke {
+            path,
+            color: [1.0; 4],
+            width: n.style.stroke_width,
+            cap: if line { Cap::Round } else { n.style.cap },
+            join: n.style.join,
+            dash: n.style.dash.clone(),
+        });
+    }
+    // Widening every stroke grows the whole of it, filled heads included.
+    ops.retain_mut(|op| match op {
+        DrawOp::Stroke { color, width, .. } => {
+            *color = [1.0; 4];
+            *width += 2.0 * d;
+            *width > 0.0
+        }
+        DrawOp::Fill { paint, .. } => {
+            *paint = PaintSpec::Solid([1.0; 4]);
+            true
+        }
+        DrawOp::Glyphs { .. } => true,
     });
-    Some((ops.into_iter().collect(), alpha(color)))
+    Some((ops, alpha(color)))
 }

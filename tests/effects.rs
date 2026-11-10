@@ -405,6 +405,12 @@ fn spread_follows_what_the_layer_paints() {
         tx.node_mut(id).unwrap().style.effects = spread(10.0)
     });
     assert_eq!(look(&e), [false, true, true]);
+    // A fill too clear to see changes nothing: the stroke still casts the shadow.
+    e.edit("clear fill", |tx| {
+        let n = tx.node_mut(id).unwrap();
+        n.style.set_fill(Some(Color::rgba(255, 255, 255, 0)));
+    });
+    assert_eq!(look(&e), [false, true, true]);
 
     // A line has no area, and its shadow grows from its stroke.
     let mut line = Node::new(
@@ -596,6 +602,12 @@ fn png_export_makes_room_for_shadows() {
     assert_eq!(img.dimensions(), (600, 100));
     assert_eq!(img.get_pixel(300, 50).0, [0, 0, 0, 255]);
     assert_eq!(img.get_pixel(500, 50).0, [0, 0, 0, 255]);
+    // A layer blur on the group spreads that shadow further.
+    inspector::apply(&mut e, "effects", &[group], |n| {
+        n.style.effects.push(blur(LayerBlur, 10.0))
+    });
+    let img = png::render(g, &e.doc, Some(&[group]), 1.0, None).unwrap();
+    assert_eq!(img.dimensions(), (660, 160));
     inspector::apply(&mut e, "effects", &[group], |n| n.style.effects.clear());
 
     // The project thumbnail draws them too.
