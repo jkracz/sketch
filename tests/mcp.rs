@@ -1183,3 +1183,50 @@ fn agent_text_is_unchanged_on_the_light_canvas() {
     );
     assert_eq!(text_fill(&h, "Card in light"), Some(Color::WHITE));
 }
+
+#[test]
+fn a_layer_inside_a_clipping_frame_exports_on_its_own() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Clip", "styles": {"width": "400px", "height": "300px"}}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": ab["id"], "mode": "insert-children",
+            "html": r#"<div style="width:100px;height:100px;background:#f00"></div>"#,
+        }),
+    );
+    let div = &r["createdNodeIds"][0];
+    assert!(matches!(
+        h.ed.doc.get(num(&ab["id"])).unwrap().kind,
+        NodeKind::Frame { clip: true }
+    ));
+
+    let dir = std::env::temp_dir().join(format!("sketch-rs-clip-{:016x}", fastrand::u64(..)));
+    let svg = call(
+        &mut h,
+        "export",
+        json!({"directory": dir, "nodes": {div.as_str().unwrap(): [{"format": "svg"}]}}),
+    );
+    let svg = std::fs::read_to_string(svg["files"][0].as_str().unwrap()).unwrap();
+    assert!(svg.contains(r#"width="100" height="100""#), "{svg}");
+    assert!(svg.contains("#ff0000"), "{svg}");
+
+    if exec::Host::gpu(&mut h).is_some() {
+        let png = call(
+            &mut h,
+            "export",
+            json!({"directory": dir, "nodes": {div.as_str().unwrap(): [{"format": "png", "scale": "1x"}]}}),
+        );
+        let img = image::open(png["files"][0].as_str().unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(img.dimensions(), (100, 100));
+        assert_eq!(img.get_pixel(50, 50).0, [255, 0, 0, 255]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
