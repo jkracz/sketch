@@ -1100,8 +1100,7 @@ fn token_input(v: &Value) -> Result<String, String> {
     }
 }
 
-/// A shadow's color as CSS: the variable that owns it, on the layer or in its effect style,
-/// or the color itself.
+/// Use the layer's color token, then its style's token, then the literal color.
 fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
     let styled = || {
         let s = tokens.effect_style(n.effect_style.as_ref()?)?;
@@ -1116,9 +1115,7 @@ fn shadow_color(tokens: &TokenSet, n: &Node, i: usize, c: Color) -> String {
         )
 }
 
-/// In computed styles, show a bound property as the variable that owns it, a text layer's
-/// style as `textStyle` with the fields it overrides, and an effect style as `effectStyle`
-/// with its variables in the effect properties.
+/// Export token variables and style references alongside text overrides.
 fn show_token_vars(tokens: &TokenSet, n: &Node, st: &mut Map<String, Value>) {
     if let Some(r) = &n.text_style_ref
         && let Some(s) = tokens.style(&r.id)
@@ -1245,7 +1242,6 @@ fn style_json(tokens: &TokenSet, s: &TextStyleDef) -> Value {
     v
 }
 
-/// `tokens`' effect styles, filtered by `types` and by `namePattern` against the variable.
 fn chosen_effect_styles<'a>(
     tokens: &'a TokenSet,
     a: &Args,
@@ -1263,7 +1259,6 @@ fn chosen_effect_styles<'a>(
         .collect())
 }
 
-/// An effect style in short form: its variable and one line of CSS.
 fn effect_style_json(tokens: &TokenSet, s: &EffectStyleDef) -> Value {
     let mut v = json!({
         "name": s.name,
@@ -2279,8 +2274,7 @@ fn jsx_node(
     let ind = "  ".repeat(depth);
     let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
     show_token_vars(tokens, n, &mut st);
-    // The effect properties carry the style as `var()`. If one of them holds values instead,
-    // or none is written, `effectStyle` stays, which write_html takes as `effect-style`.
+    // Keep effectStyle when variables cannot carry it, so write_html can restore the style.
     let style_var = |v: &Value| {
         let name = (v.as_str()).and_then(|s| s.strip_prefix("var(")?.strip_suffix(')'));
         name.is_some_and(|n| tokens.effect_style_by_var(n).is_some())
@@ -3106,7 +3100,6 @@ impl Builder<'_, '_> {
             }
             _ if text_only(el) && has_text(el) && !(is_flex(&own) && has_element_children(el)) => {
                 let boxy = own.iter().any(|(k, v)| {
-                    // An effect style applied through one of these properties counts too.
                     let effect = k.strip_prefix(css::EFFECT_STYLE_MARKER).unwrap_or(k);
                     k.starts_with("background")
                         || k.starts_with("border") && v != "none" && v != "0"

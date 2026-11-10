@@ -724,7 +724,6 @@ pub fn picker(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], prop: TokenProp) {
         return;
     };
     let bound = ed.bound_token(first, prop).cloned();
-    // Values as the selected layer would show them.
     let mode = (ids.first())
         .and_then(|id| ed.tokens.mode_at(&ed.doc, *id))
         .map(String::from);
@@ -735,16 +734,13 @@ pub fn picker(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], prop: TokenProp) {
     }
 }
 
-/// What the token picker was used for.
 #[derive(Debug, PartialEq)]
 pub(super) enum Pick {
-    /// Take this token, by id.
     Token(String),
     Detach,
 }
 
-/// The picker button and its popup, for anything that takes a token of `kind`. `bound` is the
-/// token it has now, and the list shows values in the mode named `mode`.
+/// Pick a token of `kind`, previewing values in `mode`.
 pub(super) fn pick_token(
     ui: &mut Ui,
     ed: &Editor,

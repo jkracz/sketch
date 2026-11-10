@@ -1,5 +1,4 @@
-//! Effect styles on layers. A layer that uses a style holds the style's effects, and a layer
-//! whose effects are edited by hand stops using it.
+//! Apply, detach and track effect styles on layers.
 
 use super::Editor;
 use crate::model::effects::edit_effects;
@@ -43,8 +42,8 @@ impl Editor {
         self.commit();
     }
 
-    /// Make a style from the first layer's effects and give it to all of them, as one undo
-    /// step. Returns the new style's id.
+    /// Create a style from the first layer and apply it to all ids in one undo step.
+    /// Return the new style id.
     pub fn create_effect_style_from(&mut self, ids: &[NodeId]) -> Option<String> {
         let from = self.doc.get(*ids.first()?)?.clone();
         let key = format!("effect-style-from:{ids:?}");
@@ -57,8 +56,7 @@ impl Editor {
         Some(style)
     }
 
-    /// Stop these layers using their effect style. They keep the effects they show, and a
-    /// shadow whose color the style took from a token stays bound to that token.
+    /// Detach the style while keeping resolved effects and shadow color token bindings.
     pub fn detach_effect_style(&mut self, ids: &[NodeId]) {
         let tokens = self.tokens.clone();
         self.begin("Detach effect style");
@@ -88,10 +86,8 @@ impl Editor {
         self.tokens.effect_style(n.effect_style.as_ref()?)
     }
 
-    /// Drop the style from touched layers that no longer show its effects, or whose style is
-    /// gone. Run after `drop_broken_bindings`: a shadow color still bound to a token then was
-    /// set on the layer, which is a hand edit too. Like there, the effects of the modes in
-    /// `kept_modes` count as the style's.
+    /// Drop missing styles and hand-edited bindings. Accept values from `kept_modes`.
+    /// Run after `drop_broken_bindings` so remaining color bindings identify hand edits.
     pub(super) fn check_effect_style_refs(&mut self) {
         let Some((rec, _)) = &self.rec else { return };
         let mut dropped: Vec<NodeId> = Vec::new();
@@ -170,7 +166,6 @@ mod tests {
         }
     }
 
-    /// A rect, a `--shade` token (black, white in Dark) and a style whose shadow aliases it.
     fn setup() -> (Editor, NodeId, String, String) {
         let mut e = Editor::default();
         let id = rect(&mut e);

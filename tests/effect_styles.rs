@@ -38,8 +38,6 @@ fn shadow(y: f64, blur: f64) -> Effect {
     }
 }
 
-/// `--shade` (black, white in Dark), `Elevation/2` (two shadows, the first in `--shade`, and
-/// a layer blur) and `Glass` (a background blur). Returns the ids of the two styles.
 fn seed(h: &mut exec::SessionHost) -> (String, String) {
     h.ed.edit_tokens("seed", None, |t| {
         let dark = vec![("dark".to_string(), "#ffffff".to_string())];
@@ -179,7 +177,6 @@ fn a_variable_in_box_shadow_binds_the_style() {
         EffectKind::BackgroundBlur
     );
     assert!(bound(&h, node(&ids[2])), "a blur variable binds too");
-    // Inside a longer list the variable is only its value.
     assert!(!bound(&h, node(&ids[3])));
     assert_eq!(effects(&h, node(&ids[3])).len(), 3);
 
@@ -192,7 +189,7 @@ fn a_variable_in_box_shadow_binds_the_style() {
     let jsx = jsx.as_str().unwrap();
     assert!(jsx.contains("boxShadow: \"var(--elevation-2)\""), "{jsx}");
     assert!(!jsx.contains("effectStyle"), "{jsx}");
-    // The second shadow has spread, which `text-shadow` can't take, so text shows values.
+    // text-shadow cannot express spread, so export must use literal shadows.
     let st = call(&mut h, "get_computed_styles", json!({"nodeIds": [ids[1]]}));
     let st = &st[ids[1].as_str().unwrap()];
     assert_eq!(st["effectStyle"], "elevation-2");
@@ -200,7 +197,6 @@ fn a_variable_in_box_shadow_binds_the_style() {
         st["textShadow"],
         "0px 1px 2px var(--shade), 0px 4px 8px #ff0000"
     );
-    // What a styled layer reports applies back without losing the style or its spread.
     for id in [&ids[0], &ids[1]] {
         let before = effects(&h, node(id));
         let st = call(&mut h, "get_computed_styles", json!({"nodeIds": [id]}));
@@ -218,7 +214,6 @@ fn a_variable_in_box_shadow_binds_the_style() {
         assert!(bound(&h, node(id)));
         assert_eq!(effects(&h, node(id)), before);
     }
-    // JSX names the style where no variable can carry it, and write_html takes it back.
     let jsx = call(&mut h, "get_jsx", json!({"nodeId": ids[1]}));
     let jsx = jsx.as_str().unwrap();
     assert!(jsx.contains("effectStyle: \"elevation-2\""), "{jsx}");
@@ -262,7 +257,6 @@ fn update_styles_applies_by_name_and_a_value_detaches() {
     let (a, b) = (node(&ids[0]), node(&ids[1]));
     assert!(bound(&h, a) && bound(&h, b));
 
-    // One style edit reaches both layers and undoes in one step.
     let steps = h.ed.history.undo_len();
     h.ed.edit_tokens("Edit effect style", None, |t| {
         let mut list = t.effect_style(&elevation).unwrap().effects.clone();
@@ -278,7 +272,6 @@ fn update_styles_applies_by_name_and_a_value_detaches() {
     call(&mut h, "undo", json!({}));
     assert_eq!((effects(&h, a)[0].blur, effects(&h, b)[0].blur), (2.0, 2.0));
 
-    // A shadow set by value replaces the shadows, keeps the blur and drops the style.
     call(
         &mut h,
         "update_styles",
@@ -288,7 +281,6 @@ fn update_styles_applies_by_name_and_a_value_detaches() {
     assert_eq!(effects(&h, b).len(), 2);
     assert!(bound(&h, a));
 
-    // A style applied by name wins over a value next to it.
     call(
         &mut h,
         "update_styles",
@@ -402,7 +394,6 @@ fn design_systems_carry_styles_with_the_prefix() {
     });
     assert!(locked.unwrap_err().contains("design system"));
 
-    // A new version changes one style and drops the other.
     src.ed.edit_tokens("edit", None, |t| {
         let mut list = t.effect_style(&elevation).unwrap().effects.clone();
         list[0].effect.blur = 30.0;
@@ -421,7 +412,6 @@ fn design_systems_carry_styles_with_the_prefix() {
     assert_eq!(effects(&h, card)[0].blur, 30.0);
     assert_eq!(h.ed.tokens.effect_styles().len(), 1);
 
-    // Detached, the style is local and keeps its variable and its layers.
     let system = h.ed.tokens.systems()[0].id.clone();
     h.ed.detach_system(&system).unwrap();
     let s =

@@ -1342,7 +1342,6 @@ fn effects(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[NodeId], first
     ui.horizontal(|ui| {
         ui.label(title_text("Effects"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // A style owns the whole list, so there is nothing to add until it's detached.
             if !styled && ui.small_button("+").on_hover_text("Add effect").clicked() {
                 apply(ed, "effects", ids, |n| {
                     edit_effects(n, |l| {
@@ -1364,7 +1363,6 @@ fn effects(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[NodeId], first
                 picker(ui, ed, ids, prop)
             })
         });
-        // The color's token stays unless the color no longer matches it.
         if let Some(change) = change.inner {
             apply(ed, "effects", ids, |n| {
                 edit_effects(n, |l| change.apply(l, i, |(e, _)| e))
@@ -1373,16 +1371,13 @@ fn effects(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[NodeId], first
     }
 }
 
-/// An edit to one effect of a list, from [`effect_fields`].
 pub(super) enum EffectChange {
     Set(Box<dyn Fn(&mut Effect)>),
     Remove,
-    /// Trade places with the effect at this index.
     Swap(usize),
 }
 
 impl EffectChange {
-    /// Make the change to item `i` of `list`, whose effect `effect` picks out.
     pub(super) fn apply<T>(
         &self,
         list: &mut Vec<T>,
@@ -1403,8 +1398,7 @@ impl EffectChange {
     }
 }
 
-/// The controls of effect `i` of `count`, for a layer or an effect style. `token` names the
-/// token that owns a shadow's color, and `token_picker` draws the button that changes it.
+/// Shared layer and style controls. Return the edit for the caller to apply.
 pub(super) fn effect_fields(
     ui: &mut Ui,
     ed: &mut Editor,

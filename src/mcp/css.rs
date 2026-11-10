@@ -591,7 +591,6 @@ fn blur_filter(v: &str, fs: f64) -> (Option<f64>, bool) {
     (radius, all)
 }
 
-/// Setting effects by value stops the layer following its effect style.
 fn replace_effects(n: &mut Node, new: Vec<Effect>, replaced: impl Fn(&Effect) -> bool) {
     n.effect_style = None;
     edit_effects(n, |list| {
@@ -682,8 +681,7 @@ pub fn blur_list_css(effects: &[Effect], kind: EffectKind) -> Option<String> {
 pub const TOKEN_MARKER: &str = "--token:";
 /// Carries the style id from `TokenSet::expand_styles`; text children inherit it.
 pub const STYLE_MARKER: &str = "--token:textStyle";
-/// Key prefix that applies an effect style: `<marker><cssKey>` holds the style's id, a space,
-/// and its effects as JSON (see `TokenSet::effect_style_marker`).
+/// `<marker><cssKey>` holds the style id, a space and resolved effects as JSON.
 pub const EFFECT_STYLE_MARKER: &str = "--token:effectStyle:";
 
 pub fn is_backdrop_filter(key: &str) -> bool {
@@ -1398,16 +1396,13 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             a.ignored.push(k.clone());
         }
     }
-    // A style applied by name wins over shadow and blur values set beside it, wherever it
-    // sits in the list. So what `computed` reports for a styled layer applies back unchanged.
+    // Named styles win over literals so computed styles apply back without losing effects.
     if let Some(v) = named_style {
         apply_effect_style(n, "effectStyle", v, &mut a);
     }
     a
 }
 
-/// Give `n` the effect style an [`EFFECT_STYLE_MARKER`] entry carries. `key` is the property
-/// the style came in through.
 fn apply_effect_style(n: &mut Node, key: &str, v: &str, a: &mut Applied) {
     let text = matches!(n.kind, NodeKind::Text { .. });
     let style = v

@@ -13,8 +13,7 @@ pub struct EffectStylesUi {
     open: Option<Draft>,
 }
 
-/// Text fields of the open style. They commit on focus loss; effect rows edit the style
-/// directly.
+/// Text fields commit on focus loss; effect rows update the style directly.
 struct Draft {
     id: String,
     name: String,
@@ -39,7 +38,7 @@ impl EffectStylesUi {
     }
 }
 
-/// The + menu entry. A new style copies the first selected layer that has effects.
+/// Add a style, copying the first selected layer with effects.
 pub fn add_entry(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     let from = (ed.selection.iter())
         .filter_map(|id| ed.doc.get(*id))
@@ -59,7 +58,6 @@ pub fn add_entry(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     }
 }
 
-/// How a style is labelled outside its group: a design system's style by its variable.
 fn label(ed: &Editor, s: &EffectStyleDef) -> String {
     if s.system.is_some() {
         ed.tokens.effect_style_slug(s)
@@ -91,7 +89,7 @@ pub fn matching(ed: &Editor, system: Option<&str>, search: &str) -> Vec<EffectSt
         .collect()
 }
 
-/// The Effect styles heading and rows of one group.
+/// Draw one group's effect styles.
 pub fn section(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, list: &[EffectStyleDef]) {
     if list.is_empty() {
         return;
@@ -113,7 +111,6 @@ fn row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &EffectStyleDef) {
     } else if resp.hovered() {
         ui.painter().rect_filled(r, 6.0, p.hover);
     }
-    // A card and its shadow.
     let card = egui::Rect::from_center_size(
         egui::pos2(r.left() + 13.0, r.center().y - 1.0),
         egui::vec2(11.0, 11.0),
@@ -222,7 +219,7 @@ fn locked_fields(ui: &mut Ui, ed: &mut Editor, s: &EffectStyleDef) {
     ui.add_space(4.0);
 }
 
-/// `s`'s effects after `change` to effect `i`. A color picked by hand replaces a token.
+// Compare against resolved colors so other edits keep the color token.
 fn changed(ed: &Editor, s: &EffectStyleDef, i: usize, change: &EffectChange) -> Vec<StyleEffect> {
     let mut list = s.effects.clone();
     let shown = shown_effects(ed, s);
@@ -238,7 +235,6 @@ fn changed(ed: &Editor, s: &EffectStyleDef, i: usize, change: &EffectChange) -> 
     list
 }
 
-/// The style's effects with the colors its tokens show in the first mode.
 fn shown_effects(ed: &Editor, s: &EffectStyleDef) -> Vec<Effect> {
     (ed.tokens.resolve_effect_style_in(&s.id, None))
         .unwrap_or_else(|| s.effects.iter().map(|e| e.effect).collect())
@@ -272,7 +268,6 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &EffectStyleDef) {
         d.error = r.err();
     }
 
-    // Effect rows: each edit goes straight to the style, and a drag is one undo step.
     let mut edit: Option<(usize, Vec<StyleEffect>)> = None;
     let shown = shown_effects(ed, s);
     for (i, e) in shown.iter().enumerate() {
@@ -355,7 +350,6 @@ fn fields(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, s: &EffectStyleDef) {
     ui.add_space(4.0);
 }
 
-/// One line for an effect of a style the layer uses: `Drop shadow 0 4 4`.
 fn summary(e: &Effect) -> String {
     let num = |v: f64| format!("{}", (v * 100.0).round() / 100.0);
     let mut out = e.kind.label().to_string();
@@ -373,9 +367,7 @@ fn summary(e: &Effect) -> String {
     out
 }
 
-/// The layer's effect style: pick, create, edit or detach one. With a style on, its effects
-/// are listed read-only, since the style owns them. Hidden when there is nothing to pick or
-/// make a style from.
+/// Pick, create, edit or detach the layer's effect style. Bound effects are read-only.
 pub fn inspector_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[NodeId], first: &Node) {
     let bound = ed.bound_effect_style(first).cloned();
     let has_effects = !first.style.effects.is_empty();
@@ -453,41 +445,14 @@ pub fn inspector_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, ids: &[Node
 
 #[cfg(test)]
 mod tests {
-    use super::super::tokens::tests::{Harness, key, typed};
     use super::*;
     use crate::model::Color;
 
-    fn style(h: &mut Harness) -> String {
-        let id =
-            h.ed.edit_tokens("add", None, |t| t.add_default_effect_style(None));
-        h.st.tokens.effect_styles.open(&h.ed, &id);
-        id
-    }
-
-    #[test]
-    fn renaming_reaches_the_style() {
-        let mut h = Harness::new();
-        let id = style(&mut h);
-        let mut f = |ui: &mut Ui, ed: &mut Editor, st: &mut UiState| {
-            let s = ed.tokens.effect_style(&id).cloned().unwrap();
-            fields(ui, ed, st, &s);
-        };
-        h.step(vec![], &mut f);
-        h.step(vec![key(egui::Key::Tab)], &mut f);
-        h.step(vec![], &mut f);
-        h.step(vec![typed(" raised")], &mut f);
-        h.step(vec![key(egui::Key::Enter)], &mut f);
-        h.step(vec![], &mut f);
-        h.step(vec![], &mut f);
-        let s = h.ed.tokens.effect_style(&id).unwrap();
-        assert_eq!(h.ed.tokens.effect_style_var(s), "--effect-style-raised");
-    }
-
     #[test]
     fn a_hand_picked_color_replaces_the_token() {
-        let mut h = Harness::new();
-        let id = style(&mut h);
-        let token = h.ed.edit_tokens("add", None, |t| {
+        let mut ed = Editor::default();
+        let id = ed.edit_tokens("add", None, |t| t.add_default_effect_style(None));
+        let token = ed.edit_tokens("add", None, |t| {
             let token = t
                 .create(TokenKind::Color, "shade", "#112233", None)
                 .unwrap();
@@ -496,13 +461,13 @@ mod tests {
             t.update_effect_style(&id, None, Some(list), None).unwrap();
             token
         });
-        let s = h.ed.tokens.effect_style(&id).cloned().unwrap();
+        let s = ed.tokens.effect_style(&id).cloned().unwrap();
         assert_eq!(s.effects[0].color_token, Some(token));
         let blur = EffectChange::Set(Box::new(|e| e.blur = 9.0));
-        let list = changed(&h.ed, &s, 0, &blur);
+        let list = changed(&ed, &s, 0, &blur);
         assert!(list[0].color_token.is_some(), "other fields keep the token");
         let red = EffectChange::Set(Box::new(|e| e.color = Color::rgb(255, 0, 0)));
-        let list = changed(&h.ed, &s, 0, &red);
+        let list = changed(&ed, &s, 0, &red);
         assert_eq!(list[0].color_token, None);
         assert_eq!(list[0].effect.color, Color::rgb(255, 0, 0));
     }

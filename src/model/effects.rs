@@ -96,8 +96,7 @@ impl Effect {
         }
     }
 
-    /// This effect as another kind. A blur has no offset or color, so a shadow made from one
-    /// (or a blur from a shadow) starts from the kind's defaults.
+    /// Change kind, resetting fields when switching between shadows and blurs.
     pub fn with_kind(self, kind: EffectKind) -> Effect {
         if kind.is_shadow() == self.kind.is_shadow() {
             Effect { kind, ..self }

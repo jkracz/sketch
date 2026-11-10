@@ -1165,7 +1165,7 @@ impl TokenSet {
         n
     }
 
-    /// Whether a local token of `kind`, any design system token, or an effect style has
+    /// Whether a local token of `kind`, any design system token, or an effect style uses
     /// `name`'s CSS name.
     fn name_taken(&self, kind: TokenKind, name: &str) -> bool {
         let slug = css_slug(name);
@@ -1707,8 +1707,7 @@ impl TokenSet {
     }
 }
 
-/// Swap one design system's items (those `ours` picks) for `new`, already linked. Items in
-/// both keep their place, new ones go at the end. Returns the ones `new` no longer has.
+/// Replace linked items without reordering survivors. Append new items and return removed ones.
 pub(super) fn replace_linked<T: Keyed>(
     list: &mut Vec<T>,
     ours: impl Fn(&T) -> bool,
