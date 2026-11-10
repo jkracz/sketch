@@ -467,3 +467,21 @@ fn constraints_only_apply_where_the_layer_is_free() {
     );
     assert_eq!(styles(&mut h, abs)["horizontalConstraint"], "right");
 }
+
+#[test]
+fn an_explicit_width_still_wins_over_align_self_stretch() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Column", "styles": {"width": "300px", "height": "200px"}}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children",
+               "html": "<div style=\"align-self:stretch; width:120px; height:20px; background:radial-gradient(circle 10px, #fff, #000)\"></div>"}),
+    );
+    let n = h.ed.doc.get(num(&r["createdNodeIds"][0])).unwrap();
+    assert_eq!(n.rect.w, 120.0);
+}

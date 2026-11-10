@@ -796,6 +796,7 @@ pub struct Context {
     pub parent_layout: Option<AutoLayout>,
     /// The parent's size (for percentages and right/bottom).
     pub parent_size: Option<(f64, f64)>,
+    /// Constraints apply only in frames.
     pub parent_is_frame: bool,
 }
 
@@ -974,11 +975,21 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
             k.strip_prefix(TOKEN_MARKER)
                 .is_some_and(|k| matches!(k, "borderWidth" | "strokeWidth"))
         });
-    // Sizes next: a radial gradient's px and keyword sizes are measured against the box.
-    let is_size = |k: &str| matches!(k, "width" | "height");
-    let sized_first = (styles.iter().filter(|(k, _)| is_size(k)))
-        .chain(styles.iter().filter(|(k, _)| !is_size(k)));
-    for (k, v) in sized_first {
+    // Backgrounds last: a radial gradient's px and keyword sizes are measured against the box.
+    let is_bg = |k: &str| {
+        matches!(
+            k,
+            "background"
+                | "backgroundColor"
+                | "backgroundImage"
+                | "fill"
+                | "backgroundSize"
+                | "objectFit"
+        )
+    };
+    let backgrounds_last =
+        (styles.iter().filter(|(k, _)| !is_bg(k))).chain(styles.iter().filter(|(k, _)| is_bg(k)));
+    for (k, v) in backgrounds_last {
         let v = v.trim();
         if k == STYLE_MARKER {
             if matches!(n.kind, NodeKind::Text { .. }) {
