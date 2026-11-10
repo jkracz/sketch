@@ -77,22 +77,21 @@ fn painted(doc: &Document, roots: &[NodeId], effects: bool) -> Vec<Rect> {
             if !doc.is_effectively_visible(id) {
                 continue;
             }
+            // The ancestors from the parent up to the exported root. The ones above the root
+            // don't clip or blur the export: a layer exported on its own draws without them.
+            let outer = doc.ancestors(id);
+            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
+            let outer: Vec<_> = outer[..exported]
+                .iter()
+                .filter_map(|a| doc.get(*a))
+                .collect();
             // Children of clipping frames can't draw outside them.
-            if doc.ancestors(id).iter().any(|a| {
-                matches!(
-                    doc.get(*a).map(|x| &x.kind),
-                    Some(NodeKind::Frame { clip: true })
-                )
-            }) {
+            if (outer.iter()).any(|a| matches!(a.kind, NodeKind::Frame { clip: true })) {
                 continue;
             }
             // A layer blur spreads the layer and everything inside it, up to the exported root.
-            let mut spread = draw::layer_blur_reach(nd);
-            let outer = doc.ancestors(id);
-            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
-            for a in outer[..exported].iter().filter_map(|a| doc.get(*a)) {
-                spread += draw::layer_blur_reach(a);
-            }
+            let spread = draw::layer_blur_reach(nd)
+                + outer.iter().map(|a| draw::layer_blur_reach(a)).sum::<f64>();
             if nd.is_group() {
                 // A group paints nothing itself. It casts its shadows from what its children
                 // paint, their own shadows included.
@@ -474,6 +473,28 @@ mod tests {
         }
         assert_eq!(svg.matches("<g").count(), svg.matches("</g>").count());
         assert!(!svg.contains("NaN"));
+    }
+
+    #[test]
+    fn a_clipping_frame_above_the_exported_layer_does_not_clip_it() {
+        let mut ed = crate::editor::Editor::default();
+        let mut add = |kind, r, parent| {
+            let mut n = crate::model::Node::new(NodeId(0), kind, r);
+            n.style.set_fill(Some(Color::BLACK));
+            ed.add_node(n, parent)
+        };
+        let clip = NodeKind::Frame { clip: true };
+        let outer = add(clip.clone(), Rect::new(0.0, 0.0, 100.0, 100.0), None);
+        let inner = add(clip, Rect::new(50.0, 50.0, 100.0, 100.0), Some(outer));
+        add(
+            NodeKind::Rect,
+            Rect::new(50.0, 50.0, 300.0, 300.0),
+            Some(inner),
+        );
+        let b = |id| export_bounds(&ed.doc, &[id]);
+        assert_eq!(b(outer), Some(Rect::new(0.0, 0.0, 100.0, 100.0)));
+        // Drawn whole, past the outer frame, but still clipped by its own frame.
+        assert_eq!(b(inner), Some(Rect::new(50.0, 50.0, 100.0, 100.0)));
     }
 
     #[test]
