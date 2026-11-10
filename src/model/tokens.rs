@@ -1029,19 +1029,6 @@ impl TokenSet {
         out
     }
 
-    /// Match modes by name. Drop values for missing modes and the destination's first mode.
-    fn rekeyed(&self, t: &Token, to: &[Mode]) -> BTreeMap<String, TokenValue> {
-        let from = self.modes_of(t);
-        t.modes
-            .iter()
-            .filter_map(|(id, v)| {
-                let name = &from.iter().find(|m| m.id == *id)?.name;
-                let m = to.iter().skip(1).find(|m| m.name == *name)?;
-                Some((m.id.clone(), v.clone()))
-            })
-            .collect()
-    }
-
     /// Copy tokens, each new one right after the last token of its kind in `ids`. Returns the
     /// new ids.
     pub fn duplicate(&mut self, ids: &[String]) -> Vec<String> {
@@ -1063,14 +1050,22 @@ impl TokenSet {
         out
     }
 
-    /// Keep a system token's CSS name and values for modes with matching local names.
+    /// Keep a system token's CSS name, and give each local mode the system's value for the
+    /// mode of the same name.
     fn local_copy(&self, t: &Token) -> Token {
         if t.system.is_none() {
             return t.clone();
         }
+        let first = self.modes.first().map(|m| m.name.as_str());
+        let value = self.value_in(t, first).clone();
+        let modes = (self.modes.iter().skip(1))
+            .map(|m| (m.id.clone(), self.value_in(t, Some(&m.name)).clone()))
+            .filter(|(_, v)| *v != value)
+            .collect();
         Token {
             name: self.slug(t),
-            modes: self.rekeyed(t, &self.modes),
+            value,
+            modes,
             system: None,
             ..t.clone()
         }
@@ -1100,6 +1095,9 @@ impl TokenSet {
                 continue;
             }
             let mut c = self.local_copy(t);
+            if let Some(m) = self.modes.first() {
+                c.modes.insert(m.id.clone(), c.value.clone());
+            }
             c.modes = (c.modes.into_iter())
                 .filter_map(|(id, v)| {
                     Some((self.modes.iter().find(|m| m.id == id)?.name.clone(), v))
@@ -1148,8 +1146,10 @@ impl TokenSet {
                 v => v.clone(),
             };
             let own = |m: &Mode| t.modes.get(&m.name).unwrap_or(&t.value);
-            let first = self.modes.first().map_or("", |m| m.name.as_str());
-            let value = value_of(&t.value, first);
+            let value = match self.modes.first() {
+                Some(m) => value_of(own(m), &m.name),
+                None => value_of(&t.value, ""),
+            };
             let modes = (self.modes.iter().skip(1))
                 .map(|m| (m.id.clone(), value_of(own(m), &m.name)))
                 .filter(|(_, v)| *v != value)
@@ -1229,8 +1229,8 @@ impl TokenSet {
     }
 
     /// A stylesheet of `tokens`: `:root { ... }`, or `@theme { ... }` for Tailwind v4. Each
-    /// other mode adds a `[data-theme="dark"] { ... }` block of the tokens that differ in it.
-    /// The default mode's selector lets a light frame inside a dark frame turn light again.
+    /// other mode adds a `[data-theme="dark"] { ... }` block. Each mode's block sets every
+    /// token that differs in any mode, so a frame of one mode inside another turns back.
     pub fn stylesheet(&self, tokens: &[&Token], tailwind: bool) -> String {
         let block = |selector: &str, list: &[&Token], mode: Option<&str>| {
             let mut s = format!("{selector} {{\n");
@@ -1242,25 +1242,27 @@ impl TokenSet {
             s
         };
         let theme = |name: &str| format!("[data-theme=\"{}\"]", css_slug(name));
-        let others: Vec<(&str, Vec<&Token>)> = (self.choices().into_iter().skip(1))
-            .map(|m| (m.name.as_str(), self.varies_in(tokens, &m.name)))
-            .filter(|(_, list)| !list.is_empty())
+        let others: Vec<&str> = (self.choices().into_iter().skip(1))
+            .map(|m| m.name.as_str())
+            .collect();
+        let varied: Vec<&Token> = (tokens.iter().copied())
+            .filter(|t| others.iter().any(|m| !self.varies_in(&[*t], m).is_empty()))
             .collect();
         let first = theme(self.default_mode());
-        let root = match (tailwind, others.is_empty()) {
+        let root = match (tailwind, varied.is_empty()) {
             (true, _) => "@theme".to_string(),
             (false, true) => ":root".to_string(),
             (false, false) => format!(":root,\n{first}"),
         };
         let mut s = block(&root, tokens, None);
-        if tailwind && !others.is_empty() {
-            let varied: Vec<&Token> = (tokens.iter().copied())
-                .filter(|t| others.iter().any(|(_, l)| l.iter().any(|o| o.id == t.id)))
-                .collect();
+        if varied.is_empty() {
+            return s;
+        }
+        if tailwind {
             s.push_str(&block(&first, &varied, None));
         }
-        for (name, list) in &others {
-            s.push_str(&block(&theme(name), list, Some(name)));
+        for name in others {
+            s.push_str(&block(&theme(name), &varied, Some(name)));
         }
         s
     }
@@ -2257,6 +2259,54 @@ mod tests {
             "an alias whose target changes is set again where the mode applies: {css}"
         );
         assert!(!dark.contains("--line"), "{css}");
+    }
+
+    #[test]
+    fn every_mode_block_resets_tokens_that_vary() {
+        let (mut s, ..) = themed();
+        s.add_mode();
+        let css = s.stylesheet(&s.sorted(), false);
+        let (_, third) = css
+            .split_once("[data-theme=\"mode-3\"] {\n")
+            .expect("{css}");
+        assert!(
+            third.contains("--bg: #ffffff;"),
+            "a Mode 3 frame inside Dark: {css}"
+        );
+    }
+
+    /// A Dark-first set with `--bg` black in Dark and white in Light.
+    fn dark_first() -> (TokenSet, String) {
+        let mut s =
+            TokenSet::default().with_modes(vec![Mode::new("d", "Dark"), Mode::new("l", "Light")]);
+        let light = vec![("l".to_string(), "#ffffff".to_string())];
+        let bg = s.create_in_modes(TokenKind::Color, "bg", "#000000", &light, None);
+        (s, bg.unwrap())
+    }
+
+    #[test]
+    fn mode_order_doesnt_change_pasted_or_detached_values() {
+        let (src, bg) = dark_first();
+        let mut pasted = TokenSet::default();
+        let new = pasted.paste(&src.copy(std::slice::from_ref(&bg)));
+        assert_eq!(pasted.resolve_in(&new[0], Some("Light")), Some(WHITE));
+        assert_eq!(pasted.resolve_in(&new[0], Some("Dark")), Some(BLACK));
+
+        let link = SystemLink {
+            id: "s".into(),
+            name: "S".into(),
+            prefix: "s".into(),
+            release: 1,
+            description: None,
+            notes: None,
+            modes: vec![Mode::new("s/d", "Dark"), Mode::new("s/l", "Light")],
+        };
+        let mut used = TokenSet::default();
+        used.attach(link, &src.publishable(), &[]).unwrap();
+        used.detach_system("s");
+        let id = linked_id("s", &bg);
+        assert_eq!(used.resolve_in(&id, Some("Light")), Some(WHITE));
+        assert_eq!(used.resolve_in(&id, Some("Dark")), Some(BLACK));
     }
 
     #[test]

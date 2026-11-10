@@ -234,7 +234,8 @@ fn mode_header(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, sys: Option<&Syst
         Some(l) => l.modes.clone(),
         None => ed.tokens.modes().to_vec(),
     };
-    if modes.len() < 2 {
+    // A file's only mode still shows, so it can be renamed.
+    if modes.len() < 2 && sys.is_some() {
         return;
     }
     let p = theme::pal(ui);
@@ -777,10 +778,15 @@ fn picker_list(
         return;
     }
     ui.separator();
+    // Values as the selected layer would show them.
+    let mode = (ids.first())
+        .and_then(|id| ed.tokens.mode_at(&ed.doc, *id))
+        .map(String::from);
+    let mode = mode.as_deref();
     let list: Vec<Token> = ed
         .tokens
         .of_kind(prop.kind())
-        .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value(t)))
+        .filter(|t| matches_search(&search, &label(ed, t), &ed.tokens.css_value_in(t, mode)))
         .cloned()
         .collect();
     if submitted && let Some(t) = list.first() {
@@ -794,8 +800,8 @@ fn picker_list(
         .show(ui, |ui| {
             for t in &list {
                 let on = bound.is_some_and(|b| b.id == t.id);
-                let value = ed.tokens.css_value(t);
-                let swatch = match ed.tokens.resolve(&t.id) {
+                let value = ed.tokens.css_value_in(t, mode);
+                let swatch = match ed.tokens.resolve_in(&t.id, mode) {
                     Some(TokenValue::Color(c)) => Some(c32(c)),
                     _ => None,
                 };

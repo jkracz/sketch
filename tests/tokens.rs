@@ -681,3 +681,57 @@ fn full_documents_without_data_theme_write_without_warnings() {
     );
     assert!(r.get("warnings").is_none(), "{r}");
 }
+
+#[test]
+fn shapes_and_instances_keep_their_frames_mode() {
+    let mut h = host();
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [{"type": "color", "name": "--bg", "value": "#ffffff", "modes": {"Dark": "#111111"}}]}),
+    );
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({
+            "targetNodeId": "root", "mode": "insert-children",
+            "html": "<div data-theme=\"dark\" style=\"width: 200px; height: 200px\"></div>\
+                     <div style=\"background-color: var(--bg); width: 50px; height: 50px\"></div>",
+        }),
+    );
+    let key = |id: NodeId| {
+        let page = r["createdNodeIds"][0]
+            .as_str()
+            .unwrap()
+            .rsplit_once(':')
+            .unwrap()
+            .0;
+        format!("{page}:{}", id.0)
+    };
+    let shape = call(
+        &mut h,
+        "create_shape",
+        json!({"type": "rectangle", "parentId": r["createdNodeIds"][0], "width": 10, "height": 10,
+               "styles": {"border": "1px solid var(--bg)"}}),
+    );
+    let dark = Color::rgb(0x11, 0x11, 0x11);
+    let stroke = h.ed.doc.get(node(&shape["id"])).unwrap().style.stroke;
+    assert_eq!(stroke, Some(dark), "{shape}");
+
+    h.ed.selection = vec![node(&r["createdNodeIds"][1])];
+    h.ed.create_component();
+    let main = h.ed.selection[0];
+    h.ed.instance_of_selection();
+    let inst = h.ed.selection[0];
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(inst)], "styles": {"mode": "Dark"}}]}),
+    );
+    call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [key(main)], "styles": {"opacity": 0.5}}]}),
+    );
+    assert_eq!(h.ed.doc.get(inst).unwrap().mode.as_deref(), Some("dark"));
+}

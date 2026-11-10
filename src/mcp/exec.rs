@@ -3594,7 +3594,8 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
         Some(s) => css::from_json(s)?,
         None => Vec::new(),
     };
-    ed.tokens.expand(&mut styles);
+    let mode = parent.and_then(|p| ed.tokens.mode_at(ed.page_doc(page), p));
+    ed.tokens.expand_in(&mut styles, mode);
     let canvas = CanvasStyle::of(ed.canvas_dark).background;
     let sides = a.num("sides").map(|s| s.clamp(3.0, 64.0) as u32);
     let txt = a.str("text").unwrap_or("").to_string();
@@ -3755,8 +3756,14 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     if let Some(m) = &mode
                         && frame
                     {
-                        tx.node_mut(*id).unwrap().mode = m.clone();
                         n.mode = m.clone();
+                        // Like the inspector, so component sync keeps the instance's mode.
+                        if let Some(l) = &mut n.instance
+                            && !l.overrides.iter().any(|o| o == "mode")
+                        {
+                            l.overrides.push("mode".into());
+                        }
+                        *tx.node_mut(*id).unwrap() = n.clone();
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));

@@ -79,7 +79,8 @@ impl Published {
     /// The tokens as a set that resolves aliases and names them with the prefix, for
     /// listing a system without using it.
     pub fn token_set(&self) -> TokenSet {
-        let mut s = TokenSet::default();
+        // The system's own mode order, so its first mode is the default here too.
+        let mut s = TokenSet::default().with_modes(self.modes.clone());
         // A fresh set can't clash or share a prefix, so this can't fail.
         let _ = s.attach(self.link(), &self.tokens, &self.text_styles);
         s

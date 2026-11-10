@@ -96,8 +96,8 @@ impl Editor {
         let mut broken: Vec<(NodeId, TokenProp)> = Vec::new();
         for id in rec.touched() {
             let Some(n) = self.doc.get(*id) else { continue };
-            let modes = self.kept_modes(*id);
             for (prop, token) in &n.tokens {
+                let modes = self.kept_modes(*id, prop.field());
                 let kept = self
                     .tokens
                     .get(token)
@@ -124,14 +124,19 @@ impl Editor {
         }
     }
 
-    /// The modes whose token values a touched layer may hold without counting as edited: the
-    /// one it shows and the one it showed before the open transaction. None allows any mode,
-    /// for new layers and instance layers, which copy values from layers in other modes.
-    pub(super) fn kept_modes(&self, id: NodeId) -> Option<Vec<Option<&str>>> {
+    /// The modes whose token values a touched layer may hold in `field` without counting as
+    /// edited: the one it shows and the one it showed before the open transaction, plus its
+    /// main component's when the instance doesn't override the field, since sync copies the
+    /// main's value. None allows any mode, for new layers, which copy values from anywhere.
+    pub(super) fn kept_modes(&self, id: NodeId, field: &str) -> Option<Vec<Option<&str>>> {
         let (rec, _) = self.rec.as_ref()?;
-        if self.doc.get(id)?.instance.is_some() {
-            return None;
-        }
+        let main = (self.doc.get(id)?.instance.as_ref())
+            .filter(|l| {
+                !l.overrides
+                    .iter()
+                    .any(|o| o == super::structure::override_key(field))
+            })
+            .map(|l| self.tokens.mode_at(&self.doc, l.main));
         let mut before = None;
         let mut cur = Some(id);
         while let Some(c) = cur {
@@ -145,7 +150,9 @@ impl Editor {
             }
             cur = n.parent;
         }
-        Some(vec![self.tokens.mode_at(&self.doc, id), before])
+        let mut modes = vec![self.tokens.mode_at(&self.doc, id), before];
+        modes.extend(main);
+        Some(modes)
     }
 
     /// Sync bound fields on every page. These derived values need no undo step; undo resyncs them.
@@ -616,6 +623,32 @@ mod tests {
         );
         e.undo();
         assert_eq!(fill(&e, rect), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn a_hand_edit_on_an_instance_in_another_mode_detaches() {
+        let (mut e, frame, rect, _) = themed();
+        e.selection = vec![rect];
+        e.create_component();
+        e.instance_of_selection();
+        let inst = e.selection[0];
+        e.edit("move", |tx| tx.reparent(inst, Some(frame), None));
+        let child = *e.doc.subtree(inst).last().unwrap();
+        assert_eq!(
+            fill(&e, child),
+            Some(Color::BLACK),
+            "the instance shows Dark"
+        );
+        e.begin("paint");
+        e.tx()
+            .node_mut(child)
+            .unwrap()
+            .style
+            .set_fill(Some(Color::WHITE));
+        e.mark_overrides(&[child], "fills");
+        e.commit();
+        assert_eq!(fill(&e, child), Some(Color::WHITE));
+        assert!(e.doc.get(child).unwrap().tokens.is_empty());
     }
 
     #[test]

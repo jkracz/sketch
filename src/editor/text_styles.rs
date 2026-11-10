@@ -6,17 +6,20 @@ use crate::model::{Node, NodeId, NodeKind, StyleField, TextStyleDef, TextStyleRe
 impl Editor {
     /// Apply a style as one undo step, clearing field overrides and competing token bindings.
     pub fn apply_text_style(&mut self, ids: &[NodeId], style: &str) {
-        let Some(r) = self.tokens.resolve_style(style) else {
-            return;
-        };
-        let targets = self.text_layers(ids);
+        let targets: Vec<(NodeId, crate::model::ResolvedStyle)> = (self.text_layers(ids))
+            .into_iter()
+            .filter_map(|id| {
+                let mode = self.tokens.mode_at(&self.doc, id);
+                Some((id, self.tokens.resolve_style_in(style, mode)?))
+            })
+            .collect();
         if targets.is_empty() {
             return;
         }
         self.begin("Apply text style");
         {
             let mut tx = self.tx();
-            for id in &targets {
+            for (id, r) in &targets {
                 if let Some(n) = tx.node_mut(*id) {
                     for f in StyleField::ALL {
                         r.write(f, n);
@@ -31,6 +34,7 @@ impl Editor {
                 }
             }
         }
+        let targets: Vec<NodeId> = targets.into_iter().map(|(id, _)| id).collect();
         self.mark_overrides(&targets, "font");
         for id in &targets {
             self.fit_text(*id);
@@ -82,7 +86,7 @@ impl Editor {
                 changes.push((*id, None));
                 continue;
             }
-            let modes = self.kept_modes(*id).unwrap_or_else(|| {
+            let modes = self.kept_modes(*id, "font").unwrap_or_else(|| {
                 (self.tokens.choices().iter())
                     .map(|m| Some(m.name.as_str()))
                     .collect()
@@ -169,6 +173,32 @@ mod tests {
                 None,
             )
         })
+    }
+
+    #[test]
+    fn applying_a_style_in_a_dark_frame_takes_its_dark_values() {
+        let mut e = Editor::default();
+        let t = text(&mut e);
+        let frame = e.edit("add", |tx| {
+            let f = tx.alloc_id();
+            let r = Rect::new(0.0, 0.0, 400.0, 400.0);
+            tx.insert(Node::new(f, NodeKind::Frame { clip: false }, r), None, None);
+            tx.reparent(t, Some(f), None);
+            f
+        });
+        e.set_frame_mode(&[frame], Some("dark"));
+        let style = e.edit_tokens("add", None, |s| {
+            let dark = vec![("dark".to_string(), "48px".to_string())];
+            s.create_in_modes(TokenKind::FontSize, "size", "12px", &dark, None)
+                .unwrap();
+            let mut i = StyleInput::default();
+            i.set(StyleField::Size, "var(--size)".into());
+            s.create_style("Body", &i, None).unwrap()
+        });
+        e.apply_text_style(&[t], &style);
+        assert_eq!(size(&e, t), Some(48.0));
+        let r = e.doc.get(t).unwrap().text_style_ref.clone().unwrap();
+        assert!(r.overrides.is_empty(), "{:?}", r.overrides);
     }
 
     fn setup() -> (Editor, NodeId, String, String) {
