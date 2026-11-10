@@ -208,6 +208,11 @@ mod tests {
             (0.0, 0.0, None)
         );
         assert!(!has_unpublished_changes(&store, &ed));
+        // Files can still use a system that publishes components.
+        let mut s2 = Session::new(store.clone());
+        let mut app = Editor::default();
+        s2.create(&mut app, "App").unwrap();
+        app.use_system(&r.system).unwrap();
 
         // Moving a main or switching pages isn't a change; editing a layer inside one is.
         ed.switch_page(0);
