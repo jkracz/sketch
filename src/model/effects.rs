@@ -101,7 +101,7 @@ impl Effect {
     }
 }
 
-/// Combined sigma of the visible effects of `kind`: blurring twice adds the variances.
+/// Combined sigma of the visible effects of `kind`. Blurring twice adds the variances.
 pub fn blur_sigma(effects: &[Effect], kind: EffectKind) -> f64 {
     effects
         .iter()
@@ -111,11 +111,14 @@ pub fn blur_sigma(effects: &[Effect], kind: EffectKind) -> f64 {
         .sqrt()
 }
 
+/// An effect and the token bound to its color.
+pub type BoundEffect = (Effect, Option<String>);
+
 /// Edit a layer's effects along with the token bound to each one's color. Bindings are keyed
 /// by position, so every reorder, insert and removal goes through here to keep them on the
 /// right effect.
-pub fn edit_effects(n: &mut Node, f: impl FnOnce(&mut Vec<(Effect, Option<String>)>)) {
-    let mut list: Vec<(Effect, Option<String>)> = std::mem::take(&mut n.style.effects)
+pub fn edit_effects(n: &mut Node, f: impl FnOnce(&mut Vec<BoundEffect>)) {
+    let mut list: Vec<BoundEffect> = std::mem::take(&mut n.style.effects)
         .into_iter()
         .enumerate()
         .map(|(i, e)| (e, n.tokens.remove(&TokenProp::EffectColor(i))))

@@ -400,7 +400,7 @@ impl Map {
 struct Target {
     size: [u32; 2],
     map: Map,
-    /// The px that end up on screen; nothing is drawn outside.
+    /// The px that end up on screen. Nothing is drawn outside.
     visible: Rect,
     /// Slot of its `Globals`.
     globals: u32,
@@ -411,7 +411,7 @@ struct Target {
 type Scissor = [u32; 4];
 
 impl Target {
-    /// `r` (target px) inside the target, the visible part and `clip` (world).
+    /// `r`, in target px, cut to the visible part and to `clip`, which is in world units.
     fn shown(&self, r: Rect, clip: &Option<Rect>) -> Option<Rect> {
         let r = r.intersection(&self.visible)?;
         match clip {
@@ -450,12 +450,15 @@ enum Cmd {
         scissor: Scissor,
         blend: usize,
         image: Option<String>,
-        /// From the per-frame screen buffers (chrome), not the world buffers.
+        /// Slot of the `Globals` to draw with.
+        globals: u32,
+        /// From the per-frame screen buffers that hold the chrome, not the world buffers.
         screen: bool,
     },
     Shadows {
         range: Range<u32>,
         scissor: Scissor,
+        globals: u32,
     },
     /// Paint a blurred texture back: over a quad, or through `mask`.
     Paint {
@@ -464,6 +467,7 @@ enum Cmd {
         scissor: Scissor,
         mask: Option<Range<u32>>,
         replace: bool,
+        globals: u32,
     },
     /// Blur what the pass has painted so far. Ends the pass.
     Backdrop {
@@ -473,13 +477,126 @@ enum Cmd {
     },
 }
 
-/// The source of a blur pass: a region of a texture, in uv.
+/// What to do with a blur on a target.
+enum BlurMode {
+    /// Nothing of it shows.
+    Skip,
+    /// Too slight to see, so its content is drawn as it is.
+    Inline,
+    Offscreen(Job),
+}
+
+/// A blur to draw offscreen: where it lands on its target and how big its texture is.
+struct Job {
+    plan: usize,
+    /// The target px that show it.
+    shown: Rect,
+    /// Target px of its texture's top-left.
+    origin: V2,
+    /// Target px per texel.
+    down: f64,
+    size: [u32; 2],
+}
+
+/// An atlas page, one texture that many blurs share so they also share their passes.
+struct Page {
+    size: [u32; 2],
+    tex: usize,
+    /// Jobs on it, with where each sits.
+    jobs: Vec<(usize, [u32; 2])>,
+}
+
+/// Largest edge of an atlas page.
+const PAGE_EDGE: u32 = 2048;
+
+/// The rects that landed on one page: its size, then each rect's index and position.
+#[derive(Default)]
+struct Packed {
+    size: [u32; 2],
+    rects: Vec<(usize, [u32; 2])>,
+}
+
+/// Place rects of `sizes` on pages, in shelves.
+fn pack(sizes: &[[u32; 2]]) -> Vec<Packed> {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|i| std::cmp::Reverse(sizes[*i][1]));
+    let area: f64 = sizes.iter().map(|s| s[0] as f64 * s[1] as f64).sum();
+    let widest = sizes.iter().map(|s| s[0]).max().unwrap_or(1);
+    // Roughly square, so a few small blurs don't ask for a whole page.
+    let width = ((area * 1.2).sqrt().ceil() as u32).clamp(widest, PAGE_EDGE.max(widest));
+    let mut pages: Vec<Packed> = Vec::new();
+    let (mut x, mut y, mut shelf) = (0, 0, 0);
+    for i in order {
+        let [w, h] = sizes[i];
+        if x + w > width {
+            (x, y, shelf) = (0, y + shelf, 0);
+        }
+        if pages.is_empty() || y + h > PAGE_EDGE.max(h) {
+            pages.push(Packed::default());
+            (x, y, shelf) = (0, 0, 0);
+        }
+        let page = pages.last_mut().unwrap();
+        page.rects.push((i, [x, y]));
+        page.size = [page.size[0].max(x + w), page.size[1].max(y + h)];
+        x += w;
+        shelf = shelf.max(h);
+    }
+    pages
+}
+
+/// The source of a blur pass: a px region of a texture.
 struct Source {
     tex: Tex,
-    origin: [f64; 2],
-    extent: [f64; 2],
+    at: [f64; 2],
+    size: [f64; 2],
     /// Allocated size of the texture.
     alloc: [u32; 2],
+}
+
+impl Source {
+    fn pool(tex: usize, at: [u32; 2], size: [u32; 2], alloc: [u32; 2]) -> Source {
+        Source {
+            tex: Tex::Pool(tex),
+            at: at.map(|v| v as f64),
+            size: size.map(|v| v as f64),
+            alloc,
+        }
+    }
+
+    /// Origin and extent of the region, in uv.
+    fn uv(&self) -> [f32; 4] {
+        let [w, h] = self.alloc.map(|a| a as f64);
+        [
+            self.at[0] / w,
+            self.at[1] / h,
+            self.size[0] / w,
+            self.size[1] / h,
+        ]
+        .map(|v| v as f32)
+    }
+
+    /// The uv range of the texels inside the region, so taps past its edge repeat the edge
+    /// instead of reading a neighbor or what another pass left there.
+    fn valid_uv(&self) -> [f32; 4] {
+        let [w, h] = self.alloc.map(|a| a as f64);
+        let lo = [(self.at[0] + 0.5) / w, (self.at[1] + 0.5) / h];
+        let hi = [
+            (self.at[0] + self.size[0] - 0.5) / w,
+            (self.at[1] + self.size[1] - 0.5) / h,
+        ];
+        [lo[0], lo[1], hi[0].max(lo[0]), hi[1].max(lo[1])].map(|v| v as f32)
+    }
+}
+
+/// One draw of a blur pass: `src` into the px rect at `at`. A Gaussian along `dir` (0 = x,
+/// 1 = y), or with no direction a resampling copy.
+struct BlurPart {
+    src: Source,
+    at: [u32; 2],
+    size: [u32; 2],
+    /// In source texels.
+    sigma: f64,
+    dir: Option<usize>,
 }
 
 struct Attachments<'a> {
@@ -510,7 +627,7 @@ pub struct CanvasRenderer {
     format: wgpu::TextureFormat,
     /// World geometry uploads (for tests: panning must not re-upload).
     pub uploads: u64,
-    /// Render passes recorded by the last `render` (for tests and profiling).
+    /// Render passes recorded by the last `render`, for tests and profiling.
     pub last_passes: u32,
 }
 
@@ -921,6 +1038,7 @@ impl CanvasRenderer {
                         scissor,
                         blend: 0,
                         image: None,
+                        globals: screen_slot,
                         screen: true,
                     });
                 }
@@ -977,7 +1095,7 @@ impl CanvasRenderer {
                 },
             };
             let list = carried.iter().chain(&cmds[start..end]);
-            self.pass(encoder, &world, list, &main, screen_slot, &at);
+            self.pass(encoder, &world, list, size, &at);
             if !more {
                 break;
             }
@@ -1003,160 +1121,129 @@ impl CanvasRenderer {
         tgt: &Target,
         out: &mut Vec<Cmd>,
     ) {
-        for step in steps {
-            match step {
-                Step::Draw(d) => {
-                    if let Some(scissor) = tgt.clip(&d.clip) {
-                        out.push(Cmd::Draw {
-                            range: d.range.clone(),
-                            scissor,
-                            blend: d.blend,
-                            image: d.image.clone(),
-                            screen: false,
-                        });
-                    }
-                }
-                Step::Shadows { range, clip } => {
-                    if let Some(scissor) = tgt.clip(clip) {
-                        out.push(Cmd::Shadows {
-                            range: range.clone(),
-                            scissor,
-                        });
-                    }
-                }
-                Step::Blur(i) => self.blur(device, enc, world, &world.blurs[*i], tgt, out),
-                Step::Backdrop(i) => {
-                    let b = &world.backdrops[*i];
-                    let shown = tgt.shown(tgt.map.rect(&b.bounds), &b.clip);
-                    if let Some(shown) = shown
-                        && tgt.main
-                        && b.sigma * tgt.map.k >= MIN_SIGMA_PX
-                        && !b.mask.is_empty()
-                    {
-                        out.push(Cmd::Backdrop { plan: *i, shown });
-                    }
-                }
-            }
-        }
+        let mut jobs = Vec::new();
+        collect(world, steps, tgt, &mut jobs);
+        let painted = self.bake(device, enc, world, jobs, tgt);
+        emit(world, steps, tgt, &painted, out);
     }
 
-    /// Draw a blur's content into a texture, blur it, and add the draw that paints it back.
-    fn blur(
+    /// Draw every offscreen blur of one target, sharing atlas pages. Each page costs one pass
+    /// for its content and two to blur it, however many blurs sit on it. Returns the draw
+    /// that paints each one back, by plan.
+    fn bake(
         &mut self,
         device: &wgpu::Device,
         enc: &mut wgpu::CommandEncoder,
         world: &World,
-        plan: &BlurPlan,
+        jobs: Vec<Job>,
         tgt: &Target,
-        out: &mut Vec<Cmd>,
-    ) {
-        let k = tgt.map.k;
-        let sigma = plan.sigma * k;
-        let reach = 3.0 * sigma + 1.0;
-        let content = tgt.map.rect(&plan.bounds.translate(plan.offset));
-        let Some(shown) = tgt.shown(content.inflate(reach), &plan.clip) else {
-            return;
-        };
-        match plan.paint {
-            // Too small a blur to see: draw the content as it is.
-            PlanPaint::Content if sigma < MIN_SIGMA_PX => {
-                return self.resolve(device, enc, world, &plan.steps, tgt, out);
-            }
-            // A shadow that moves and spreads less than a pixel hides under its layer.
-            PlanPaint::Tint(_) | PlanPaint::Inside { .. }
-                if 3.0 * sigma + plan.offset.len() * k < 0.5 =>
-            {
-                return;
-            }
-            _ => {}
+    ) -> HashMap<usize, Cmd> {
+        let mut painted = HashMap::new();
+        if jobs.is_empty() {
+            return painted;
         }
-        // What is shown needs the content around it, as far as the blur reaches.
-        let Some(region) = shown.inflate(reach).intersection(&content.inflate(reach)) else {
-            return;
-        };
-        let (x0, y0) = (region.x.floor(), region.y.floor());
-        let (w, h) = (region.right().ceil() - x0, region.bottom().ceil() - y0);
-        let down = (sigma / MAX_TEXEL_SIGMA)
-            .max(w.max(h) / MAX_BLUR_EDGE)
-            .max(1.0);
-        let size = [
-            (w / down).ceil().max(1.0) as u32,
-            (h / down).ceil().max(1.0) as u32,
-        ];
-        let map = Map {
-            k: k / down,
-            t: (tgt.map.t + plan.offset * k - v2(x0, y0)) / down,
-        };
-        let inner = Target {
-            size,
-            map,
-            visible: Rect::new(0.0, 0.0, size[0] as f64, size[1] as f64),
-            globals: self.slots.push(&map.globals(size)),
-            main: false,
-        };
-        let mut cmds = Vec::new();
-        self.resolve(device, enc, world, &plan.steps, &inner, &mut cmds);
-        let tex = self.pool.acquire(device, size, 1);
-        let msaa = self.pool.acquire(device, size, MSAA);
-        let at = Attachments {
-            view: &self.pool.get(msaa).view.clone(),
-            resolve: &self.pool.get(tex).view.clone(),
-            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            store: wgpu::StoreOp::Discard,
-        };
-        self.pass(enc, world, cmds.iter(), &inner, inner.globals, &at);
-        self.pool.release(msaa);
-        // The pass is recorded, so the textures it sampled are free for later passes.
-        for c in &cmds {
-            if let Cmd::Paint { tex, .. } = c {
-                self.pool.release(*tex);
-            }
-        }
-        let alloc = self.pool.get(tex).alloc;
-        let used = [
-            size[0] as f64 / alloc[0] as f64,
-            size[1] as f64 / alloc[1] as f64,
-        ];
-        let sigma_tex = sigma / down;
-        if sigma_tex * 3.0 >= 0.5 {
-            let scratch = self.pool.acquire(device, size, 1);
-            for (from, to, dir) in [(tex, scratch, 0), (scratch, tex, 1)] {
-                let src = Source {
-                    tex: Tex::Pool(from),
-                    origin: [0.0; 2],
-                    extent: used,
-                    alloc,
+        let sizes: Vec<[u32; 2]> = jobs.iter().map(|j| j.size).collect();
+        let pages: Vec<Page> = pack(&sizes)
+            .into_iter()
+            .map(|p| Page {
+                size: p.size,
+                tex: self.pool.acquire(device, p.size, 1),
+                jobs: p.rects,
+            })
+            .collect();
+        for page in &pages {
+            // Content: every blur's layers, each in its own corner of the page.
+            let mut cmds = Vec::new();
+            for (j, at) in &page.jobs {
+                let job = &jobs[*j];
+                let plan = &world.blurs[job.plan];
+                let at_px = v2(at[0] as f64, at[1] as f64);
+                let map = Map {
+                    k: tgt.map.k / job.down,
+                    t: (tgt.map.t + plan.offset * tgt.map.k - job.origin) / job.down + at_px,
                 };
-                self.blur_pass(enc, &src, to, size, sigma_tex, Some(dir));
+                let inner = Target {
+                    size: page.size,
+                    map,
+                    visible: Rect::new(at_px.x, at_px.y, job.size[0] as f64, job.size[1] as f64),
+                    globals: self.slots.push(&map.globals(page.size)),
+                    main: false,
+                };
+                self.resolve(device, enc, world, &plan.steps, &inner, &mut cmds);
             }
-            self.pool.release(scratch);
-        }
-        let (mode, color, mask) = match &plan.paint {
-            PlanPaint::Content => (MODE_CONTENT, [0.0; 4], None),
-            PlanPaint::Tint(c) => (MODE_TINT, premultiplied(*c), None),
-            PlanPaint::Inside { color, mask } => {
-                (MODE_INSIDE, premultiplied(*color), Some(mask.clone()))
+            let msaa = self.pool.acquire(device, page.size, MSAA);
+            let at = Attachments {
+                view: &self.pool.get(msaa).view.clone(),
+                resolve: &self.pool.get(page.tex).view.clone(),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Discard,
+            };
+            self.pass(enc, world, cmds.iter(), page.size, &at);
+            self.pool.release(msaa);
+            // The pass is recorded, so the pages it sampled are free for later passes.
+            for c in &cmds {
+                if let Cmd::Paint { tex, .. } = c {
+                    self.pool.release(*tex);
+                }
             }
-        };
-        let [aw, ah] = alloc.map(|a| a as f64);
-        let fx = self.slots.push(&FxParams {
-            rect: [x0, y0, 1.0 / (down * aw), 1.0 / (down * ah)].map(|v| v as f32),
-            clamp: valid_uv([0.0; 2], used, alloc),
-            color,
-            quad: [x0, y0, size[0] as f64 * down, size[1] as f64 * down].map(|v| v as f32),
-            params: [mode, tgt.size[0] as f32, tgt.size[1] as f32, 0.0],
-        });
-        if let Some(scissor) = tgt.scissor(&shown) {
-            out.push(Cmd::Paint {
-                tex,
-                fx,
-                scissor,
-                mask,
-                replace: false,
-            });
-        } else {
-            self.pool.release(tex);
+
+            // Blur: across into a scratch page, then down back into this one.
+            let alloc = self.pool.get(page.tex).alloc;
+            let sigma = |j: &Job| world.blurs[j.plan].sigma * tgt.map.k / j.down;
+            if page.jobs.iter().any(|(j, _)| sigma(&jobs[*j]) * 3.0 >= 0.5) {
+                let scratch = self.pool.acquire(device, page.size, 1);
+                for (from, to, dir) in [(page.tex, scratch, 0), (scratch, page.tex, 1)] {
+                    let parts: Vec<BlurPart> = (page.jobs.iter())
+                        .map(|(j, at)| BlurPart {
+                            src: Source::pool(from, *at, jobs[*j].size, alloc),
+                            at: *at,
+                            size: jobs[*j].size,
+                            sigma: sigma(&jobs[*j]),
+                            dir: Some(dir),
+                        })
+                        .collect();
+                    self.blur_pass(enc, to, &parts);
+                }
+                self.pool.release(scratch);
+            }
+
+            for (j, at) in &page.jobs {
+                let job = &jobs[*j];
+                let plan = &world.blurs[job.plan];
+                let (mode, color, mask) = match &plan.paint {
+                    PlanPaint::Content => (MODE_CONTENT, [0.0; 4], None),
+                    PlanPaint::Tint(c) => (MODE_TINT, premultiplied(*c), None),
+                    PlanPaint::Inside { color, mask } => {
+                        (MODE_INSIDE, premultiplied(*color), Some(mask.clone()))
+                    }
+                };
+                let [aw, ah] = alloc.map(|a| a as f64);
+                let src = Source::pool(page.tex, *at, job.size, alloc);
+                // The texel at `at` lands on `origin`.
+                let x = job.origin.x - at[0] as f64 * job.down;
+                let y = job.origin.y - at[1] as f64 * job.down;
+                let [w, h] = job.size.map(|s| s as f64 * job.down);
+                let fx = self.slots.push(&FxParams {
+                    rect: [x, y, 1.0 / (job.down * aw), 1.0 / (job.down * ah)].map(|v| v as f32),
+                    clamp: src.valid_uv(),
+                    color,
+                    quad: [job.origin.x, job.origin.y, w, h].map(|v| v as f32),
+                    params: [mode, tgt.size[0] as f32, tgt.size[1] as f32, 0.0],
+                });
+                if let Some(scissor) = tgt.scissor(&job.shown) {
+                    let paint = Cmd::Paint {
+                        tex: page.tex,
+                        fx,
+                        scissor,
+                        mask,
+                        replace: false,
+                        globals: tgt.globals,
+                    };
+                    painted.insert(job.plan, paint);
+                }
+            }
         }
+        painted
     }
 
     /// Blur the canvas copy under a background blur. Returns the draw that paints it back
@@ -1184,35 +1271,38 @@ impl CanvasRenderer {
         let alloc = self.pool.get(to).alloc;
         let mut src = Source {
             tex: Tex::Canvas,
-            origin: [x0 / tw, y0 / th],
-            extent: [w / tw, h / th],
+            at: [x0, y0],
+            size: [w, h],
             alloc: tgt.size,
         };
-        let mut size = [w, h];
-        let in_pool = |tex, size: [f64; 2]| Source {
-            tex: Tex::Pool(tex),
-            origin: [0.0; 2],
-            extent: [size[0] / alloc[0] as f64, size[1] / alloc[1] as f64],
-            alloc,
+        let mut size = [w as u32, h as u32];
+        let whole = |src, size, sigma, dir| BlurPart {
+            src,
+            at: [0; 2],
+            size,
+            sigma,
+            dir,
         };
         // Halve until the blur is narrow enough, so every texel of the canvas still counts.
         while left > 1.0 + 1e-6 {
             let f = left.min(2.0);
-            size = size.map(|s| (s / f).ceil().max(1.0));
-            self.blur_pass(enc, &src, to, size.map(|s| s as u32), 0.0, None);
-            src = in_pool(to, size);
+            size = size.map(|s| ((s as f64 / f).ceil() as u32).max(1));
+            self.blur_pass(enc, to, &[whole(src, size, 0.0, None)]);
+            src = Source::pool(to, [0; 2], size, alloc);
             std::mem::swap(&mut to, &mut spare);
             left /= f;
         }
-        let px = size.map(|s| s as u32);
-        self.blur_pass(enc, &src, to, px, sigma * size[0] / w, Some(0));
-        let src = in_pool(to, size);
-        self.blur_pass(enc, &src, spare, px, sigma * size[1] / h, Some(1));
+        let across = sigma * size[0] as f64 / w;
+        let down = sigma * size[1] as f64 / h;
+        self.blur_pass(enc, to, &[whole(src, size, across, Some(0))]);
+        let src = Source::pool(to, [0; 2], size, alloc);
+        self.blur_pass(enc, spare, &[whole(src, size, down, Some(1))]);
         self.pool.release(to);
+        let result = Source::pool(spare, [0; 2], size, alloc);
         let [aw, ah] = alloc.map(|a| a as f64);
         let fx = self.slots.push(&FxParams {
-            rect: [x0, y0, size[0] / (w * aw), size[1] / (h * ah)].map(|v| v as f32),
-            clamp: valid_uv([0.0; 2], src.extent, alloc),
+            rect: [x0, y0, size[0] as f64 / (w * aw), size[1] as f64 / (h * ah)].map(|v| v as f32),
+            clamp: result.valid_uv(),
             color: [0.0; 4],
             quad: [0.0; 4],
             params: [MODE_CONTENT, tw as f32, th as f32, 0.0],
@@ -1223,34 +1313,29 @@ impl CanvasRenderer {
             scissor: tgt.scissor(shown).unwrap_or([0, 0, 1, 1]),
             mask: Some(plan.mask.clone()),
             replace: true,
+            globals: tgt.globals,
         }
     }
 
-    /// One pass of the blur shader from `src` into the top-left `size` of pool texture `to`:
-    /// a Gaussian along `dir` (0 = x, 1 = y), or with no direction a resampling copy.
-    fn blur_pass(
-        &mut self,
-        enc: &mut wgpu::CommandEncoder,
-        src: &Source,
-        to: usize,
-        size: [u32; 2],
-        sigma: f64,
-        dir: Option<usize>,
-    ) {
-        let texel = [1.0 / src.alloc[0] as f64, 1.0 / src.alloc[1] as f64];
-        let mut step = [0.0; 2];
-        let mut radius = 0.0;
-        if let Some(d) = dir {
-            step[d] = texel[d];
-            radius = (sigma * 3.0).ceil().min(32.0);
-        }
-        let fx = self.slots.push(&FxParams {
-            rect: [src.origin[0], src.origin[1], src.extent[0], src.extent[1]].map(|v| v as f32),
-            clamp: valid_uv(src.origin, src.extent, src.alloc),
-            color: [step[0], step[1], sigma, radius].map(|v| v as f32),
-            quad: [0.0; 4],
-            params: [0.0, 1.0 / size[0] as f32, 1.0 / size[1] as f32, 0.0],
-        });
+    /// One pass of the blur shader into pool texture `to`, a draw per part.
+    fn blur_pass(&mut self, enc: &mut wgpu::CommandEncoder, to: usize, parts: &[BlurPart]) {
+        let slots: Vec<u32> = (parts.iter())
+            .map(|p| {
+                let mut step = [0.0; 2];
+                let mut radius = 0.0;
+                if let Some(d) = p.dir {
+                    step[d] = 1.0 / p.src.alloc[d] as f64;
+                    radius = (p.sigma * 3.0).ceil().min(32.0);
+                }
+                self.slots.push(&FxParams {
+                    rect: p.src.uv(),
+                    clamp: p.src.valid_uv(),
+                    color: [step[0], step[1], p.sigma, radius].map(|v| v as f32),
+                    quad: [p.at[0] as f32, p.at[1] as f32, 0.0, 0.0],
+                    params: [0.0, 1.0 / p.size[0] as f32, 1.0 / p.size[1] as f32, 0.0],
+                })
+            })
+            .collect();
         self.last_passes += 1;
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("blur"),
@@ -1268,12 +1353,15 @@ impl CanvasRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
         pass.set_pipeline(&self.fx.blur);
         pass.set_bind_group(0, &self.slots.globals, &[0]);
-        pass.set_bind_group(1, &self.slots.fx, &[fx]);
-        pass.set_bind_group(2, self.texture(src.tex), &[]);
-        pass.draw(0..4, 0..1);
+        for (p, fx) in parts.iter().zip(slots) {
+            let [x, y, w, h] = [p.at[0], p.at[1], p.size[0], p.size[1]].map(|v| v as f32);
+            pass.set_viewport(x, y, w, h, 0.0, 1.0);
+            pass.set_bind_group(1, &self.slots.fx, &[fx]);
+            pass.set_bind_group(2, self.texture(p.src.tex), &[]);
+            pass.draw(0..4, 0..1);
+        }
     }
 
     fn texture(&self, tex: Tex) -> &wgpu::BindGroup {
@@ -1283,14 +1371,13 @@ impl CanvasRenderer {
         }
     }
 
-    /// Record one multisampled pass that draws `cmds` on `tgt`.
+    /// Record one multisampled pass that draws `cmds` into the top-left `size` px.
     fn pass<'c>(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
         world: &World,
         cmds: impl Iterator<Item = &'c Cmd>,
-        tgt: &Target,
-        screen_slot: u32,
+        size: [u32; 2],
         at: &Attachments,
     ) {
         self.last_passes += 1;
@@ -1310,7 +1397,7 @@ impl CanvasRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_viewport(0.0, 0.0, tgt.size[0] as f32, tgt.size[1] as f32, 0.0, 1.0);
+        pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
         let world_buffers = world.vb.as_ref().zip(world.ib.as_ref());
         let screen_buffers = self.screen.as_ref().map(|(v, i)| (v, i));
         #[derive(PartialEq, Clone, Copy)]
@@ -1329,6 +1416,7 @@ impl CanvasRenderer {
                     scissor,
                     blend,
                     image,
+                    globals,
                     screen,
                 } => {
                     let buffers = if *screen {
@@ -1345,8 +1433,7 @@ impl CanvasRenderer {
                         pass.set_bind_group(1, &self.ramp_bg, &[]);
                         bound = Bound::Canvas(*blend);
                     }
-                    let slot = if *screen { screen_slot } else { tgt.globals };
-                    pass.set_bind_group(0, &self.slots.globals, &[slot]);
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
                     let img = image
                         .as_ref()
                         .and_then(|i| self.images.get(i))
@@ -1358,7 +1445,11 @@ impl CanvasRenderer {
                     pass.set_scissor_rect(x, y, w, h);
                     pass.draw_indexed(range.clone(), 0, 0..1);
                 }
-                Cmd::Shadows { range, scissor } => {
+                Cmd::Shadows {
+                    range,
+                    scissor,
+                    globals,
+                } => {
                     let Some(instances) = &world.shadows else {
                         continue;
                     };
@@ -1366,7 +1457,7 @@ impl CanvasRenderer {
                         pass.set_pipeline(&self.fx.shadow);
                         bound = Bound::Shadow;
                     }
-                    pass.set_bind_group(0, &self.slots.globals, &[tgt.globals]);
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
                     pass.set_vertex_buffer(0, instances.slice(..));
                     let [x, y, w, h] = *scissor;
                     pass.set_scissor_rect(x, y, w, h);
@@ -1378,6 +1469,7 @@ impl CanvasRenderer {
                     scissor,
                     mask,
                     replace,
+                    globals,
                 } => {
                     let kind = match mask {
                         Some(_) => Bound::Mask(*replace),
@@ -1390,7 +1482,7 @@ impl CanvasRenderer {
                         });
                         bound = kind;
                     }
-                    pass.set_bind_group(0, &self.slots.globals, &[tgt.globals]);
+                    pass.set_bind_group(0, &self.slots.globals, &[*globals]);
                     pass.set_bind_group(1, &self.slots.fx, &[*fx]);
                     pass.set_bind_group(2, self.texture(Tex::Pool(*tex)), &[]);
                     let [x, y, w, h] = *scissor;
@@ -1414,17 +1506,128 @@ impl CanvasRenderer {
     }
 }
 
-/// The uv range of the texels inside a region of a texture, so taps past its edge repeat the
-/// edge instead of reading what another pass left there.
-fn valid_uv(origin: [f64; 2], extent: [f64; 2], alloc: [u32; 2]) -> [f32; 4] {
-    let half = [0.5 / alloc[0] as f64, 0.5 / alloc[1] as f64];
-    [
-        origin[0] + half[0],
-        origin[1] + half[1],
-        (origin[0] + extent[0] - half[0]).max(origin[0] + half[0]),
-        (origin[1] + extent[1] - half[1]).max(origin[1] + half[1]),
-    ]
-    .map(|v| v as f32)
+/// What a blur does on `tgt`: nothing, its content drawn as it is, or an offscreen job.
+fn blur_mode(i: usize, plan: &BlurPlan, tgt: &Target) -> BlurMode {
+    let k = tgt.map.k;
+    let sigma = plan.sigma * k;
+    let reach = 3.0 * sigma + 1.0;
+    let content = tgt.map.rect(&plan.bounds.translate(plan.offset));
+    let Some(shown) = tgt.shown(content.inflate(reach), &plan.clip) else {
+        return BlurMode::Skip;
+    };
+    match plan.paint {
+        PlanPaint::Content if sigma < MIN_SIGMA_PX => return BlurMode::Inline,
+        // A shadow that moves and spreads less than a pixel hides under its layer.
+        PlanPaint::Tint(_) | PlanPaint::Inside { .. }
+            if 3.0 * sigma + plan.offset.len() * k < 0.5 =>
+        {
+            return BlurMode::Skip;
+        }
+        _ => {}
+    }
+    // What is shown needs the content around it, as far as the blur reaches.
+    let Some(region) = shown.inflate(reach).intersection(&content.inflate(reach)) else {
+        return BlurMode::Skip;
+    };
+    let origin = v2(region.x.floor(), region.y.floor());
+    let (w, h) = (
+        region.right().ceil() - origin.x,
+        region.bottom().ceil() - origin.y,
+    );
+    let down = (sigma / MAX_TEXEL_SIGMA)
+        .max(w.max(h) / MAX_BLUR_EDGE)
+        .max(1.0);
+    BlurMode::Offscreen(Job {
+        plan: i,
+        shown,
+        origin,
+        down,
+        size: [w, h].map(|s| (s / down).ceil().max(1.0) as u32),
+    })
+}
+
+/// The blurs among `steps` that draw offscreen for `tgt`.
+fn collect(world: &World, steps: &[Step], tgt: &Target, jobs: &mut Vec<Job>) {
+    for step in steps {
+        if let Step::Blur(i) = step {
+            let plan = &world.blurs[*i];
+            match blur_mode(*i, plan, tgt) {
+                BlurMode::Offscreen(job) => jobs.push(job),
+                BlurMode::Inline => collect(world, &plan.steps, tgt, jobs),
+                BlurMode::Skip => {}
+            }
+        }
+    }
+}
+
+/// The draws of `steps` on `tgt`, given the draw that paints each offscreen blur back.
+fn emit(
+    world: &World,
+    steps: &[Step],
+    tgt: &Target,
+    painted: &HashMap<usize, Cmd>,
+    out: &mut Vec<Cmd>,
+) {
+    for step in steps {
+        match step {
+            Step::Draw(d) => {
+                if let Some(scissor) = tgt.clip(&d.clip) {
+                    out.push(Cmd::Draw {
+                        range: d.range.clone(),
+                        scissor,
+                        blend: d.blend,
+                        image: d.image.clone(),
+                        globals: tgt.globals,
+                        screen: false,
+                    });
+                }
+            }
+            Step::Shadows { range, clip } => {
+                if let Some(scissor) = tgt.clip(clip) {
+                    out.push(Cmd::Shadows {
+                        range: range.clone(),
+                        scissor,
+                        globals: tgt.globals,
+                    });
+                }
+            }
+            Step::Blur(i) => {
+                let plan = &world.blurs[*i];
+                match painted.get(i) {
+                    Some(Cmd::Paint {
+                        tex,
+                        fx,
+                        scissor,
+                        mask,
+                        replace,
+                        globals,
+                    }) => out.push(Cmd::Paint {
+                        tex: *tex,
+                        fx: *fx,
+                        scissor: *scissor,
+                        mask: mask.clone(),
+                        replace: *replace,
+                        globals: *globals,
+                    }),
+                    _ if matches!(blur_mode(*i, plan, tgt), BlurMode::Inline) => {
+                        emit(world, &plan.steps, tgt, painted, out)
+                    }
+                    _ => {}
+                }
+            }
+            Step::Backdrop(i) => {
+                let b = &world.backdrops[*i];
+                let shown = tgt.shown(tgt.map.rect(&b.bounds), &b.clip);
+                if let Some(shown) = shown
+                    && tgt.main
+                    && b.sigma * tgt.map.k >= MIN_SIGMA_PX
+                    && !b.mask.is_empty()
+                {
+                    out.push(Cmd::Backdrop { plan: *i, shown });
+                }
+            }
+        }
+    }
 }
 
 /// A device without a window, for tests, screenshots and PNG export.
@@ -1548,5 +1751,46 @@ impl Headless {
         );
         self.queue.submit([enc.finish()]);
         self.read(&tex)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_rects_stay_on_their_page_and_apart() {
+        let sizes: Vec<[u32; 2]> = (0..400u32)
+            .map(|i| [20 + i % 37 * 9, 10 + i % 23 * 11])
+            .chain([[2048, 2048], [1, 1]])
+            .collect();
+        let pages = pack(&sizes);
+        assert!(pages.len() > 1, "the full-page rect needs its own");
+        let mut seen = vec![false; sizes.len()];
+        for page in &pages {
+            assert!(page.size[0] <= PAGE_EDGE && page.size[1] <= PAGE_EDGE);
+            let rects: Vec<Rect> = (page.rects.iter())
+                .map(|(i, at)| {
+                    seen[*i] = true;
+                    let [w, h] = sizes[*i].map(|s| s as f64);
+                    Rect::new(at[0] as f64, at[1] as f64, w, h)
+                })
+                .collect();
+            for (n, a) in rects.iter().enumerate() {
+                assert!(a.right() <= page.size[0] as f64 && a.bottom() <= page.size[1] as f64);
+                let overlap = rects[..n].iter().find(|b| {
+                    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+                });
+                assert!(overlap.is_none(), "{a:?} overlaps {overlap:?}");
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "every rect is placed");
+        // A few small rects get a small page.
+        let small = pack(&[[30, 20], [10, 10]]);
+        assert!(
+            small[0].size[0] <= 64 && small[0].size[1] <= 64,
+            "{:?}",
+            small[0].size
+        );
     }
 }

@@ -32,11 +32,11 @@ pub struct FxParams {
     /// Composite: target px of the texture's origin, then uv per px.
     /// Blur: uv origin and size of the source region.
     pub rect: [f32; 4],
-    /// The uv range that holds valid texels (min, max).
+    /// The uv range that holds valid texels, as min then max.
     pub clamp: [f32; 4],
     /// Composite: premultiplied color. Blur: uv step per tap, sigma in taps, tap radius.
     pub color: [f32; 4],
-    /// Composite without a mask: the target px rect to cover.
+    /// Composite without a mask: the target px rect to cover. Blur: px origin of the output.
     pub quad: [f32; 4],
     /// Composite: mode, target width, target height. Blur: _, 1/width, 1/height of the output.
     pub params: [f32; 4],
@@ -158,7 +158,8 @@ fn box_shadow(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>, sigma: f32) -> f32 {
         acc += 0.5 * (e.x - e.y) * w;
         norm += w;
     }
-    let rows = erf2((vec2<f32>(hi, lo) - p.y) * inv);
+    // The samples weigh the rows near `p`. The rows themselves add up exactly.
+    let rows = erf2((vec2<f32>(half.y, -half.y) - p.y) * inv);
     return acc / max(norm, 1e-6) * 0.5 * (rows.x - rows.y);
 }
 
@@ -234,7 +235,7 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // One direction of a Gaussian blur, or with radius 0 a resampling copy.
 @fragment
 fn fs_blur(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = fx.rect.xy + p.xy * fx.params.yz * fx.rect.zw;
+    let uv = fx.rect.xy + (p.xy - fx.quad.xy) * fx.params.yz * fx.rect.zw;
     let radius = i32(fx.color.w);
     let sigma = max(fx.color.z, 1e-3);
     var acc = vec4<f32>(0.0);
@@ -376,7 +377,7 @@ impl Slots {
     }
 }
 
-/// An offscreen texture. Sizes are rounded up so a blur that grows a little reuses it; a
+/// An offscreen texture. Sizes are rounded up so a blur that grows a little reuses it. A
 /// pass draws into the top-left `size` it asked for.
 pub struct PoolTexture {
     pub view: wgpu::TextureView,

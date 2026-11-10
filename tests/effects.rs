@@ -2,10 +2,20 @@
 
 mod common;
 
+use EffectKind::*;
 use common::*;
-use sketch_rs::editor::Editor;
-use sketch_rs::geom::{Rect, v2};
-use sketch_rs::model::{Color, Effect, EffectKind, Node, NodeId, NodeKind, TextAlign};
+use serde_json::{Value, json};
+use sketch_rs::editor::{Editor, Key, Modifiers};
+use sketch_rs::geom::{Rect, V2, v2};
+use sketch_rs::io::png;
+use sketch_rs::mcp::{Out, exec};
+use sketch_rs::model::effects::edit_effects;
+use sketch_rs::model::{
+    Color, Effect, EffectKind, Node, NodeId, NodeKind, TextAlign, TokenKind, TokenProp,
+};
+use sketch_rs::project::Store;
+use sketch_rs::render::frame;
+use sketch_rs::ui::{UiState, inspector};
 use std::path::PathBuf;
 
 const WHITE: Color = Color::WHITE;
@@ -58,13 +68,614 @@ fn luma(p: [u8; 4]) -> i32 {
     (p[0] as i32 + p[1] as i32 + p[2] as i32) / 3
 }
 
+const BLACK: Color = Color::BLACK;
+
+/// Editor with a white page and one more layer on it.
+fn scene(n: Node) -> (Editor, NodeId) {
+    let mut e = editor(800.0, 500.0);
+    let page = page(&mut e);
+    let id = e.add_node(n, Some(page));
+    (e, id)
+}
+
+fn card(effects: Vec<Effect>) -> Node {
+    node(
+        NodeKind::Rect,
+        Rect::new(300.0, 200.0, 200.0, 100.0),
+        WHITE,
+        effects,
+    )
+}
+
 #[test]
-fn gallery() {
+fn a_drop_shadow_fades_away_from_the_box_and_follows_its_offset() {
+    let Some(g) = gpu() else { return };
+    let (e, _) = scene(card(vec![shadow(DropShadow, 0.0, 20.0, 20.0, 0.0, BLACK)]));
+    let img = render_canvas(g, &e);
+    let at = |x, y| luma(px(&img, v2(x, y)));
+    assert_eq!(at(400.0, 250.0), 255, "the box itself stays white");
+    // Below the box: darkest at the edge, lighter further out, gone past the blur.
+    let (near, mid, far) = (at(400.0, 304.0), at(400.0, 325.0), at(400.0, 360.0));
+    assert!(near < 60, "{near}");
+    assert!(near < mid && mid < far, "{near} {mid} {far}");
+    assert_eq!(far, 255);
+    assert_eq!(at(400.0, 185.0), 255, "the offset moves it off the top");
+    // Half way out, a Gaussian shadow is half as dark. The shadow's edge is 20px down.
+    let half = at(400.0, 320.0);
+    assert!((half - 128).abs() < 12, "{half}");
+}
+
+#[test]
+fn spread_grows_a_box_shadow_and_a_translucent_box_shows_none_under_it() {
+    let Some(g) = gpu() else { return };
+    let mut n = card(vec![shadow(DropShadow, 0.0, 0.0, 0.0, 10.0, RED)]);
+    n.style.set_fill(Some(Color::rgba(255, 255, 255, 0)));
+    let (e, _) = scene(n);
+    let img = render_canvas(g, &e);
+    assert!(
+        close(px(&img, v2(295.0, 250.0)), RED, 2),
+        "a hard 10px ring"
+    );
+    assert!(close(px(&img, v2(400.0, 306.0)), RED, 2));
+    assert!(close(px(&img, v2(285.0, 250.0)), WHITE, 2));
+    assert!(
+        close(px(&img, v2(400.0, 250.0)), WHITE, 2),
+        "nothing under the box, though the box is clear"
+    );
+}
+
+#[test]
+fn an_inner_shadow_stays_inside_the_box_and_its_stroke() {
+    let Some(g) = gpu() else { return };
+    let mut n = card(vec![shadow(InnerShadow, 0.0, 10.0, 10.0, 0.0, BLACK)]);
+    n.style.stroke = Some(BLUE);
+    n.style.stroke_width = 6.0;
+    n.style.stroke_align = sketch_rs::model::StrokeAlign::Inside;
+    let (e, _) = scene(n);
+    let img = render_canvas(g, &e);
+    let at = |x, y| px(&img, v2(x, y));
+    assert!(close(at(400.0, 203.0), BLUE, 2), "the stroke is untouched");
+    assert!(luma(at(400.0, 208.0)) < 60, "dark under the top edge");
+    assert_eq!(luma(at(400.0, 250.0)), 255, "clear in the middle");
+    assert!(luma(at(400.0, 292.0)) > 250, "and at the bottom");
+    assert!(close(at(400.0, 190.0), WHITE, 0), "nothing outside");
+}
+
+#[test]
+fn shapes_cast_shadows_of_their_outline() {
+    let Some(g) = gpu() else { return };
+    let star = node(
+        NodeKind::Star {
+            points: 4,
+            inner: 0.3,
+        },
+        Rect::new(300.0, 150.0, 200.0, 200.0),
+        RED,
+        vec![shadow(DropShadow, 60.0, 0.0, 0.0, 0.0, BLACK)],
+    );
+    let (mut e, id) = scene(star);
+    let img = render_canvas(g, &e);
+    let at = |x, y| px(&img, v2(x, y));
+    // The right arm of the shadow, 60px right of the star's.
+    assert!(is_dark(at(545.0, 250.0)));
+    // Between two arms the star is hollow, and so is its shadow.
+    assert!(close(at(545.0, 180.0), WHITE, 2));
+    assert!(close(at(400.0, 250.0), RED, 2), "the star paints over it");
+
+    // An inner shadow shows inside the outline only.
+    e.edit("inner", |tx| {
+        tx.node_mut(id).unwrap().style.effects =
+            vec![shadow(InnerShadow, 0.0, 0.0, 16.0, 0.0, BLACK)];
+    });
+    let img = render_canvas(g, &e);
+    let at = |x, y| px(&img, v2(x, y));
+    assert!(close(at(400.0, 250.0), RED, 6), "the middle stays red");
+    let rim = at(488.0, 250.0);
+    assert!(
+        rim[0] < 150 && rim[1] < 40,
+        "dark red near the tip: {rim:?}"
+    );
+    assert!(close(at(545.0, 180.0), WHITE, 0), "nothing outside");
+}
+
+#[test]
+fn text_and_groups_cast_shadows_of_what_they_paint() {
+    let Some(g) = gpu() else { return };
+    let text = node(
+        NodeKind::Text {
+            text: "IIII".into(),
+            font_size: 120.0,
+            auto_width: true,
+            align: TextAlign::Left,
+        },
+        Rect::new(100.0, 100.0, 300.0, 140.0),
+        RED,
+        vec![shadow(DropShadow, 0.0, 200.0, 0.0, 0.0, BLACK)],
+    );
+    let (mut e, _) = scene(text);
+    let img = render_canvas(g, &e);
+    let glyphs = Rect::new(100.0, 100.0, 300.0, 140.0);
+    let red = count(&img, glyphs, |p| close(p, RED, 40));
+    let below = count(&img, glyphs.translate(v2(0.0, 200.0)), is_dark);
+    assert!(red > 2000, "{red}");
+    assert!(
+        (red as f64 - below as f64).abs() < red as f64 * 0.05,
+        "{red} {below}"
+    );
+
+    // A group has no shape of its own, so its children cast the shadow.
+    let page = e.doc.root[0];
+    let a = e.add_node(
+        node(
+            NodeKind::Ellipse,
+            Rect::new(500.0, 100.0, 60.0, 40.0),
+            BLUE,
+            vec![],
+        ),
+        Some(page),
+    );
+    let b = e.add_node(
+        node(
+            NodeKind::Ellipse,
+            Rect::new(600.0, 100.0, 60.0, 40.0),
+            BLUE,
+            vec![],
+        ),
+        Some(page),
+    );
+    e.select(vec![a, b]);
+    key(&mut e, Key::Char('g'), Modifiers::cmd());
+    let group = e.selection[0];
+    assert!(e.doc.get(group).unwrap().is_group());
+    inspector::apply(&mut e, "effects", &[group], |n| {
+        n.style.effects = vec![shadow(DropShadow, 0.0, 100.0, 0.0, 0.0, BLACK)];
+    });
+    let img = render_canvas(g, &e);
+    assert!(is_dark(px(&img, v2(530.0, 220.0))));
+    assert!(is_dark(px(&img, v2(630.0, 220.0))));
+    assert!(
+        close(px(&img, v2(580.0, 220.0)), WHITE, 2),
+        "the gap between them"
+    );
+}
+
+#[test]
+fn a_layer_blur_spreads_the_layer_and_what_is_in_it() {
+    let Some(g) = gpu() else { return };
+    let (mut e, id) = scene(node(
+        NodeKind::Frame { clip: true },
+        Rect::new(300.0, 200.0, 200.0, 100.0),
+        BLUE,
+        vec![],
+    ));
+    e.add_node(
+        node(
+            NodeKind::Rect,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            RED,
+            vec![],
+        ),
+        Some(id),
+    );
+    let sharp = render_canvas(g, &e);
+    assert!(close(px(&sharp, v2(399.0, 250.0)), RED, 2));
+    assert!(close(px(&sharp, v2(401.0, 250.0)), BLUE, 2));
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        n.style.effects = vec![blur(LayerBlur, 10.0)];
+    });
+    let img = render_canvas(g, &e);
+    let at = |x, y| px(&img, v2(x, y));
+    // Where red met blue there is now an even mix of the two.
+    let seam = at(400.0, 250.0);
+    assert!((seam[0] as i32 - 130).abs() < 12, "{seam:?}");
+    assert!((seam[2] as i32 - 135).abs() < 12, "{seam:?}");
+    assert!(
+        close(at(330.0, 250.0), RED, 6),
+        "far from an edge it is still red"
+    );
+    // The frame's edge is half gone, and reaches past where it was.
+    let edge = at(500.0, 250.0);
+    assert!(
+        (luma(edge) - luma([142, 167, 242, 255])).abs() < 12,
+        "{edge:?}"
+    );
+    assert!(luma(at(512.0, 250.0)) < 250);
+    assert_eq!(luma(at(540.0, 250.0)), 255, "but only as far as the blur");
+}
+
+#[test]
+fn a_background_blur_blurs_what_is_behind_the_layer_only() {
+    let Some(g) = gpu() else { return };
+    let mut e = editor(800.0, 500.0);
+    let page = page(&mut e);
+    for i in 0..10 {
+        let r = Rect::new(300.0 + i as f64 * 20.0, 100.0, 10.0, 300.0);
+        e.add_node(node(NodeKind::Rect, r, BLACK, vec![]), Some(page));
+    }
+    let mut glass = node(
+        NodeKind::Ellipse,
+        Rect::new(320.0, 180.0, 160.0, 140.0),
+        Color::rgba(255, 255, 255, 0),
+        vec![blur(BackgroundBlur, 12.0)],
+    );
+    glass.style.fills.clear();
+    let glass = e.add_node(glass, Some(page));
+    let img = render_canvas(g, &e);
+    let at = |x, y| luma(px(&img, v2(x, y)));
+    // Inside, the stripes average out to gray.
+    for x in [385.0, 395.0, 405.0] {
+        assert!((at(x, 250.0) - 128).abs() < 25, "x {x}: {}", at(x, 250.0));
+    }
+    // Outside the ellipse they are as sharp as ever, corners of its box included.
+    assert_eq!(at(305.0, 250.0), 0);
+    assert_eq!(at(315.0, 250.0), 255);
+    assert_eq!((at(325.0, 185.0), at(335.0, 185.0)), (0, 255));
+
+    // Hidden, the effect does nothing.
+    inspector::apply(&mut e, "effects", &[glass], |n| {
+        n.style.effects[0].visible = false
+    });
+    let img = render_canvas(g, &e);
+    assert_eq!(luma(px(&img, v2(385.0, 250.0))), 0);
+    assert_eq!(luma(px(&img, v2(395.0, 250.0))), 255);
+}
+
+#[test]
+fn effects_scale_with_the_zoom() {
+    let Some(g) = gpu() else { return };
+    let (mut e, _) = scene(card(vec![
+        shadow(DropShadow, 30.0, 0.0, 0.0, 0.0, BLACK),
+        // Too slight to see when zoomed out, where the layer is then drawn as it is.
+        blur(LayerBlur, 0.5),
+    ]));
+    for zoom in [0.25, 1.0, 4.0] {
+        e.camera.zoom = zoom;
+        e.camera.pan = v2(515.0, 250.0) - v2(400.0, 250.0) / zoom;
+        let img = render_canvas(g, &e);
+        let to_screen = |p: V2| e.camera.world_to_screen(p);
+        let inside = to_screen(v2(515.0, 250.0));
+        let outside = to_screen(v2(545.0, 250.0));
+        assert!(is_dark(px(&img, inside)), "zoom {zoom}");
+        assert!(close(px(&img, outside), WHITE, 2), "zoom {zoom}");
+    }
+}
+
+#[test]
+fn png_export_makes_room_for_shadows() {
+    let Some(g) = gpu() else { return };
+    let (mut e, id) = scene(card(vec![]));
+    let plain = png::render(g, &e.doc, Some(&[id]), 1.0, None).unwrap();
+    assert_eq!(plain.dimensions(), (200, 100));
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        n.style.effects = vec![shadow(DropShadow, 0.0, 10.0, 20.0, 0.0, BLACK)];
+    });
+    let img = png::render(g, &e.doc, Some(&[id]), 1.0, None).unwrap();
+    // 30px of blur on each side, moved 10px down.
+    assert_eq!(img.dimensions(), (260, 160));
+    assert_eq!(img.get_pixel(130, 70).0, [255, 255, 255, 255]);
+    let under = img.get_pixel(130, 125).0;
+    assert!(
+        under[3] > 100 && under[0] < 10,
+        "black, part clear: {under:?}"
+    );
+    assert_eq!(img.get_pixel(0, 0).0[3], 0);
+
+    // The project thumbnail draws them too.
+    let thumb = sketch_rs::session::render_thumbnail(g, &e.doc)
+        .unwrap()
+        .unwrap();
+    let thumb = image::load_from_memory(&thumb).unwrap().to_rgba8();
+    let (w, h) = thumb.dimensions();
+    let dark = thumb.pixels().filter(|p| p.0[3] > 200 && p.0[0] < 200);
+    assert!(dark.count() > 200, "{w}x{h}");
+}
+
+#[test]
+fn effect_edits_undo_and_instances_follow_until_overridden() {
+    let (mut e, id) = scene(node(
+        NodeKind::Frame { clip: true },
+        Rect::new(100.0, 100.0, 100.0, 100.0),
+        RED,
+        vec![],
+    ));
+    e.select(vec![id]);
+    e.create_component();
+    let inst = e.create_instance(id, v2(400.0, 100.0)).unwrap();
+    let effects = |e: &Editor, id: NodeId| e.doc.get(id).unwrap().style.effects.clone();
+
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        edit_effects(n, |l| l.insert(0, (Effect::new(DropShadow), None)))
+    });
+    e.history.seal();
+    assert_eq!(effects(&e, id), [Effect::new(DropShadow)]);
+    assert_eq!(effects(&e, inst), effects(&e, id), "the instance follows");
+
+    key(&mut e, Key::Char('z'), Modifiers::cmd());
+    assert!(effects(&e, id).is_empty() && effects(&e, inst).is_empty());
+    key(&mut e, Key::Char('z'), Modifiers::cmd_shift());
+    assert_eq!(effects(&e, inst).len(), 1);
+
+    // An effect edited on the instance is an override, so the main no longer reaches it.
+    inspector::apply(&mut e, "effects", &[inst], |n| {
+        n.style.effects[0].blur = 30.0
+    });
+    e.history.seal();
+    let link = e.doc.get(inst).unwrap().instance.clone().unwrap();
+    assert_eq!(link.overrides, ["effects"]);
+    inspector::apply(&mut e, "effects", &[id], |n| n.style.effects.clear());
+    assert!(effects(&e, id).is_empty());
+    assert_eq!(effects(&e, inst)[0].blur, 30.0);
+    // Until the override is reset.
+    e.select(vec![inst]);
+    e.reset_overrides();
+    assert!(effects(&e, inst).is_empty());
+}
+
+#[test]
+fn a_shadow_color_follows_its_token_through_reorders() {
+    let (mut e, id) = scene(card(vec![
+        shadow(DropShadow, 0.0, 2.0, 4.0, 0.0, BLACK),
+        shadow(InnerShadow, 0.0, 1.0, 2.0, 0.0, BLACK),
+    ]));
+    let token = e
+        .edit_tokens("add", None, |t| {
+            t.create(TokenKind::Color, "shadow", "#ff0000", None)
+        })
+        .unwrap();
+    let color = |e: &Editor, i: usize| e.doc.get(id).unwrap().style.effects[i].color;
+    let bound = |e: &Editor, i: usize| {
+        let n = e.doc.get(id).unwrap();
+        e.bound_token(n, TokenProp::EffectColor(i)).is_some()
+    };
+    e.bind_token(&[id], TokenProp::EffectColor(1), &token);
+    assert_eq!(color(&e, 1), Color::rgb(255, 0, 0));
+    assert_eq!(color(&e, 0), BLACK);
+    assert!(bound(&e, 1) && !bound(&e, 0));
+
+    // Moving the effect moves its binding.
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        edit_effects(n, |l| l.swap(0, 1))
+    });
+    assert!(bound(&e, 0) && !bound(&e, 1));
+    e.edit_tokens("edit", None, |t| {
+        t.update(&token, None, Some("#00ff00"), None)
+    })
+    .unwrap();
+    assert_eq!(color(&e, 0), Color::rgb(0, 255, 0));
+    assert_eq!(color(&e, 1), BLACK);
+
+    // Blur and offset edits keep it. A hand-picked color is no longer the token's.
+    inspector::apply(&mut e, "effects", &[id], |n| n.style.effects[0].blur = 9.0);
+    assert!(bound(&e, 0));
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        n.style.effects[0].color = BLUE
+    });
+    assert!(!bound(&e, 0));
+
+    // Removing an effect drops its binding and keeps the others in place.
+    e.bind_token(&[id], TokenProp::EffectColor(1), &token);
+    inspector::apply(&mut e, "effects", &[id], |n| {
+        edit_effects(n, |l| {
+            l.remove(0);
+        })
+    });
+    assert!(bound(&e, 0));
+    assert_eq!(color(&e, 0), Color::rgb(0, 255, 0));
+    assert_eq!(e.doc.get(id).unwrap().tokens.len(), 1);
+}
+
+// ------------------------------------------------------------------------------------ MCP
+
+fn host() -> exec::SessionHost {
+    let dir = std::env::temp_dir().join(format!("sketch-rs-effects-{:016x}", fastrand::u64(..)));
+    let mut h = exec::SessionHost::new(Store::open(dir).unwrap());
+    h.session.create(&mut h.ed, "Effects").unwrap();
+    h
+}
+
+fn call(h: &mut exec::SessionHost, name: &str, args: Value) -> Value {
+    match exec::call(h, name, &args) {
+        Ok(outs) => match outs.into_iter().next() {
+            Some(Out::Text(t)) => serde_json::from_str(&t).unwrap_or(Value::String(t)),
+            _ => Value::Null,
+        },
+        Err(e) => panic!("{name} failed: {e}"),
+    }
+}
+
+fn id_of(v: &Value) -> NodeId {
+    let n = v.as_str().unwrap().rsplit(':').next().unwrap();
+    NodeId(n.parse().unwrap())
+}
+
+#[test]
+fn html_shadows_and_blurs_round_trip_through_the_mcp_tools() {
+    let mut h = host();
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Card", "styles": {"width": "400px", "height": "300px"}}),
+    );
+    let html = r#"<div layer-name="Card" style="width:200px; height:100px; background:#fff;
+        border-radius:12px; box-shadow: 0 8px 24px rgba(0,0,0,.2), inset 0 1px 0 #fff;
+        backdrop-filter: blur(12px)">
+          <p style="text-shadow: 0 1px 2px #000; filter: blur(1.5px)">Hi</p>
+        </div>
+        <div layer-name="Label" style="box-shadow: 0 0 0 2px red">Boxed</div>"#;
+    let r = call(
+        &mut h,
+        "write_html",
+        json!({"targetNodeId": ab["id"], "mode": "insert-children", "html": html}),
+    );
+    assert!(r.get("ignoredStyles").is_none_or(Value::is_null), "{r}");
+    let (card, label) = (&r["createdNodeIds"][0], &r["createdNodeIds"][1]);
+    let kinds = |h: &exec::SessionHost, id: NodeId| -> Vec<EffectKind> {
+        let n = h.ed.doc.get(id).unwrap();
+        n.style.effects.iter().map(|e| e.kind).collect()
+    };
+    assert_eq!(
+        kinds(&h, id_of(card)),
+        [DropShadow, InnerShadow, BackgroundBlur]
+    );
+    let card_node = h.ed.doc.get(id_of(card)).unwrap();
+    let text = card_node.children[0];
+    assert_eq!(kinds(&h, text), [DropShadow, LayerBlur]);
+    // Text with a box shadow needs a box to cast it.
+    let label_node = h.ed.doc.get(id_of(label)).unwrap();
+    assert!(label_node.is_frame(), "{:?}", label_node.kind);
+    assert_eq!(label_node.style.effects[0].spread, 2.0);
+
+    let text_key = format!(
+        "{}:{}",
+        card.as_str().unwrap().split(':').next().unwrap(),
+        text.0
+    );
+    let styles = call(
+        &mut h,
+        "get_computed_styles",
+        json!({"nodeIds": [card, text_key]}),
+    );
+    let s = &styles[card.as_str().unwrap()];
+    assert_eq!(
+        s["boxShadow"],
+        "0px 8px 24px rgba(0, 0, 0, 0.2), inset 0px 1px 0px #ffffff"
+    );
+    assert_eq!(s["backdropFilter"], "blur(12px)");
+    let t = &styles[text_key.as_str()];
+    assert_eq!(t["textShadow"], "0px 1px 2px #000000");
+    assert_eq!(t["filter"], "blur(1.5px)");
+
+    let jsx = call(&mut h, "get_jsx", json!({"nodeId": card}));
+    let jsx = jsx.as_str().unwrap();
+    for part in [
+        r#"boxShadow: "0px 8px 24px rgba(0, 0, 0, 0.2), inset 0px 1px 0px #ffffff""#,
+        r#"backdropFilter: "blur(12px)""#,
+        r#"textShadow: "0px 1px 2px #000000""#,
+        r#"filter: "blur(1.5px)""#,
+    ] {
+        assert!(jsx.contains(part), "{part} not in {jsx}");
+    }
+
+    // update_styles replaces the list, drops other filters and reports them.
+    let up = call(
+        &mut h,
+        "update_styles",
+        json!({"updates": [{"nodeIds": [card], "styles": {
+            "boxShadow": "none", "backdropFilter": "blur(4px) saturate(1.8)"
+        }}]}),
+    );
+    assert_eq!(
+        up["ignoredStyles"][card.as_str().unwrap()],
+        json!(["backdropFilter"])
+    );
+    let n = h.ed.doc.get(id_of(card)).unwrap();
+    assert_eq!(n.style.effects, [blur(BackgroundBlur, 4.0)]);
+}
+
+#[test]
+fn a_shadow_binds_to_a_color_token_by_var_and_survives_a_reopen() {
+    let mut h = host();
+    call(
+        &mut h,
+        "create_tokens",
+        json!({"tokens": [
+            {"type": "color", "name": "--shadow", "value": "rgba(0, 0, 0, 0.5)"},
+            {"type": "spacing", "name": "--lift", "value": "8px"},
+        ]}),
+    );
+    let ab = call(
+        &mut h,
+        "create_artboard",
+        json!({"name": "Card", "styles": {
+            "width": "200px", "height": "100px",
+            "boxShadow": "0 var(--lift) 16px var(--shadow), inset 0 0 0 1px #ffffff",
+        }}),
+    );
+    let id = id_of(&ab["id"]);
+    let key = ab["id"].as_str().unwrap();
+    let n = h.ed.doc.get(id).unwrap();
+    assert_eq!(
+        n.style.effects[0].y, 8.0,
+        "other tokens fill in their value"
+    );
+    assert_eq!(n.style.effects[0].color, Color::rgba(0, 0, 0, 128));
+    assert!(n.tokens.contains_key(&TokenProp::EffectColor(0)));
+    assert!(!n.tokens.contains_key(&TokenProp::EffectColor(1)));
+    let styles = call(&mut h, "get_computed_styles", json!({"nodeIds": [key]}));
+    assert_eq!(
+        styles[key]["boxShadow"],
+        "0px 8px 16px var(--shadow), inset 0px 0px 0px 1px #ffffff"
+    );
+
+    // Saved, reopened, and still following the token.
+    let dir = h.session.project.as_ref().unwrap().dir.clone();
+    h.session.save(&mut h.ed).unwrap();
+    let mut again = exec::SessionHost::new(h.session.store.clone());
+    again.session.open(&mut again.ed, &dir).unwrap();
+    assert_eq!(
+        again.ed.doc.get(id).unwrap().style.effects,
+        h.ed.doc.get(id).unwrap().style.effects
+    );
+    call(
+        &mut again,
+        "set_tokens",
+        json!({"tokens": [{"name": "--shadow", "value": "#ff0000"}]}),
+    );
+    let n = again.ed.doc.get(id).unwrap();
+    assert_eq!(n.style.effects[0].color, Color::rgb(255, 0, 0));
+    assert_eq!(n.style.effects[1].color, WHITE);
+
+    // A file from before effects has none, and opens.
+    let old: Node = serde_json::from_str(
+        r##"{"id":1,"name":"Old","type":"rect","rect":{"x":0,"y":0,"w":10,"h":10},
+            "style":{"fills":[{"type":"solid","color":"#ffffff"}],"stroke":null,
+            "stroke_width":1.0,"corner_radius":0.0,"opacity":1.0},
+            "tokens":{"fill":"t1"}}"##,
+    )
+    .unwrap();
+    assert!(old.style.effects.is_empty());
+    assert_eq!(old.tokens[&TokenProp::Fill], "t1");
+}
+
+/// The inspector with every kind of effect on the selection, for a look at the section.
+#[test]
+fn the_inspector_lists_effects() {
+    let Some(g) = gpu() else { return };
+    let (mut e, id) = scene(card(vec![
+        shadow(DropShadow, 0.0, 8.0, 24.0, -4.0, Color::rgba(0, 0, 0, 90)),
+        shadow(InnerShadow, 0.0, 1.0, 0.0, 0.0, WHITE),
+        Effect {
+            visible: false,
+            ..blur(LayerBlur, 4.0)
+        },
+        blur(BackgroundBlur, 12.0),
+    ]));
+    let token = e
+        .edit_tokens("add", None, |t| {
+            t.create(TokenKind::Color, "shadow/soft", "#0000005a", None)
+        })
+        .unwrap();
+    e.bind_token(&[id], TokenProp::EffectColor(0), &token);
+    let mut st = UiState::default();
+    let img = frame::capture(g, &mut e, &mut st, [1280.0, 800.0], 2.0, |e| {
+        e.zoom_to_fit();
+        e.select(vec![id]);
+    });
+    img.save(artifact("inspector.png")).unwrap();
+    assert_eq!(
+        e.doc.get(id).unwrap().style.effects.len(),
+        4,
+        "looking edits nothing"
+    );
+}
+
+/// Every effect on one page at three zooms, saved for a look. Nothing may fail to draw.
+#[test]
+fn every_effect_draws_at_any_zoom() {
     let Some(g) = gpu() else { return };
     let mut e = editor(800.0, 500.0);
     let page = page(&mut e);
     let black = Color::rgba(0, 0, 0, 128);
-    use EffectKind::*;
     // Box drop shadow, rounded, with spread.
     let mut card = node(
         NodeKind::Rect,
@@ -159,17 +770,17 @@ fn gallery() {
         ),
         Some(page),
     );
-    let img = render_canvas(g, &e);
-    img.save(artifact("gallery.png")).unwrap();
-    e.camera.zoom = 3.0;
-    e.camera.pan = v2(20.0, 20.0);
-    render_canvas(g, &e)
-        .save(artifact("gallery-3x.png"))
-        .unwrap();
-    e.camera.zoom = 0.4;
-    e.camera.pan = v2(-300.0, -200.0);
-    render_canvas(g, &e)
-        .save(artifact("gallery-small.png"))
-        .unwrap();
-    let _ = luma;
+    for (name, zoom, pan) in [
+        ("gallery.png", 1.0, V2::ZERO),
+        ("gallery-3x.png", 3.0, v2(20.0, 20.0)),
+        ("gallery-small.png", 0.4, v2(-300.0, -200.0)),
+    ] {
+        e.camera.zoom = zoom;
+        e.camera.pan = pan;
+        let img = render_canvas(g, &e);
+        img.save(artifact(name)).unwrap();
+        // The card's shadow, just under its bottom edge.
+        let under = e.camera.world_to_screen(v2(110.0, 136.0));
+        assert!(luma(px(&img, under)) < 200, "{name}");
+    }
 }

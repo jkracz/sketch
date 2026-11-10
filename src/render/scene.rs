@@ -149,11 +149,11 @@ pub struct Blur {
 /// What a [`Blur`] paints back.
 #[derive(Clone)]
 pub enum BlurPaint {
-    /// The blurred content (layer blur).
+    /// The blurred content, for a layer blur.
     Content,
-    /// A color wherever the blurred content is (drop shadow). Straight alpha.
+    /// A color wherever the blurred content is, for a drop shadow. Straight alpha.
     Tint([f32; 4]),
-    /// A color inside `mask` wherever the blurred content is not (inner shadow).
+    /// A color inside `mask` wherever the blurred content is not, for an inner shadow.
     Inside {
         color: [f32; 4],
         mask: Arc<Vec<Piece>>,
@@ -291,7 +291,7 @@ impl SceneCache {
             });
             let mask = match draw::mask_op(n, wr) {
                 Some(op) if masked => Arc::new(tess.ops(&[op])),
-                // No area of its own: effects work inside what it paints.
+                // It has no area of its own, so effects work inside what it paints.
                 None if masked => pieces.clone(),
                 _ => Arc::default(),
             };
@@ -346,7 +346,7 @@ impl SceneCache {
             blend: n.style.blend,
         });
 
-        // Children first: a group casts its shadows from them.
+        // Children first, because a group casts its shadows from them.
         let mut kids = Vec::new();
         let mut kids_bounds = None;
         let child_clip = match n.kind {
@@ -442,7 +442,7 @@ impl<'a> Effects<'a> {
     }
 
     /// A box casts its shadow from the box and leaves it out from under itself, as CSS does.
-    /// Any other shape casts it from what it paints (`cast`), like `filter: drop-shadow()`,
+    /// Any other shape casts it from `cast`, what it paints, like `filter: drop-shadow()`,
     /// so the shadow shows through a translucent fill and ignores the spread.
     fn drop_shadow(&self, e: &Effect, cast: &[Op], cast_bounds: Option<Rect>) -> Option<Op> {
         let offset = v2(e.x, e.y);

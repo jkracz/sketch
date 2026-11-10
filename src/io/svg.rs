@@ -45,6 +45,15 @@ fn color_attr(attr: &str, c: [f32; 4]) -> String {
 
 /// Bounds used for export: drawn bounds of the roots and their subtrees.
 pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
+    bounds(doc, roots, false)
+}
+
+/// [`export_bounds`] with room for shadows and layer blurs, for the outputs that draw them.
+pub fn effect_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
+    bounds(doc, roots, true)
+}
+
+fn bounds(doc: &Document, roots: &[NodeId], effects: bool) -> Option<Rect> {
     let mut rects = Vec::new();
     for r in roots {
         if !doc.get(*r).is_some_and(|n| n.visible) {
@@ -66,7 +75,18 @@ pub fn export_bounds(doc: &Document, roots: &[NodeId]) -> Option<Rect> {
             }) {
                 continue;
             }
-            rects.push(draw::draw_bounds(nd, wr));
+            if !effects {
+                rects.push(draw::draw_bounds(nd, wr));
+                continue;
+            }
+            // A layer blur spreads the layer and everything inside it, up to the exported root.
+            let mut spread = draw::layer_blur_reach(nd);
+            let outer = doc.ancestors(id);
+            let exported = outer.iter().position(|a| a == r).map_or(0, |i| i + 1);
+            for a in outer[..exported].iter().filter_map(|a| doc.get(*a)) {
+                spread += draw::layer_blur_reach(a);
+            }
+            rects.push(draw::shadow_bounds(nd, wr).inflate(spread));
         }
     }
     Rect::union_all(&rects).map(|r| {

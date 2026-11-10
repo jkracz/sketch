@@ -509,7 +509,7 @@ pub fn layer_blur_reach(n: &Node) -> f64 {
     blur_reach(blur_sigma(&n.style.effects, EffectKind::LayerBlur))
 }
 
-/// A rectangle with corner radii (tl, tr, br, bl).
+/// A rectangle with corner radii, in the order tl, tr, br, bl.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoundRect {
     pub rect: Rect,
@@ -517,8 +517,8 @@ pub struct RoundRect {
 }
 
 impl RoundRect {
-    /// Grow by `d` on every side (shrink when negative), as CSS grows a shadow by its spread:
-    /// round corners follow, square ones stay square. None once nothing is left.
+    /// Grow by `d` on every side, or shrink when `d` is negative, as CSS grows a shadow by its
+    /// spread. Round corners follow and square ones stay square. None once nothing is left.
     pub fn inflate(&self, d: f64) -> Option<RoundRect> {
         let rect = self.rect.inflate(d);
         (rect.w > 0.0 && rect.h > 0.0).then(|| RoundRect {
@@ -565,7 +565,7 @@ pub fn stroke_reach(n: &Node) -> (f64, f64) {
 }
 
 /// The node's filled shape as one opaque op, for effects that work inside it. None for
-/// layers that have no area of their own (text, lines, groups).
+/// layers that have no area of their own, such as text, lines and groups.
 pub fn mask_op(n: &Node, wr: Rect) -> Option<DrawOp> {
     if !is_area(n) {
         return None;

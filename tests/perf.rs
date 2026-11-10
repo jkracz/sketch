@@ -105,3 +105,103 @@ fn ten_thousand_elements_cache_and_pan_without_rework() {
     drop(draw);
     assert_eq!(r.uploads, 1, "panning reuses the uploaded geometry");
 }
+
+/// Every layer with an effect is the costly case. Box shadows ride in the main pass, so they
+/// add none. Shape shadows and layer blurs share atlas pages, at three passes a page.
+#[test]
+fn effects_on_a_large_file_keep_their_cost_bounded() {
+    use sketch_rs::model::{Effect, EffectKind};
+    let Some(g) = gpu() else { return };
+    let size = [1600u32, 1000];
+    let tex = g.target(size);
+    let view = tex.create_view(&Default::default());
+    let frame_time = |e: &Editor, r: &mut CanvasRenderer, cache: &mut SceneCache| {
+        let t = Instant::now();
+        let f = scene::canvas(e, cache, V2::ZERO, true);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        r.render(
+            &g.device, &g.queue, &mut enc, &view, size, 1.0, &f, [1.0; 4],
+        );
+        g.queue.submit([enc.finish()]);
+        // Wait for the GPU, so the time covers drawing and not only recording.
+        g.read(&tex);
+        t.elapsed()
+    };
+    let with_effect = |effect: Option<Effect>, only: fn(&NodeKind) -> bool| {
+        let mut e = ten_thousand();
+        let ids: Vec<NodeId> = e.doc.root.clone();
+        e.edit("Effects", |tx| {
+            for id in ids {
+                let n = tx.node_mut(id).unwrap();
+                if only(&n.kind) {
+                    n.style.effects.extend(effect);
+                }
+            }
+        });
+        e
+    };
+    let measure = |label: &str, mut e: Editor, zoom: Option<f64>| {
+        match zoom {
+            Some(z) => {
+                e.camera.zoom = z;
+                e.camera.pan = v2(2000.0, 2000.0);
+            }
+            None => e.zoom_to_fit(),
+        }
+        let mut r = CanvasRenderer::new(&g.device, OFFSCREEN_FORMAT);
+        let mut cache = SceneCache::default();
+        let first = frame_time(&e, &mut r, &mut cache);
+        let mut cached = std::time::Duration::MAX;
+        for i in 0..5 {
+            e.camera.pan = e.camera.pan + v2(0.5 * i as f64, 0.0);
+            cached = cached.min(frame_time(&e, &mut r, &mut cache));
+        }
+        eprintln!(
+            "{label}: first frame {first:?}, panning frame {cached:?}, {} passes",
+            r.last_passes
+        );
+        assert_eq!(
+            r.uploads, 1,
+            "{label}: panning reuses the uploaded geometry"
+        );
+        r.last_passes
+    };
+    let shadow = Effect::new(EffectKind::DropShadow);
+    let any = |_: &NodeKind| true;
+    let rect = |k: &NodeKind| matches!(k, NodeKind::Rect);
+    let star = |k: &NodeKind| matches!(k, NodeKind::Star { .. });
+
+    let plain = measure("10k layers, no effects", with_effect(None, any), None);
+    assert_eq!(plain, 1);
+    // 2,500 box shadows, all in view.
+    let boxes = measure("2.5k box shadows", with_effect(Some(shadow), rect), None);
+    assert_eq!(boxes, 1, "box shadows need no pass of their own");
+    // 2,500 shape shadows, all in view. They share one atlas page, so it is the canvas pass
+    // plus one to draw the page and two to blur it.
+    let stars = with_effect(Some(shadow), star);
+    assert_eq!(measure("2.5k shape shadows", stars, None), 4);
+    // Up close fewer are in view and each is bigger.
+    let stars = with_effect(Some(shadow), star);
+    let near = measure("shape shadows at 400%", stars, Some(4.0));
+    assert!(near <= 7, "{near}");
+    let blur = Effect::new(EffectKind::LayerBlur);
+    let all = measure("10k layer blurs", with_effect(Some(blur), any), None);
+    assert!(all <= 7, "{all}");
+    measure(
+        "layer blurs at 100%",
+        with_effect(Some(blur), any),
+        Some(1.0),
+    );
+    // Each background blur ends the pass and blurs the canvas, so these do add up.
+    let glass = Effect::new(EffectKind::BackgroundBlur);
+    measure(
+        "background blurs at 100%",
+        with_effect(Some(glass), rect),
+        Some(1.0),
+    );
+    measure(
+        "background blurs at 400%",
+        with_effect(Some(glass), rect),
+        Some(4.0),
+    );
+}

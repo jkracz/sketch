@@ -7,9 +7,11 @@ use super::{UiState, c32, from32, section, title_text};
 use crate::editor::vector_ops::BoolOp;
 use crate::editor::{AppRequest, Editor};
 use crate::geom::v2;
+use crate::model::effects::{BoundEffect, edit_effects};
 use crate::model::{
-    Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, ImageMode, Join,
-    LetterSpacing, Node, NodeId, NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign, TokenProp,
+    Align, AutoLayout, BlendMode, Cap, Color, Constraint, Direction, Effect, EffectKind, ImageMode,
+    Join, LetterSpacing, Node, NodeId, NodeKind, Paint, Sizing, Stop, StrokeAlign, TextAlign,
+    TokenProp,
 };
 use crate::render::scene::CanvasStyle;
 use crate::theme;
@@ -221,6 +223,8 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             }
             separator(ui);
             layer(ui, ed, &ids, &first);
+            separator(ui);
+            effects(ui, ed, &ids, &first);
             if !matches!(
                 first.kind,
                 NodeKind::Text { .. }
@@ -1330,6 +1334,144 @@ fn layer(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
         picker(ui, ed, ids, TokenProp::Opacity);
     });
     mode_row(ui, ed, ids, first);
+}
+
+/// Shadows and blurs, top first.
+fn effects(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], first: &Node) {
+    let list = first.style.effects.clone();
+    ui.horizontal(|ui| {
+        ui.label(title_text("Effects"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("+").on_hover_text("Add effect").clicked() {
+                apply(ed, "effects", ids, |n| {
+                    edit_effects(n, |l| {
+                        l.insert(0, (Effect::new(EffectKind::DropShadow), None))
+                    })
+                });
+            }
+        });
+    });
+    for (i, e) in list.iter().enumerate() {
+        ui.push_id(("effect", i), |ui| {
+            effect_row(ui, ed, ids, i, list.len(), e)
+        });
+    }
+}
+
+fn effect_row(ui: &mut Ui, ed: &mut Editor, ids: &[NodeId], i: usize, count: usize, e: &Effect) {
+    // Change the effect in place. Its token binding stays unless the color no longer matches.
+    let set = |ed: &mut Editor, f: &dyn Fn(&mut Effect)| {
+        apply(ed, "effects", ids, |n| {
+            if let Some(slot) = n.style.effects.get_mut(i) {
+                f(slot);
+            }
+        });
+    };
+    // Reorder or remove, carrying each effect's binding with it.
+    let rearrange = |ed: &mut Editor, f: &dyn Fn(&mut Vec<BoundEffect>)| {
+        apply(ed, "effects", ids, |n| {
+            edit_effects(n, |l| {
+                if i < l.len() {
+                    f(l)
+                }
+            })
+        });
+    };
+    ui.horizontal(|ui| {
+        let kinds: Vec<(EffectKind, &str)> =
+            EffectKind::ALL.iter().map(|k| (*k, k.label())).collect();
+        if let Some(k) = combo(ui, "kind", e.kind, &kinds, 112.0) {
+            rearrange(ed, &|l| {
+                // A blur has no offset or color, so a shadow made from one gets the defaults.
+                let from = l[i].0;
+                l[i].0 = if k.is_shadow() == from.kind.is_shadow() {
+                    Effect { kind: k, ..from }
+                } else {
+                    Effect {
+                        visible: from.visible,
+                        ..Effect::new(k)
+                    }
+                };
+            });
+        }
+        let (eye, tip) = if e.visible {
+            (theme::Icon::Eye, "Hide effect")
+        } else {
+            (theme::Icon::EyeSlash, "Show effect")
+        };
+        if icon_btn(ui, eye, false, tip) {
+            let visible = !e.visible;
+            set(ed, &|e| e.visible = visible);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("−")
+                .on_hover_text("Remove effect")
+                .clicked()
+            {
+                rearrange(ed, &|l| {
+                    l.remove(i);
+                });
+            }
+        });
+    });
+    // The second row ends with the buttons that move the effect up and down the list.
+    let reorder = |ui: &mut Ui, ed: &mut Editor| {
+        if count < 2 {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_enabled_ui(i + 1 < count, |ui| {
+                if icon_btn(ui, theme::Icon::ChevronDown, false, "Move down") {
+                    rearrange(ed, &|l| l.swap(i, i + 1));
+                }
+            });
+            ui.add_enabled_ui(i > 0, |ui| {
+                if icon_btn(ui, theme::Icon::ChevronUp, false, "Move up") {
+                    rearrange(ed, &|l| l.swap(i, i - 1));
+                }
+            });
+        });
+    };
+    if !e.kind.is_shadow() {
+        ui.horizontal(|ui| {
+            if let Some(v) = num_field(ui, ed, "Blur ", e.blur, 0.2, 0.0..=1000.0, 76.0) {
+                set(ed, &|e| e.blur = v);
+            }
+            reorder(ui, ed);
+        });
+        return;
+    }
+    ui.horizontal(|ui| {
+        if let Some(c) = color_button(ui, ed, e.color) {
+            set(ed, &|e| e.color = c);
+        }
+        let prop = TokenProp::EffectColor(i);
+        let bound = (ids.first())
+            .and_then(|id| ed.doc.get(*id))
+            .and_then(|n| ed.bound_token(n, prop));
+        match bound {
+            Some(t) => ui.label(RichText::new(t.name.as_str()).weak()),
+            None => ui.label(RichText::new(e.color.to_hex()).monospace().weak()),
+        };
+        picker(ui, ed, ids, prop);
+        reorder(ui, ed);
+    });
+    ui.horizontal(|ui| {
+        let range = -1000.0..=1000.0;
+        if let Some(v) = num_field(ui, ed, "X ", e.x, 0.2, range.clone(), 50.0) {
+            set(ed, &|e| e.x = v);
+        }
+        if let Some(v) = num_field(ui, ed, "Y ", e.y, 0.2, range.clone(), 50.0) {
+            set(ed, &|e| e.y = v);
+        }
+        if let Some(v) = num_field(ui, ed, "B ", e.blur, 0.2, 0.0..=1000.0, 50.0) {
+            set(ed, &|e| e.blur = v);
+        }
+        if let Some(v) = num_field(ui, ed, "S ", e.spread, 0.2, range, 50.0) {
+            set(ed, &|e| e.spread = v);
+        }
+    });
 }
 
 /// The token mode a frame shows. Auto follows the frame it sits in.
