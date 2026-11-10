@@ -1,9 +1,7 @@
-//! Vector, text-range, arrow and pencil tools: booleans, flatten, path points, styled text
-//! ranges, arrow routes and bindings after creation, and freehand strokes.
+//! MCP tools for vector paths, text ranges, arrows and pencil strokes.
 //!
-//! Booleans and flatten run the editor's own commands on a borrowed selection, so agents get
-//! exactly what the toolbar does. Points are world coordinates throughout, because a path's
-//! box refits after every edit and node-local numbers would shift under the agent.
+//! Booleans and flatten use the editor's commands with a temporary selection. Points use
+//! world coordinates because a path's box refits after each edit, shifting local coordinates.
 
 use super::exec::{
     Args, ROOT, fit_text, head, mark_override, page_arg, r2, relayout, resolve, resolve_all, text,
@@ -21,18 +19,18 @@ use crate::model::{
 };
 use serde_json::{Map, Value, json};
 
-/// The tools this module serves, for the catalogue.
+/// MCP definitions for this module's tools.
 pub fn definitions() -> Vec<Value> {
     let ids = |d: &str| json!({"type": "array", "items": {"type": "string"}, "description": d});
     let point = json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2});
     vec![
         tool(
             "boolean_nodes",
-            "Combines two or more layers into one vector layer, like the toolbar's boolean \
-             buttons: union, subtract (the bottom layer minus the ones above it), intersect or \
-             exclude. Layers combine in stacking order, bottom first. The result takes the top \
-             layer's style (the bottom one's for subtract), sits where the top layer was and \
-             replaces the operands. It is destructive: curves become many short segments. \
+            "Combines two or more layers into one vector layer: union, subtract (the bottom \
+             layer minus the ones above it), intersect or exclude. Layers combine in stacking \
+             order, bottom first. The result takes the top layer's style (the bottom one's \
+             for subtract), sits where the top layer was and replaces the operands. It is \
+             destructive: curves become many short segments. \
              Returns the new layer's id, or null when nothing is left (an intersect of layers \
              that don't overlap).",
             json!({
@@ -55,10 +53,10 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "set_vector_points",
-            "Replaces the points of a vector path, which is how you move, add or delete \
-             points and handles (like Edit points in the app). get_node_info returns a path's \
-             `vector` in the same shape: copy it, change it, send it back. Coordinates are \
-             world units. Give `subpaths` ([{closed, points: [{x, y, in?: [x, y], out?: [x, \
+            "Replaces a vector path's points to move, add or delete points and handles. \
+             get_node_info returns a path's `vector` in the same shape: copy it, change it, \
+             send it back. Coordinates are world units. Give `subpaths` ([{closed, points: \
+             [{x, y, in?: [x, y], out?: [x, \
              y]}]}], where in/out are bezier handles and a point without them is a corner) or \
              an SVG path `d` string in world units. Each subpath needs two or more points. \
              The layer's box refits to the points. Flatten other shapes with flatten_nodes \
@@ -89,10 +87,10 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "set_text_range_styles",
-            "Styles part of a text or sticky layer, like selecting characters in the app and \
-             changing them. Pick the range with `match` (text to find, case-sensitive; \
-             `occurrence` picks which one, from 1, or \"all\") or with `start`/`end` character \
-             offsets (end exclusive). With neither, the whole text. `styles` takes fontWeight, \
+            "Styles part of a text or sticky layer. Pick the range with `match` (text to \
+             find, case-sensitive; `occurrence` picks which one, from 1, or \"all\") or with \
+             `start`/`end` character offsets (end exclusive). With neither, the whole text. \
+             `styles` takes fontWeight, \
              fontStyle (normal, italic), fontFamily, fontSize (px), color and textDecoration \
              (underline, line-through, none). `reset: true` removes range styling so the \
              characters follow the layer again (applied before `styles`). get_node_info lists \
@@ -147,13 +145,13 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "create_stroke",
-            "Draws a freehand pencil stroke, like the pencil tool (⇧P). `points` are world \
-             units ([[x, y], ...] or [[x, y, pressure], ...] with pressure 0 to 1, default \
-             0.5), two or more. The stroke is smoothed through the points unless smooth is \
+            "Draws a freehand pencil stroke (⇧P). `points` are world units ([[x, y], ...] or \
+             [[x, y, pressure], ...] with pressure 0 to 1, default 0.5), two or more. The stroke \
+             is smoothed through the points unless smooth is \
              false. width is the line width at pressure 0.5 (default 3), thinning how much \
              pressure changes it (0 even, default 0.6), color any CSS color (default ink that \
              reads on what's underneath). Recolor later with update_styles {color}; remove \
-             with delete_nodes, as the eraser does.",
+             with delete_nodes.",
             json!({
                 "points": {"type": "array", "minItems": 2, "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 3}},
                 "width": {"type": "number", "exclusiveMinimum": 0},
@@ -197,7 +195,7 @@ pub(super) fn node_details(ed: &Editor, page: usize, n: &Node, out: &mut Value) 
             fill_rule,
         } => {
             out["vector"] = json!({
-                "fillRule": fill_rule_name(*fill_rule),
+                "fillRule": fill_rule,
                 "subpaths": subpaths.iter().map(|sp| json!({
                     "closed": sp.closed,
                     "points": sp.points.iter().map(|q| {
@@ -229,9 +227,9 @@ pub(super) fn node_details(ed: &Editor, page: usize, n: &Node, out: &mut Value) 
                 _ => Value::Null,
             };
             out["arrow"] = json!({
-                "route": route_name(*route),
-                "startHead": head_name(*start_head),
-                "endHead": head_name(*end_head),
+                "route": route,
+                "startHead": start_head,
+                "endHead": end_head,
                 "start": bound(start),
                 "end": bound(end),
                 "points": points.iter().map(|p| pt(*p + o)).collect::<Vec<_>>(),
@@ -258,25 +256,6 @@ pub(super) fn node_details(ed: &Editor, page: usize, n: &Node, out: &mut Value) 
     {
         out["textRanges"] = json!(text_ranges(t, &n.text_style));
     }
-}
-
-fn fill_rule_name(r: FillRule) -> &'static str {
-    match r {
-        FillRule::NonZero => "nonzero",
-        FillRule::EvenOdd => "evenodd",
-    }
-}
-
-fn route_name(r: Route) -> &'static str {
-    match r {
-        Route::Straight => "straight",
-        Route::Curved => "curved",
-        Route::Elbow => "elbow",
-    }
-}
-
-fn head_name(h: Head) -> String {
-    h.label().to_ascii_lowercase()
 }
 
 // ------------------------------------------------------------------------------ booleans
@@ -367,7 +346,7 @@ fn subpaths_arg(v: &[Value]) -> Result<Vec<SubPath>, String> {
         let pts = sp
             .get("points")
             .and_then(Value::as_array)
-            .ok_or(format!("subpaths[{i}] needs `points`"))?;
+            .ok_or_else(|| format!("subpaths[{i}] needs `points`"))?;
         let mut points = Vec::new();
         for (j, p) in pts.iter().enumerate() {
             let at = |k: &str| p.get(k).and_then(Value::as_f64);
@@ -379,7 +358,7 @@ fn subpaths_arg(v: &[Value]) -> Result<Vec<SubPath>, String> {
                     None => Ok(None),
                     Some(h) => xy(h)
                         .map(Some)
-                        .ok_or(format!("subpaths[{i}].points[{j}].{k} must be [x, y]")),
+                        .ok_or_else(|| format!("subpaths[{i}].points[{j}].{k} must be [x, y]")),
                 }
             };
             points.push(PathPoint {
@@ -547,7 +526,6 @@ fn text_ranges(t: &str, ts: &TextStyle) -> Vec<Value> {
 }
 
 /// One parsed range edit: character ranges, what to set, and whether to clear first.
-#[derive(Clone)]
 struct RangeEdit {
     ranges: Vec<(usize, usize)>,
     span: TextSpan,
@@ -569,24 +547,24 @@ fn range_span(
         match k.as_str() {
             "fontWeight" => {
                 sp.weight = Some(css::font_weight(v));
-                sp.bold = None;
             }
             "fontStyle" => {
                 sp.italic =
                     Some(v.eq_ignore_ascii_case("italic") || v.eq_ignore_ascii_case("oblique"))
             }
             "fontFamily" => {
-                sp.family = Some(css::font_family(v).ok_or(format!("bad fontFamily `{v}`"))?)
+                sp.family =
+                    Some(css::font_family(v).ok_or_else(|| format!("bad fontFamily `{v}`"))?)
             }
             "fontSize" => {
                 sp.size = Some(
                     css::length(v, 16.0)
                         .filter(|z| *z > 0.0)
-                        .ok_or(format!("bad fontSize `{v}`; use px"))?,
+                        .ok_or_else(|| format!("bad fontSize `{v}`; use px"))?,
                 )
             }
             "color" => {
-                sp.color = Some(css::color(v).ok_or(format!("bad color `{v}`"))?);
+                sp.color = Some(css::color(v).ok_or_else(|| format!("bad color `{v}`"))?);
                 fields.push("fills");
                 continue;
             }
@@ -635,7 +613,7 @@ fn pick_ranges(u: &Args, t: &str) -> Result<Vec<(usize, usize)>, String> {
                 found
                     .get(i as usize - 1)
                     .map(|r| vec![*r])
-                    .ok_or(format!("`{m}` occurs {} time(s), not {i}", found.len()))
+                    .ok_or_else(|| format!("`{m}` occurs {} time(s), not {i}", found.len()))
             }
         };
     }
@@ -686,7 +664,7 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
             ));
         };
         let ranges = pick_ranges(&u, t).map_err(|e| format!("updates[{i}]: {e}"))?;
-        let (span, fields) = match u.get("styles") {
+        let (span, mut fields) = match u.get("styles") {
             Some(s) => range_span(s, &ed.tokens).map_err(|e| format!("updates[{i}]: {e}"))?,
             None => (TextSpan::default(), Vec::new()),
         };
@@ -696,7 +674,6 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 "updates[{i}]: pass `styles`, `reset: true` or both"
             ));
         }
-        let mut fields = fields;
         if reset {
             fields.extend(["font", "fills"]);
         }
@@ -727,7 +704,6 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                             (sp.start, sp.end) = keep;
                         });
                     }
-                    node.text_style.normalize();
                     for f in &e.fields {
                         mark_override(node, f);
                     }
@@ -744,7 +720,7 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
             let n = ed.page_doc(page).get(*id).unwrap();
             results.push(json!({
                 "id": super::exec::node_key(ed, page, *id),
-                "textRanges": text_ranges(n.kind.text().map_or("", |s| s), &n.text_style),
+                "textRanges": text_ranges(n.kind.text().map_or("", String::as_str), &n.text_style),
             }));
         }
     }
@@ -765,7 +741,6 @@ fn refit(tx: &mut Tx, id: NodeId) {
 
 // ------------------------------------------------------------------------------ arrows
 
-#[derive(Clone)]
 struct ArrowEdit {
     /// None: leave alone. Some(None): unbind. Some(Some(id)): bind.
     start: Option<Option<NodeId>>,
@@ -811,16 +786,15 @@ fn arrow_edit(ed: &Editor, page: usize, id: NodeId, u: &Args) -> Result<ArrowEdi
     let anchor = |k: &str| -> Result<Option<V2>, String> {
         match u.get(k) {
             None => Ok(None),
-            Some(v) => xy(v).map(Some).ok_or(format!("{k} must be [fx, fy]")),
+            Some(v) => xy(v)
+                .map(Some)
+                .ok_or_else(|| format!("{k} must be [fx, fy]")),
         }
     };
     let points = match u.get("points") {
         None => None,
         Some(v) => {
-            let pts: Option<Vec<V2>> = v
-                .as_array()
-                .map(|l| l.iter().map(xy).collect())
-                .unwrap_or(None);
+            let pts: Option<Vec<V2>> = v.as_array().and_then(|l| l.iter().map(xy).collect());
             match pts {
                 Some(p) if p.len() >= 2 => Some(p),
                 _ => return Err("points must be [[x, y], ...] with two or more points".into()),
@@ -845,13 +819,17 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
     let Some(wr) = tx.doc().world_rect(id) else {
         return;
     };
-    let mut pts: Vec<V2> = match &tx.doc().get(id).unwrap().kind {
-        NodeKind::Connector { points, .. } => points.iter().map(|p| *p + wr.min()).collect(),
-        _ => return,
+    let NodeKind::Connector {
+        points, start, end, ..
+    } = &tx.doc().get(id).unwrap().kind
+    else {
+        return;
     };
-    if let Some(p) = &e.points {
-        pts = p.clone();
-    }
+    let mut pts: Vec<V2> = match &e.points {
+        Some(p) => p.clone(),
+        None => points.iter().map(|p| *p + wr.min()).collect(),
+    };
+    let (start, end) = (*start, *end);
     let binding = |tx: &Tx, b: Option<NodeId>, anchor: Option<V2>, old: Option<Binding>| {
         b.map(|node| Binding {
             node,
@@ -861,9 +839,6 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
             inside: false,
         })
         .filter(|b| tx.doc().get(b.node).is_some())
-    };
-    let NodeKind::Connector { start, end, .. } = tx.doc().get(id).unwrap().kind.clone() else {
-        return;
     };
     let new_start = match e.start {
         Some(b) => binding(tx, b, e.start_anchor, start),
@@ -893,8 +868,7 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
         *end = new_end;
         if let Some(r) = e.route {
             *route = r;
-            // Like the inspector: switching to straight keeps only the two ends. Points given
-            // in the same call draw a straight polyline, as Excalidraw's sharp arrows do.
+            // Match the inspector's two-endpoint route unless explicit points define a polyline.
             if r == Route::Straight && e.points.is_none() && pts.len() > 2 {
                 pts = vec![pts[0], *pts.last().unwrap()];
             }
@@ -963,18 +937,22 @@ fn create_stroke(ed: &mut Editor, a: &Args) -> ToolResult {
     let def = page_arg(ed, a)?;
     let mut world = Vec::new();
     for (i, p) in a.arr("points")?.iter().enumerate() {
-        let l = p.as_array().filter(|l| (2..=3).contains(&l.len()));
-        let nums: Option<Vec<f64>> = l
-            .map(|l| l.iter().map(Value::as_f64).collect())
-            .unwrap_or(None);
-        let Some(nums) = nums else {
+        let point = p
+            .as_array()
+            .filter(|l| (2..=3).contains(&l.len()))
+            .and_then(|l| {
+                let pos = xy(p)?;
+                let pressure = l.get(2).map_or(Some(0.5), Value::as_f64)?;
+                Some(StrokePoint {
+                    x: pos.x,
+                    y: pos.y,
+                    p: pressure.clamp(0.0, 1.0),
+                })
+            });
+        let Some(point) = point else {
             return Err(format!("points[{i}] must be [x, y] or [x, y, pressure]"));
         };
-        world.push(StrokePoint {
-            x: nums[0],
-            y: nums[1],
-            p: nums.get(2).copied().unwrap_or(0.5).clamp(0.0, 1.0),
-        });
+        world.push(point);
     }
     if world.len() < 2 {
         return Err("a stroke needs two or more points".into());
@@ -993,35 +971,32 @@ fn create_stroke(ed: &mut Editor, a: &Args) -> ToolResult {
         (page, parent) = (pg, Some(id));
     }
     let color = match a.str("color") {
-        Some(c) => Some(css::color(c).ok_or(format!("bad color `{c}`"))?),
+        Some(c) => Some(css::color(c).ok_or_else(|| format!("bad color `{c}`"))?),
         None => None,
     };
-    let name = a.str("name").filter(|n| !n.is_empty()).map(String::from);
+    let name = a.str("name").filter(|n| !n.is_empty());
+    let point_count = world.len();
     let id = ed.with_page(page, |ed| {
         let start = v2(world[0].x, world[0].y);
         let color = color.unwrap_or_else(|| ed.ink_at(ed.ink_color, start));
         ed.edit("Draw", |tx| {
             let b = crate::ink::bounds(&world, width, thinning);
             let o = tx.doc().parent_origin(parent);
-            let local: Vec<StrokePoint> = world
-                .iter()
-                .map(|p| StrokePoint {
-                    x: p.x - b.x,
-                    y: p.y - b.y,
-                    p: p.p,
-                })
-                .collect();
+            for p in &mut world {
+                p.x -= b.x;
+                p.y -= b.y;
+            }
             let mut n = Node::new(
                 tx.alloc_id(),
                 NodeKind::Stroke {
-                    points: local,
+                    points: world,
                     width,
                     thinning,
                 },
                 b.translate(V2::ZERO - o),
             );
             n.style.set_fill(Some(color));
-            if let Some(nm) = &name {
+            if let Some(nm) = name {
                 n.name = nm.chars().take(50).collect();
             }
             if parent.is_some_and(|p| tx.doc().get(p).is_some_and(|f| f.layout.is_some())) {
@@ -1034,7 +1009,7 @@ fn create_stroke(ed: &mut Editor, a: &Args) -> ToolResult {
     text(json!({
         "id": super::exec::node_key(ed, page, id),
         "pageId": ed.pages[page].id,
-        "points": world.len(),
+        "points": point_count,
         "worldX": r2(r.x), "worldY": r2(r.y), "width": r2(r.w), "height": r2(r.h),
     }))
 }

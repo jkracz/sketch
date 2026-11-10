@@ -3873,7 +3873,7 @@ fn clone_subtree(
 }
 
 /// A free spot for a new top-level frame: right of the existing artboards, 80 px apart.
-pub(super) fn free_spot(doc: &Document, w: f64) -> V2 {
+fn free_spot(doc: &Document, w: f64) -> V2 {
     let rects: Vec<Rect> = doc
         .root
         .iter()
