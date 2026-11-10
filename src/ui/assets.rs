@@ -26,6 +26,8 @@ struct Thumb {
     doc: Arc<Document>,
     fonts: u64,
     ppp: f32,
+    /// The box it fits in, in points.
+    fit: f32,
     /// Texture pixels per canvas unit.
     scale: f32,
     /// `None` without a GPU or when the render failed.
@@ -33,13 +35,15 @@ struct Thumb {
 }
 
 impl Thumb {
-    fn current(&self, c: &LinkedComponent, ppp: f32) -> bool {
+    fn current(&self, c: &LinkedComponent, ppp: f32, fit: f32) -> bool {
         Arc::ptr_eq(&self.doc, &c.doc)
             && self.fonts == crate::fonts::generation()
             && self.ppp == ppp
+            && self.fit == fit
     }
 }
 
+/// Smallest tile edge. Tiles grow to fill the panel's width.
 const TILE: f32 = 92.0;
 const PAD: f32 = 8.0;
 /// Thumbnails rendered per frame, so opening the tab on a big system doesn't stall.
@@ -50,12 +54,11 @@ pub fn tile_id(id: &str) -> egui::Id {
     egui::Id::new(("asset-tile", id))
 }
 
-/// Insert component `id` centered in the view.
+/// Insert component `id` at the center of the view, as if dropped there.
 pub fn insert(ed: &mut Editor, id: &str) {
-    let (w, h) = ed.tokens.component(id).map_or((0.0, 0.0), |c| c.size());
-    let at = ed.camera.screen_to_world(ed.viewport * 0.5) - v2(w, h) * 0.5;
+    let at = ed.camera.screen_to_world(ed.viewport * 0.5);
     ed.end_text_edit();
-    ed.place_component(id, at.round());
+    ed.drop_component(id, at);
 }
 
 /// Components whose name or system name contains every word of `query`, ignoring case.
@@ -70,11 +73,10 @@ pub fn search<'a>(ed: &'a Editor, query: &str) -> Vec<&'a LinkedComponent> {
         .collect()
 }
 
-fn render(gpu: &Headless, ctx: &egui::Context, c: &LinkedComponent, ppp: f32) -> Thumb {
+fn render(gpu: &Headless, ctx: &egui::Context, c: &LinkedComponent, ppp: f32, fit: f32) -> Thumb {
     let (w, h) = c.size();
-    let fit = (TILE - 2.0 * PAD) as f64;
     // Small components show at their size; large ones shrink to fit.
-    let scale = (fit / w.max(h).max(1.0)).min(1.0) * ppp as f64;
+    let scale = (fit as f64 / w.max(h).max(1.0)).min(1.0) * ppp as f64;
     let tex = (c.main())
         .and_then(|m| crate::io::png::render(gpu, &c.doc, Some(&[m]), scale, None).ok())
         .map(|img| {
@@ -86,6 +88,7 @@ fn render(gpu: &Headless, ctx: &egui::Context, c: &LinkedComponent, ppp: f32) ->
         doc: c.doc.clone(),
         fonts: crate::fonts::generation(),
         ppp,
+        fit,
         scale: scale as f32,
         tex,
     }
@@ -132,6 +135,9 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     let cols = ((ui.available_width() + 6.0) / (TILE + 6.0))
         .floor()
         .max(1.0) as usize;
+    let tile = ((ui.available_width() + 6.0) / cols as f32 - 6.0).max(TILE);
+    // In steps of 8 points, so resizing the panel doesn't render thumbnails every frame.
+    let fit = ((tile - 2.0 * PAD) / 8.0).floor() * 8.0;
     let mut budget = RENDERS_PER_FRAME;
     let mut insert_id = None;
     egui::ScrollArea::vertical()
@@ -148,9 +154,9 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         for c in row {
                             ui.vertical(|ui| {
-                                ui.set_width(TILE);
+                                ui.set_width(tile);
                                 let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(TILE, TILE),
+                                    egui::vec2(tile, tile),
                                     egui::Sense::hover(),
                                 );
                                 let resp = ui.interact(
@@ -171,14 +177,15 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                                     egui::Stroke::new(1.0, p.separator),
                                     egui::StrokeKind::Inside,
                                 );
-                                let stale = a.thumbs.get(&c.id).is_none_or(|t| !t.current(c, ppp));
+                                let stale =
+                                    a.thumbs.get(&c.id).is_none_or(|t| !t.current(c, ppp, fit));
                                 if stale && ui.is_rect_visible(rect) {
                                     match (&a.gpu, budget) {
                                         (Some(gpu), 1..) => {
                                             budget -= 1;
                                             a.thumbs.insert(
                                                 c.id.clone(),
-                                                render(gpu, ui.ctx(), c, ppp),
+                                                render(gpu, ui.ctx(), c, ppp, fit),
                                             );
                                         }
                                         (Some(_), 0) => ui.ctx().request_repaint(),

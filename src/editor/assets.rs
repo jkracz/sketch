@@ -40,6 +40,10 @@ impl Editor {
         let label = format!("Insert {}", c.name);
         let id = self.edit(&label, |tx| {
             let id = instantiate(tx, src, main.id, parent, None, Some(rect));
+            // The main's place in its own parent doesn't carry over.
+            let lc = &mut tx.node_mut(id).unwrap().layout_child;
+            lc.absolute = false;
+            lc.constraints = Default::default();
             if let Some(f) = flow {
                 let i = crate::layout::drop_index(tx.doc(), f, id, at - o);
                 tx.move_to_index(id, i);
@@ -64,6 +68,8 @@ pub(crate) fn test_button(ed: &mut Editor) -> String {
     main.style
         .set_fill(Some(crate::model::Color::rgb(0, 0, 255)));
     main.component = true;
+    // As in a source file where the main sits in an auto-layout frame, out of the flow.
+    main.layout_child.absolute = true;
     main.children = vec![NodeId(2)];
     let mut dot = Node::new(NodeId(2), NodeKind::Rect, Rect::new(10.0, 10.0, 20.0, 20.0));
     dot.parent = Some(NodeId(1));
@@ -144,6 +150,10 @@ mod tests {
         // a spans x 10..50 and b 60..100: a drop at x 55 goes between them.
         let id = ed.drop_component(&c, v2(55.0, 30.0)).unwrap();
         assert_eq!(ed.doc.children(Some(f)), [a, id, b]);
+        assert_eq!(ed.doc.world_rect(id).unwrap().x, 60.0);
+        // It stays in the flow when it syncs from the main, which isn't.
+        ed.sync_page_instances(ed.current_page());
+        assert!(!ed.doc.get(id).unwrap().layout_child.absolute);
         assert_eq!(ed.doc.world_rect(id).unwrap().x, 60.0);
     }
 

@@ -111,7 +111,13 @@ fn copy_props(main: &Node, inst: &mut Node, overrides: &[String], is_root: bool)
     }
     if !ov("layout") {
         inst.layout = main.layout;
+        // Like position, how the root sits in its parent belongs to the instance.
+        let own = inst.layout_child;
         inst.layout_child = main.layout_child;
+        if is_root {
+            inst.layout_child.absolute = own.absolute;
+            inst.layout_child.constraints = own.constraints;
+        }
     }
     for prop in TokenProp::ALL {
         if !ov(override_key(prop.field())) {
