@@ -488,8 +488,10 @@ impl TokenSet {
             .modes
             .iter()
             .chain(self.systems.iter().flat_map(|s| &s.modes));
-        all.into_iter()
-            .find(|m| m.id == id || m.aka.iter().any(|a| a == id))
+        // A live mode wins over one a local mode stands in for.
+        let all: Vec<&Mode> = all.collect();
+        (all.iter().find(|m| m.id == id))
+            .or_else(|| all.iter().find(|m| m.aka.iter().any(|a| a == id)))
             .map(|m| m.name.as_str())
     }
 
@@ -1050,12 +1052,7 @@ impl TokenSet {
             let Some(i) = self.tokens.iter().position(|t| t.id == *id) else {
                 continue;
             };
-            let t = &self.tokens[i];
-            let fallback = self.value_in(t, None);
-            let names: Vec<String> = (self.modes_of(t).iter())
-                .filter(|m| self.value_in(t, Some(&m.name)) != fallback)
-                .map(|m| m.name.clone())
-                .collect();
+            let names = self.modes_needed(&self.tokens[i]);
             self.promote_modes(&names);
             let mut t = self.local_copy(&self.tokens[i]);
             t.id = crate::project::new_id();
@@ -1068,6 +1065,16 @@ impl TokenSet {
             self.tokens.insert(at, t);
         }
         out
+    }
+
+    /// Names of the modes a frame can pick in which `t` shows something other than its
+    /// default value. A local copy keeps them only if they are this file's own.
+    fn modes_needed(&self, t: &Token) -> Vec<String> {
+        let fallback = self.value_in(t, None);
+        (self.choices().into_iter())
+            .filter(|m| self.value_in(t, Some(&m.name)) != fallback)
+            .map(|m| m.name.clone())
+            .collect()
     }
 
     /// Make design system modes named in `names` this file's own, so local tokens can hold
@@ -1562,7 +1569,14 @@ impl TokenSet {
         let theirs: Vec<Mode> = (self.system(id).into_iter().flat_map(|l| &l.modes))
             .cloned()
             .collect();
-        let names: Vec<String> = theirs.iter().map(|m| m.name.clone()).collect();
+        let mut names: Vec<String> = theirs.iter().map(|m| m.name.clone()).collect();
+        for t in self
+            .tokens
+            .iter()
+            .filter(|t| t.system.as_deref() == Some(id))
+        {
+            names.extend(self.modes_needed(t));
+        }
         self.promote_modes(&names);
         for m in theirs {
             if let Some(local) =
@@ -2393,6 +2407,41 @@ mod tests {
         let new = other.paste(&s.copy(&[bg]));
         let red = TokenValue::Color(Color::rgb(255, 0, 0));
         assert_eq!(other.resolve_in(&new[0], Some("Contrast")), Some(red));
+    }
+
+    /// A system with one mode, `name`, and no tokens.
+    fn bare_system(id: &str, name: &str) -> SystemLink {
+        SystemLink {
+            id: id.into(),
+            name: id.into(),
+            prefix: id.into(),
+            release: 1,
+            description: None,
+            notes: None,
+            modes: vec![Mode::new(&format!("{id}/m"), name)],
+        }
+    }
+
+    #[test]
+    fn a_live_system_mode_wins_over_a_detached_one() {
+        let mut s = TokenSet::default();
+        s.attach(bare_system("x", "Contrast"), &[], &[]).unwrap();
+        s.rename_mode("dark", "Contrast").unwrap();
+        s.detach_system("x");
+        s.rename_mode("dark", "Dim").unwrap();
+        s.attach(bare_system("x", "Contrast"), &[], &[]).unwrap();
+        assert_eq!(s.mode_name("x/m"), Some("Contrast"));
+    }
+
+    #[test]
+    fn copies_keep_modes_another_system_brings() {
+        let mut s = using_modes(&["Contrast", "Light"]);
+        s.attach(bare_system("t", "Sepia"), &[], &[]).unwrap();
+        let bg = s.by_css_name("--s-bg").unwrap().id.clone();
+        let copy = s.duplicate(std::slice::from_ref(&bg));
+        assert_eq!(s.resolve_in(&copy[0], Some("Sepia")), Some(WHITE));
+        s.detach_system("s");
+        assert_eq!(s.resolve_in(&bg, Some("Sepia")), Some(WHITE));
     }
 
     #[test]
