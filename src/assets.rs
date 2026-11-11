@@ -18,15 +18,57 @@ pub struct ImageAsset {
     pub bytes: Vec<u8>,
     /// "png", "jpg", ...
     pub ext: &'static str,
+    /// Mip levels below `rgba`, built once on first use and shared by every renderer.
+    mips: OnceLock<Vec<image::RgbaImage>>,
 }
 
 impl ImageAsset {
+    /// `rgba`, then each mip level down to 1×1, so minified images stay smooth.
+    pub fn mip_levels(&self) -> impl Iterator<Item = &image::RgbaImage> {
+        let below = self.mips.get_or_init(|| mip_chain(&self.rgba));
+        std::iter::once(&self.rgba).chain(below)
+    }
+
     pub fn mime(&self) -> &'static str {
         match self.ext {
             "jpg" => "image/jpeg",
             "gif" => "image/gif",
             "webp" => "image/webp",
             _ => "image/png",
+        }
+    }
+}
+
+/// Each level halves the one above, down to 1×1 (at most 14 levels below it). It goes through
+/// `DynamicImage` because `imageops::resize` is generic, so calling it here would compile it
+/// unoptimized into dev builds, where a phone screenshot took about a second.
+fn mip_chain(base: &image::RgbaImage) -> Vec<image::RgbaImage> {
+    let mut out: Vec<image::RgbaImage> = Vec::new();
+    let mut cur = image::DynamicImage::ImageRgba8(base.clone());
+    while (cur.width() > 1 || cur.height() > 1) && out.len() < 14 {
+        let (w, h) = ((cur.width() / 2).max(1), (cur.height() / 2).max(1));
+        cur = cur.resize_exact(w, h, image::imageops::FilterType::Triangle);
+        out.push(cur.to_rgba8());
+    }
+    out
+}
+
+/// Build the mip chains of `assets` on background threads, so the first frame that shows an
+/// image doesn't stall on it.
+fn warm(assets: Vec<Arc<ImageAsset>>) {
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
+    let per = assets.len().div_ceil(threads).max(1);
+    for chunk in assets.chunks(per) {
+        let chunk = chunk.to_vec();
+        let spawned = std::thread::Builder::new()
+            .name("image mips".into())
+            .spawn(move || {
+                for a in chunk {
+                    a.mip_levels().for_each(drop);
+                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("image mips: {e}");
         }
     }
 }
@@ -57,9 +99,16 @@ fn ext_of(bytes: &[u8]) -> &'static str {
 
 /// Decode and register encoded image bytes; returns the asset id.
 pub fn register(bytes: &[u8]) -> Result<String, String> {
+    let (id, new) = decode(bytes)?;
+    warm(new.into_iter().collect());
+    Ok(id)
+}
+
+/// Register `bytes`; also returns the asset when it wasn't registered before.
+fn decode(bytes: &[u8]) -> Result<(String, Option<Arc<ImageAsset>>), String> {
     let id = hash(bytes);
     if registry().lock().unwrap().contains_key(&id) {
-        return Ok(id);
+        return Ok((id, None));
     }
     let img = image::load_from_memory(bytes)
         .map_err(|e| format!("unsupported image: {e}"))?
@@ -71,9 +120,11 @@ pub fn register(bytes: &[u8]) -> Result<String, String> {
         rgba: img,
         bytes: bytes.to_vec(),
         ext: ext_of(bytes),
+        mips: OnceLock::new(),
     };
-    registry().lock().unwrap().insert(id.clone(), Arc::new(a));
-    Ok(id)
+    let a = Arc::new(a);
+    registry().lock().unwrap().insert(id.clone(), a.clone());
+    Ok((id, Some(a)))
 }
 
 /// Register raw pixels (generated images); encodes them as PNG.
@@ -93,13 +144,17 @@ pub fn load_dir(dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
+    let mut new = Vec::new();
     for e in rd.flatten() {
-        if let Ok(bytes) = std::fs::read(e.path())
-            && let Err(err) = register(&bytes)
-        {
-            log::warn!("{}: {err}", e.path().display());
+        let Ok(bytes) = std::fs::read(e.path()) else {
+            continue;
+        };
+        match decode(&bytes) {
+            Ok((_, a)) => new.extend(a),
+            Err(err) => log::warn!("{}: {err}", e.path().display()),
         }
     }
+    warm(new);
 }
 
 /// Write the given assets into `dir` (skipping ones already there).
@@ -194,6 +249,19 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mip_levels_halve_to_one_pixel_and_are_built_once() {
+        let img =
+            image::RgbaImage::from_fn(10, 3, |x, y| image::Rgba([x as u8 * 20, y as u8, 0, 255]));
+        let id = register_rgba(&img);
+        let a = get(&id).unwrap();
+        let sizes: Vec<_> = a.mip_levels().map(|l| l.dimensions()).collect();
+        assert_eq!(sizes, [(10, 3), (5, 1), (2, 1), (1, 1)]);
+        let first: Vec<*const image::RgbaImage> = a.mip_levels().map(|l| l as *const _).collect();
+        let again: Vec<*const image::RgbaImage> = a.mip_levels().map(|l| l as *const _).collect();
+        assert_eq!(first, again, "levels are cached on the asset");
+    }
 
     #[test]
     fn base64_roundtrip() {
