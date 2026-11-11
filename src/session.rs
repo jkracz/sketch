@@ -20,6 +20,8 @@ pub struct Session {
     dirty_since: Option<Instant>,
     thumb_stale: bool,
     last_thumb: Option<Instant>,
+    /// The page the thumbnail shows: the first one, when the project was opened or last saved.
+    thumb_page: String,
 }
 
 impl Session {
@@ -30,6 +32,7 @@ impl Session {
             dirty_since: None,
             thumb_stale: false,
             last_thumb: None,
+            thumb_page: String::new(),
         }
     }
 
@@ -71,6 +74,7 @@ impl Session {
         self.dirty_since = None;
         self.thumb_stale = false;
         self.last_thumb = None;
+        self.thumb_page = ed.pages[0].id.clone();
         Ok(())
     }
 
@@ -174,6 +178,11 @@ impl Session {
         p.manifest.published = ed.published.clone();
         if wrote {
             p.manifest.modified = now_ms();
+        }
+        // The thumbnail shows only the first page, so switching pages (which saves the active
+        // page in the manifest) doesn't render it again.
+        if dirty.contains(&0) || ed.pages[0].id != self.thumb_page {
+            self.thumb_page = ed.pages[0].id.clone();
             self.thumb_stale = true;
         }
         p.write_manifest()?;
@@ -287,6 +296,38 @@ mod tests {
         Session::new(s.clone()).open(&mut ed2, &dir).unwrap();
         assert_eq!(ed2.doc.nodes, ed.doc.nodes);
         assert!(!ed2.project_dirty());
+        std::fs::remove_dir_all(&s.root).ok();
+    }
+
+    #[test]
+    fn thumbnail_follows_the_first_page_only() {
+        let s = store();
+        let mut sess = Session::new(s.clone());
+        let mut ed = Editor::default();
+        sess.create(&mut ed, "Thumbs").unwrap();
+        ed.add_page();
+        add_rect(&mut ed, 1.0);
+        sess.save(&mut ed).unwrap();
+        let now = Instant::now();
+        assert!(
+            !sess.thumbnail_due(now, true),
+            "page 1 isn't in the thumbnail"
+        );
+
+        // Switching pages saves the active page in the manifest, nothing the thumbnail shows.
+        ed.switch_page(0);
+        assert!(ed.project_dirty());
+        sess.save(&mut ed).unwrap();
+        assert!(!sess.thumbnail_due(now, true));
+
+        add_rect(&mut ed, 2.0);
+        sess.save(&mut ed).unwrap();
+        assert!(sess.thumbnail_due(now, true), "page 0 changed");
+        sess.thumb_stale = false;
+
+        ed.move_page(1, 0);
+        sess.save(&mut ed).unwrap();
+        assert!(sess.thumbnail_due(now, true), "another page is first now");
         std::fs::remove_dir_all(&s.root).ok();
     }
 

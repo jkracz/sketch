@@ -859,23 +859,9 @@ impl CanvasRenderer {
             return;
         }
         let Some(a) = assets::get(id) else { return };
-        // Mip chain so minified images stay smooth.
-        let mut levels = vec![a.rgba.clone()];
-        while levels.last().unwrap().width() > 1 || levels.last().unwrap().height() > 1 {
-            let l = levels.last().unwrap();
-            let (w, h) = ((l.width() / 2).max(1), (l.height() / 2).max(1));
-            levels.push(image::imageops::resize(
-                l,
-                w,
-                h,
-                image::imageops::FilterType::Triangle,
-            ));
-            if levels.len() > 14 {
-                break;
-            }
-        }
+        let levels: Vec<_> = a.mip_levels().collect();
         let tex = texture_2d(device, "image", a.width, a.height, levels.len() as u32);
-        for (i, l) in levels.iter().enumerate() {
+        for (i, l) in levels.into_iter().enumerate() {
             write_texture(queue, &tex, i as u32, l);
         }
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
