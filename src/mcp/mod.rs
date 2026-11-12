@@ -54,10 +54,22 @@ pub enum Out {
 
 pub type ToolResult = Result<Vec<Out>, String>;
 
+/// The MCP session a call came from: one agent per session, named by its client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Caller {
+    pub agent: crate::agents::AgentId,
+    /// `clientInfo.name` from the client's handshake.
+    pub client: Option<String>,
+}
+
+/// Internal call name sent when a session ends, so its agent drops off the canvas.
+pub const SESSION_ENDED: &str = "\0session_ended";
+
 /// A tool call travelling from the HTTP thread to the editor thread.
 pub struct Call {
     pub name: String,
     pub args: serde_json::Value,
+    pub caller: Option<Caller>,
     pub reply: tokio::sync::oneshot::Sender<ToolResult>,
 }
 
@@ -65,8 +77,10 @@ pub struct Call {
 /// own their editor on a plain thread (tests, headless use); the app drains its channel
 /// from the event loop instead.
 pub fn serve_host(host: &mut dyn exec::Host, rx: std::sync::mpsc::Receiver<Call>) {
+    let start = std::time::Instant::now();
     while let Ok(call) = rx.recv() {
-        let r = exec::call(host, &call.name, &call.args);
+        let now = start.elapsed().as_secs_f64() * 1000.0;
+        let r = exec::call_as(host, call.caller.as_ref(), now, &call.name, &call.args);
         let _ = call.reply.send(r);
     }
 }

@@ -154,6 +154,6 @@ artboards when content clips; never show raw node ids; call `finish_working_on_n
 
 Not carried over (no equivalent in a local-first single-user app): comments,
 teams/drafts, nested folders, archiving over MCP, AI image generation (`paper-gen://`), video
-export, the per-agent "working" indicator (kept as a harmless no-op tool so agent prompts written for Paper work).
+export. The per-agent "working" indicator is carried over (see `agent-activity.md`).
 Design tokens came later: see `design-tokens.md`. Added for Sketch: whiteboard shapes and hand-drawn style (`create_shape`, Excalidraw keys
 in `update_styles`), `undo`/`redo`, and page/project listing.

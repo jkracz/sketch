@@ -1,5 +1,6 @@
 //! Sketch: a native infinite canvas for planning, working and sketching.
 
+pub mod agents;
 pub mod app;
 pub mod assets;
 pub mod connector;

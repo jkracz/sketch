@@ -275,6 +275,114 @@ pub(super) fn resolve_all(
 
 // ------------------------------------------------------------------------------ dispatch
 
+/// Run one tool for `caller` and note the nodes it read or wrote, so the canvas shows where
+/// that agent is working (`crate::agents`). `now` is the app clock in ms.
+pub fn call_as(
+    host: &mut dyn Host,
+    caller: Option<&super::Caller>,
+    now: f64,
+    name: &str,
+    args: &Value,
+) -> ToolResult {
+    let Some(c) = caller else {
+        return call(host, name, args);
+    };
+    if name == super::SESSION_ENDED {
+        host.editor().agents.remove(c.agent);
+        return Ok(Vec::new());
+    }
+    let finishing = name == "finish_working_on_nodes";
+    let outer = host.editor().write_log.replace(Vec::new());
+    let r = call(host, name, args);
+    let ed = host.editor();
+    let mut touched = std::mem::replace(&mut ed.write_log, outer).unwrap_or_default();
+    if finishing {
+        finish_working(ed, c.agent, args);
+        return r;
+    }
+    let empty = Map::new();
+    let a = Args(args.as_object().unwrap_or(&empty));
+    if let Ok(page) = page_arg(ed, &a) {
+        let mut keys = Vec::new();
+        node_keys(args, &mut keys);
+        for k in keys {
+            if let Ok((p, id)) = resolve(ed, k, page) {
+                touched.push((ed.pages[p].id.clone(), id));
+            }
+        }
+    }
+    for (page, id) in touched {
+        ed.agents
+            .touch(c.agent, c.client.as_deref(), &page, [id], now);
+    }
+    r
+}
+
+/// Node id strings in a tool's arguments (`nodeId`, `nodeIds`, `targetNodeId`, ids inside
+/// `updates`, `moves`, `nodes`...).
+fn node_keys<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    const KEYS: [&str; 6] = [
+        "nodeId",
+        "nodeIds",
+        "targetNodeId",
+        "id",
+        "parentId",
+        "before",
+    ];
+    match v {
+        Value::Object(m) => {
+            for (k, v) in m {
+                match v {
+                    Value::String(s) if KEYS.contains(&k.as_str()) => out.push(s),
+                    Value::Array(a) if k == "nodeIds" => {
+                        out.extend(a.iter().filter_map(Value::as_str));
+                    }
+                    // export's `nodes` map is keyed by node id.
+                    Value::Object(inner) if k == "nodes" => {
+                        out.extend(inner.keys().map(String::as_str));
+                    }
+                    _ => node_keys(v, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|v| node_keys(v, out)),
+        _ => {}
+    }
+}
+
+/// `finish_working_on_nodes`: drop the listed nodes and everything inside them from the
+/// agent's activity, or all of it when no ids are given.
+fn finish_working(ed: &mut Editor, agent: crate::agents::AgentId, args: &Value) {
+    let ids: Vec<&str> = args
+        .get("nodeIds")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        ed.agents.finish(agent);
+        return;
+    }
+    let empty = Map::new();
+    let a = Args(args.as_object().unwrap_or(&empty));
+    let page = page_arg(ed, &a).unwrap_or(ed.active_page);
+    let done: HashSet<(usize, NodeId)> = ids
+        .iter()
+        .filter_map(|k| resolve(ed, k, page).ok())
+        .collect();
+    let pages: Vec<String> = ed.pages.iter().map(|p| p.id.clone()).collect();
+    let mut agents = std::mem::take(&mut ed.agents);
+    agents.retain(agent, |p, n| {
+        let Some(pi) = pages.iter().position(|q| q == p) else {
+            return false;
+        };
+        let doc = ed.page_doc(pi);
+        let mut chain = doc.ancestors(n);
+        chain.push(n);
+        !chain.iter().any(|x| done.contains(&(pi, *x)))
+    });
+    ed.agents = agents;
+}
+
 /// Run one tool. Errors are returned as messages for the agent.
 pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
     let empty = Map::new();
