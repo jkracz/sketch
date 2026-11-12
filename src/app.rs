@@ -693,6 +693,10 @@ impl App {
             self.set_appearance();
         }
         let Some(g) = self.gfx.as_mut() else { return };
+        if ui::take_titlebar_double_click(&self.ctx) {
+            #[cfg(target_os = "macos")]
+            crate::macos::titlebar_double_click(&g.window);
+        }
         self.canvas = l.canvas;
         let repaint_delay = l
             .output
@@ -955,6 +959,8 @@ impl ApplicationHandler<UserEvent> for App {
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
+        #[cfg(target_os = "macos")]
+        crate::macos::pin_metal_layer(&window);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             ..Default::default()
