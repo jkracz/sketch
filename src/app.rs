@@ -950,6 +950,10 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.st.translucent_sidebar = translucent && crate::macos::apply_vibrancy(&window);
             self.st.native_chrome = true;
+            // Double-clicks (title bar, renames) follow System Settings, not egui's 0.3s.
+            let interval = objc2_app_kit::NSEvent::doubleClickInterval();
+            self.ctx
+                .options_mut(|o| o.input_options.max_double_click_delay = interval);
             let (x, y) = theme::TRAFFIC_LIGHTS;
             crate::macos::inset_traffic_lights(&window, x, y);
             self.menu = Some(crate::macos::install_menu());
