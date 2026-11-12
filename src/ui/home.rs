@@ -155,7 +155,7 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
         )
         .show(ui, |ui| {
             if native_chrome {
-                ui.add_space(theme::TOOLBAR_H - 8.0);
+                super::titlebar_strip(ui, theme::TOOLBAR_H - 8.0);
             }
             ui.add_space(4.0);
             ui.label(
@@ -208,6 +208,9 @@ pub fn draw(ui: &mut Ui, hv: &mut HomeView, native_chrome: bool, translucent: bo
                 .inner_margin(egui::Margin::symmetric(20, 0)),
         )
         .show(ui, |ui| {
+            if native_chrome {
+                super::titlebar_background(ui);
+            }
             ui.horizontal_centered(|ui| {
                 ui.label(
                     RichText::new(match hv.selected_folder() {

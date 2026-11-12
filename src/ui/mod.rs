@@ -178,7 +178,7 @@ pub fn draw(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) -> egui::Rect {
         .show(ui, |ui| {
             if st.native_chrome {
                 // Room for the traffic lights, which sit over the top of the sidebar.
-                ui.add_space(theme::TOOLBAR_H - 8.0);
+                titlebar_strip(ui, theme::TOOLBAR_H - 8.0);
             }
             layers(ui, ed, st)
         });
@@ -241,8 +241,45 @@ fn menu_entries(ui: &mut Ui, ed: &mut Editor, entries: &[shortcuts::MenuEntry]) 
 
 /// The unified toolbar: document title on the left, zoom and help on the right. Without native
 /// chrome (Linux) it also carries an egui menu bar.
+const TITLEBAR_DOUBLE_CLICK: &str = "titlebar-double-click";
+
+/// With native chrome our toolbar sits where the title bar would be, so AppKit never sees a
+/// double-click there. Make empty toolbar space act as the title bar. Call before adding the
+/// bar's widgets so they win the hit test.
+pub(crate) fn titlebar_background(ui: &Ui) {
+    let r = ui.interact(
+        ui.max_rect(),
+        ui.id().with("titlebar"),
+        egui::Sense::click(),
+    );
+    titlebar_response(ui, &r);
+}
+
+/// A full-width strip of title bar, `h` tall, at the cursor.
+pub(crate) fn titlebar_strip(ui: &mut Ui, h: f32) {
+    let w = ui.available_width();
+    let (_, r) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    titlebar_response(ui, &r);
+}
+
+fn titlebar_response(ui: &Ui, r: &egui::Response) {
+    if r.double_clicked() {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(TITLEBAR_DOUBLE_CLICK), true));
+    }
+}
+
+/// Whether the title bar was double-clicked this frame; clears the flag.
+pub fn take_titlebar_double_click(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(TITLEBAR_DOUBLE_CLICK)))
+        .unwrap_or(false)
+}
+
 fn top_bar(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
     let p = theme::pal(ui);
+    if st.native_chrome {
+        titlebar_background(ui);
+    }
     ui.horizontal_centered(|ui| {
         if !st.native_chrome {
             menu_bar(ui, ed);

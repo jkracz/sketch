@@ -109,6 +109,62 @@ pub fn inset_traffic_lights(window: &Window, x: f64, bar_h: f64) {
     }
 }
 
+/// Do what System Settings > Desktop & Dock > "Double-click a window's title bar to" asks:
+/// zoom (the default, also used for "Fill"), minimise, or nothing.
+pub fn titlebar_double_click(window: &Window) {
+    let Some(win) = ns_window(window) else { return };
+    let action = objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .stringForKey(objc2_foundation::ns_string!("AppleActionOnDoubleClick"))
+        .map(|s| s.to_string());
+    let sel = match action.as_deref() {
+        Some("Minimize") => objc2::sel!(performMiniaturize:),
+        Some("None") => return,
+        _ => objc2::sel!(performZoom:),
+    };
+    // Run it on the next run-loop pass, not inside winit's event handler: the zoom animation
+    // runs while the call is on the stack, and winit can't deliver Resized or redraw events
+    // until it returns, so the window would grow with a stale frame.
+    // SAFETY: performSelector:withObject:afterDelay: is an NSObject method; both selectors
+    // take one (nil) sender argument.
+    unsafe {
+        let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+        let _: () =
+            objc2::msg_send![&*win, performSelector: sel, withObject: nil, afterDelay: 0.0f64];
+    }
+}
+
+/// Keep wgpu's CAMetalLayer from stretching its last frame to fill the window while the window
+/// changes size. By default a layer scales its contents to its bounds, so zooming showed
+/// distorted content until the next frame at the new size. Pinned to the top left, the old
+/// frame stays sharp and the new frame fills in the edges.
+pub fn pin_metal_layer(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    let Some(win) = ns_window(window) else { return };
+    let Some(view) = win.contentView() else {
+        return;
+    };
+    let Some(metal) = AnyClass::get(c"CAMetalLayer") else {
+        return;
+    };
+    // SAFETY: CALayer getters/setters on the main thread; `sublayers` is an NSArray of CALayer.
+    unsafe {
+        let root: *mut AnyObject = msg_send![&*view, layer];
+        if root.is_null() {
+            return;
+        }
+        let subs: *mut objc2_foundation::NSArray<AnyObject> = msg_send![root, sublayers];
+        let Some(subs) = subs.as_ref() else { return };
+        for layer in subs.iter() {
+            let is_metal: bool = msg_send![&*layer, isKindOfClass: metal];
+            if is_metal {
+                let _: () =
+                    msg_send![&*layer, setContentsGravity: objc2_foundation::ns_string!("topLeft")];
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum MenuCmd {
     Run(Action),
