@@ -669,6 +669,8 @@ pub fn overlay(mb: &mut MeshBuilder, ed: &Editor, offset: V2) {
         );
     }
 
+    agent_marks(mb, ed, &v);
+
     if let Some(h) = ed.hover.filter(|h| !ed.selection.contains(h))
         && let Some(wr) = ed.doc.world_rect(h)
     {
@@ -762,6 +764,112 @@ pub fn overlay(mb: &mut MeshBuilder, ed: &Editor, offset: V2) {
     vector_edit_overlay(mb, ed, &v, accent);
     whiteboard_overlay(mb, ed, &v, accent);
     mb.set_clip(None);
+}
+
+/// Agent marks: a lighter tint of the selection blue.
+pub const AGENT: Color = Color::rgb(0x6a, 0x98, 0xf7);
+/// One outline pulse, ms.
+const PULSE_MS: f64 = 3000.0;
+/// Dot strip: columns, rows, dot radius and gap at 100%.
+const RAIN_COLS: usize = 32;
+const RAIN_ROWS: usize = 2;
+const RAIN_DOT: f64 = 1.5;
+const RAIN_GAP: f64 = 3.0;
+/// A column's drop falls this many rows' worth per cycle (the rest of the cycle is dark).
+const RAIN_CYCLE: f64 = 5.0;
+
+/// Outline opacity over one pulse: holds full, eases down to 0.2 and back up.
+pub fn agent_pulse(t_ms: f64) -> f64 {
+    let t = t_ms.rem_euclid(PULSE_MS) / PULSE_MS;
+    let ease = |x: f64| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    match t {
+        t if t < 0.2 || t >= 0.8 => 1.0,
+        t if t < 0.5 => 1.0 - 0.8 * ease((t - 0.2) / 0.3),
+        t => 0.2 + 0.8 * ease((t - 0.5) / 0.3),
+    }
+}
+
+/// Two stable pseudo-random numbers in 0..1 for column `col` of frame `id`.
+fn column_seed(id: NodeId, col: usize) -> (f64, f64) {
+    let mut x =
+        id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (col as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let mut next = || {
+        x ^= x >> 30;
+        x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^= x >> 27;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (next(), next())
+}
+
+/// The top-level frames agents are working on: a pulsing outline just outside the frame
+/// and a strip of falling dots at the right end of its label row.
+fn agent_marks(mb: &mut MeshBuilder, ed: &Editor, v: &View) {
+    let now = ed.now_ms;
+    let base = rgba(AGENT);
+    let with = |a: f64| [base[0], base[1], base[2], (a as f32).clamp(0.0, 1.0)];
+    let z = ed.camera.zoom;
+    let labels: HashMap<NodeId, Rect> = ed.frame_labels().into_iter().collect();
+    for (id, m) in ed.agents.marks() {
+        let fade = m.alpha(now);
+        let (Some(n), Some(wr)) = (ed.doc.get(id), ed.doc.world_rect(id)) else {
+            continue;
+        };
+        if fade <= 0.0 {
+            continue;
+        }
+        let age = now - m.since;
+        // 2 px line whose inner edge sits on the frame's edge.
+        let grow = 1.0 / z;
+        let radii = n
+            .style
+            .corner_radii()
+            .map(|r| if r > 0.0 { r + grow } else { 0.0 });
+        let path = crate::vector::rounded_rect(wr.inflate(grow), radii).map(|p| v.to_screen(p));
+        mb.stroke_path(
+            &path.to_lyon(),
+            2.0,
+            with(agent_pulse(age) * fade),
+            LineCap::Round,
+        );
+
+        let sr = v.rect_to_screen(&wr);
+        let unit = 16.0 * z;
+        let (dot, gap) = (RAIN_DOT.min(unit), RAIN_GAP.min(unit));
+        let pitch = gap + dot * 2.0;
+        let left = labels
+            .get(&id)
+            .map_or(sr.x, |l| l.translate(v.offset).right() + gap);
+        let top = sr.y - 11.0 - pitch * RAIN_ROWS as f64 / 2.0;
+        for col in 0..RAIN_COLS {
+            let x = sr.right() - (RAIN_COLS - col) as f64 * pitch + pitch * 0.5;
+            if x - dot < left {
+                continue;
+            }
+            let (s, p) = column_seed(id, col);
+            let speed = 0.85 + 0.3 * s;
+            let fallen = p * RAIN_CYCLE + 0.12 * speed * age / 16.67;
+            // While fading in, a column shows once its first drop comes round.
+            if fallen < RAIN_CYCLE && age < crate::agents::FADE_MS {
+                continue;
+            }
+            let head = fallen.rem_euclid(RAIN_CYCLE);
+            let tail = 1.5 + 2.5 * (1.0 - s);
+            for row in 0..RAIN_ROWS {
+                let a = head - row as f64;
+                if !(0.0..tail).contains(&a) {
+                    continue;
+                }
+                let c = 1.0 - a / tail;
+                let k = c.powi(4) / (c.powi(4) + (1.0 - c).powi(4));
+                let y = top + row as f64 * pitch + pitch * 0.5;
+                mb.circle(v2(x, y), dot, with(k * fade));
+            }
+        }
+    }
 }
 
 /// Arrow handles, bind targets, quick-connect knobs and the laser trail.

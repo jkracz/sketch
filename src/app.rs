@@ -793,6 +793,9 @@ impl App {
         if repaint_delay.is_zero() || pending || animating || !self.ed.requests.is_empty() {
             g.window.request_redraw();
             self.next_repaint = None;
+        } else if self.ed.agents.animating() {
+            // Agent marks animate at about 30 fps: smooth enough for a pulse, cheap in debug.
+            self.next_repaint = Some(Instant::now() + repaint_delay.min(AGENT_FRAME));
         } else if repaint_delay < Duration::from_secs(3600) {
             self.next_repaint = Some(Instant::now() + repaint_delay);
         } else {
@@ -1428,6 +1431,9 @@ fn physical_char(c: winit::keyboard::KeyCode) -> Option<char> {
     })
 }
 
+/// Repaint interval while only the agent marks are animating.
+const AGENT_FRAME: Duration = Duration::from_millis(33);
+
 impl App {
     /// Run the MCP tool calls that arrived since the last wake-up, then repaint.
     fn run_mcp_calls(&mut self) {
@@ -1439,7 +1445,8 @@ impl App {
             return;
         }
         for c in calls {
-            let r = crate::mcp::exec::call(self, &c.name, &c.args);
+            let now = self.now();
+            let r = crate::mcp::exec::call_as(self, c.caller.as_ref(), now, &c.name, &c.args);
             if let Err(e) = &r {
                 log::info!("mcp {}: {e}", c.name);
             }

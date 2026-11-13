@@ -5,7 +5,7 @@
 //! `Accept` header (some clients omit it and then misread the 406 as an auth failure) and
 //! answers unknown routes with a plain JSON hint rather than an OAuth-looking error.
 
-use super::{Call, ENDPOINT, Out, ToolResult, tools};
+use super::{Call, Caller, ENDPOINT, Out, SESSION_ENDED, ToolResult, tools};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
@@ -16,6 +16,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -61,11 +62,41 @@ pub fn to_result(r: ToolResult) -> CallToolResult {
 #[derive(Clone)]
 pub struct SketchServer {
     dispatch: Dispatch,
+    session: Arc<Session>,
+}
+
+/// Identifies a session's agent on the canvas; tells the editor when the session is gone.
+struct Session {
+    agent: crate::agents::AgentId,
+    dispatch: Dispatch,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let (reply, _) = tokio::sync::oneshot::channel();
+        (self.dispatch)(Call {
+            name: SESSION_ENDED.into(),
+            args: serde_json::Value::Null,
+            caller: Some(Caller {
+                agent: self.agent,
+                client: None,
+            }),
+            reply,
+        });
+    }
 }
 
 impl SketchServer {
     pub fn new(dispatch: Dispatch) -> SketchServer {
-        SketchServer { dispatch }
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let agent = NEXT.fetch_add(1, Ordering::Relaxed);
+        SketchServer {
+            session: Arc::new(Session {
+                agent,
+                dispatch: dispatch.clone(),
+            }),
+            dispatch,
+        }
     }
 }
 
@@ -85,12 +116,17 @@ impl ServerHandler for SketchServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let (reply, rx) = tokio::sync::oneshot::channel();
+        let client = context.peer.peer_info().map(|i| i.client_info.name.clone());
         let call = Call {
             name: request.name.to_string(),
             args: serde_json::Value::Object(request.arguments.unwrap_or_default()),
+            caller: Some(Caller {
+                agent: self.session.agent,
+                client,
+            }),
             reply,
         };
         let r = if !(self.dispatch)(call) {

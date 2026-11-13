@@ -1,6 +1,7 @@
 //! egui chrome: menu bar, layers panel, design (properties) panel, floating toolbar, and the
 //! projects home screen.
 
+pub mod agents;
 pub mod assets;
 pub mod effect_styles;
 pub mod fonts;
@@ -347,6 +348,8 @@ fn top_bar(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
             {
                 ed.run(Action::ZoomOut);
             }
+            ui.add_space(8.0);
+            agents::chips(ui, ed);
         });
     });
     // 1px separator under the toolbar.

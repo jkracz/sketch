@@ -696,3 +696,52 @@ fn dark_appearance_renders_dark_canvas_and_chrome() {
         "no dark canvas pixels in light"
     );
 }
+
+#[test]
+fn agent_working_marks_its_frame() {
+    let Some(g) = gpu() else { return };
+    let mut e = editor(800.0, 400.0);
+    let frame = |e: &mut Editor, x: f64, name: &str| {
+        let mut n = Node::new(
+            NodeId(0),
+            NodeKind::Frame { clip: true },
+            Rect::new(x, 120.0, 260.0, 180.0),
+        );
+        n.name = name.into();
+        e.add_node(n, None)
+    };
+    let busy = frame(&mut e, 100.0, "Hero");
+    let idle = frame(&mut e, 440.0, "Footer");
+    let page = e.active_page_id().to_string();
+    e.agents.touch(1, Some("claude-code"), &page, [busy], 0.0);
+    // Past the fade-in, at the top of the pulse.
+    e.tick(0.0);
+    e.tick(500.0);
+    let img = render_canvas(g, &e);
+    img.save(shot("agent_working.png")).unwrap();
+    let agent = sketch_rs::render::scene::AGENT;
+    // A 2 px outline just outside the busy frame, none around the idle one.
+    assert!(
+        close(px(&img, v2(99.0, 210.0)), agent, 40),
+        "{:?}",
+        px(&img, v2(99.0, 210.0))
+    );
+    assert!(!close(px(&img, v2(439.0, 210.0)), agent, 40));
+    // Falling dots in the label row, right of the name.
+    let strip = Rect::new(200.0, 100.0, 160.0, 18.0);
+    let dots = count(&img, strip, |p| close(p, agent, 60));
+    assert!(dots > 10, "{dots} dot pixels");
+    let none = count(&img, Rect::new(540.0, 100.0, 160.0, 18.0), |p| {
+        close(p, agent, 60)
+    });
+    assert_eq!(none, 0);
+    let _ = idle;
+
+    // The chrome names the agent in the top bar and marks its page.
+    let mut st = UiState::default();
+    let ui = frame::capture(g, &mut e, &mut st, [1280.0, 760.0], 2.0, |e| {
+        e.zoom_to_fit();
+        e.tick(500.0);
+    });
+    ui.save(shot("agent_working_ui.png")).unwrap();
+}

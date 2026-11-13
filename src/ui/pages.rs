@@ -99,9 +99,16 @@ fn page_row(ui: &mut Ui, ed: &mut Editor, st: &mut UiState, i: usize, top: f32) 
         Icon::Page,
         if active { theme::accent() } else { p.secondary },
     );
+    let busy = ed
+        .agents
+        .busy_pages(ed.now_ms)
+        .contains(ed.pages[i].id.as_str());
+    if busy {
+        super::agents::page_dot(ui, row, ed.now_ms);
+    }
     let name_rect = egui::Rect::from_min_max(
         egui::pos2(row.left() + 28.0, row.top()),
-        egui::pos2(row.right() - 4.0, row.bottom()),
+        egui::pos2(row.right() - if busy { 22.0 } else { 4.0 }, row.bottom()),
     );
     let renaming = st.pages.renaming.as_ref().is_some_and(|(r, _)| *r == i);
     if renaming {

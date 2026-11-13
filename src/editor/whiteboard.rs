@@ -477,6 +477,8 @@ impl Editor {
     pub fn tick(&mut self, now: f64) {
         self.now_ms = now;
         self.laser.retain(|(_, t)| now - t < LASER_DECAY_MS);
+        let page = &self.pages[self.active_page].id;
+        self.agents.tick(now, page, &self.doc);
     }
 
     // ---------------------------------------------------------------------- sketch style

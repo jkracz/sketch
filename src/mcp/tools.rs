@@ -71,7 +71,12 @@ open file's own tokens, styles and main components.
 transparent: true drops the white background.
 - Check your work with get_screenshot. Artboard height is a starting point: when content \
 clips set height: \"fit-content\" with update_styles.
-- Call finish_working_on_nodes when done.";
+- While you work, the user sees which frames you're on: every node you read or write marks \
+its top-level frame with an animated outline for 40 s, and the top bar shows your client's \
+name. The view only moves to show the first content on an empty page, so the user can keep \
+working elsewhere. Call \
+finish_working_on_nodes with the nodeIds of a frame you're done with, and without ids when \
+you're done with everything.";
 
 fn file_id() -> Value {
     json!({"type": "string", "description": "The project to operate on (id, name, Folder/Project location or path from list_resources). When omitted the project open in the app is used."})
@@ -892,8 +897,10 @@ fn core_definitions() -> Vec<Value> {
         ),
         tool(
             "finish_working_on_nodes",
-            "Call when done creating or editing. Saves the project.",
-            json!({"nodeIds": ids("Optional nodes you worked on.")}),
+            "Call when done creating or editing. Removes your working indicator from the \
+             listed nodes and everything inside them, or from every node when nodeIds is \
+             omitted, and saves the project.",
+            json!({"nodeIds": ids("Nodes you're done with. Omit when you're done with everything.")}),
             &[],
             false,
         ),
@@ -917,7 +924,9 @@ pub const GUIDE_INSTRUCTIONS: &str = "\
 5. Iterate with update_styles / set_text_content / duplicate_nodes instead of rewriting.
 6. Review with get_screenshot (scale 1; 2 for small text). Fix clipping with
    update_styles({height: \"fit-content\"}) on the artboard.
-7. finish_working_on_nodes at the end (also saves the project).
+7. finish_working_on_nodes at the end (also saves the project). While you work, each frame
+   you read or write shows an animated outline; pass nodeIds to clear one frame when you
+   move on, or no ids to clear them all.
 
 Layout model: every container is an auto-layout frame (flexbox). display:flex with
 flex-direction row/column, gap, padding, justify-content (start, center, end, space-between),

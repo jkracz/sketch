@@ -295,6 +295,10 @@ pub struct Editor {
     /// Text we last put on the system clipboard (to recognize our own copy).
     clipboard_written: Option<String>,
     clipboard_style: Option<(crate::model::Style, crate::model::TextStyle)>,
+    /// What MCP agents are working on (drawn on the canvas, listed in the top bar).
+    pub agents: crate::agents::Activity,
+    /// While an MCP call runs: (page id, node) of every node its edits touched.
+    pub write_log: Option<Vec<(String, NodeId)>>,
 }
 
 impl Default for Editor {
@@ -364,6 +368,8 @@ impl Editor {
             tokens: Default::default(),
             published: None,
             token_clipboard: Default::default(),
+            agents: Default::default(),
+            write_log: None,
         }
     }
 
@@ -392,6 +398,10 @@ impl Editor {
 
     pub fn commit(&mut self) {
         self.fixup();
+        if let (Some(log), Some((rec, _))) = (&mut self.write_log, &self.rec) {
+            let page = &self.pages[self.lent_page.unwrap_or(self.active_page)].id;
+            log.extend(rec.touched().iter().map(|id| (page.clone(), *id)));
+        }
         if let Some((rec, key)) = self.rec.take()
             && self.history.commit(&self.doc, rec, key)
         {
@@ -496,6 +506,9 @@ impl Editor {
             sticky_color: self.sticky_color,
             clipboard_io: self.clipboard_io.take(),
             clipboard_written: self.clipboard_written.take(),
+            // Activity is per project; an MCP call in progress keeps logging from here.
+            write_log: self.write_log.take().map(|_| Vec::new()),
+            now_ms: self.now_ms,
             ..Editor::new(doc)
         };
         self.file_path = path;
