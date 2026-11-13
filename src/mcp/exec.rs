@@ -313,7 +313,10 @@ pub fn call_as(
             }
         }
     }
-    // A deleted node no longer marks anything.
+    // A deleted node or page no longer marks anything, for any agent.
+    let mut agents = std::mem::take(&mut ed.agents);
+    agents.prune(|p, id| ed.page_doc_by_id(p).is_some_and(|d| d.get(id).is_some()));
+    ed.agents = agents;
     touched.retain(|(p, id)| ed.page_doc_by_id(p).is_some_and(|d| d.get(*id).is_some()));
     for (page, id) in touched {
         ed.agents

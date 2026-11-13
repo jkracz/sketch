@@ -118,6 +118,13 @@ impl Activity {
         }
     }
 
+    /// Drop every agent's touches for which `keep` returns false (deleted nodes).
+    pub fn prune(&mut self, mut keep: impl FnMut(&str, NodeId) -> bool) {
+        for a in self.agents.values_mut() {
+            a.touches.retain(|(p, n), _| keep(p, *n));
+        }
+    }
+
     /// Forget everything the agent is working on.
     pub fn finish(&mut self, agent: AgentId) {
         if let Some(a) = self.agents.get_mut(&agent) {
@@ -184,7 +191,9 @@ impl Activity {
     /// Expire old touches and update the fades for the visible page. Call once per frame.
     pub fn tick(&mut self, now: f64, page: &str, doc: &Document) {
         for a in self.agents.values_mut() {
-            a.touches.retain(|_, t| now - *t < EXPIRE_MS);
+            // Expired, or deleted from the visible page.
+            a.touches
+                .retain(|(p, n), t| now - *t < EXPIRE_MS && (p != page || doc.get(*n).is_some()));
         }
         if self.marks_page != page {
             self.marks.clear();

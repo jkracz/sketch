@@ -142,9 +142,23 @@ fn deleting_a_child_keeps_its_frame_and_a_frame_drops_out() {
     call_as(&mut h, &c, 3.0, "delete_nodes", json!({"nodeIds": [child]}));
     assert_eq!(busy(&h, 4.0), HashSet::from([num(&a)]));
     call_as(&mut h, &c, 5.0, "finish_working_on_nodes", json!({}));
+    // Another agent read B; deleting B clears that too.
+    let other = caller(2, "cursor");
+    call_as(&mut h, &other, 5.5, "get_node_info", json!({"nodeId": b}));
     call_as(&mut h, &c, 6.0, "delete_nodes", json!({"nodeIds": [b]}));
     assert!(busy(&h, 7.0).is_empty());
     assert_eq!(h.ed.agents.active(7.0).count(), 0);
+}
+
+#[test]
+fn a_frame_the_user_deletes_stops_counting() {
+    let mut h = host();
+    let c = caller(1, "claude-code");
+    let a = artboard(&mut h, &c, "A");
+    h.ed.select(vec![num(&a)]);
+    h.ed.delete_selection();
+    h.ed.tick(1.0);
+    assert_eq!(h.ed.agents.active(1.0).count(), 0);
 }
 
 #[test]
