@@ -297,7 +297,9 @@ pub fn call_as(
     let ed = host.editor();
     let mut touched = std::mem::replace(&mut ed.write_log, outer).unwrap_or_default();
     if finishing {
-        finish_working(ed, c.agent, args);
+        if r.is_ok() {
+            finish_working(ed, c.agent, args);
+        }
         return r;
     }
     let empty = Map::new();
@@ -311,6 +313,8 @@ pub fn call_as(
             }
         }
     }
+    // A deleted node no longer marks anything.
+    touched.retain(|(p, id)| ed.page_doc_by_id(p).is_some_and(|d| d.get(*id).is_some()));
     for (page, id) in touched {
         ed.agents
             .touch(c.agent, c.client.as_deref(), &page, [id], now);
@@ -321,13 +325,15 @@ pub fn call_as(
 /// Node id strings in a tool's arguments (`nodeId`, `nodeIds`, `targetNodeId`, ids inside
 /// `updates`, `moves`, `nodes`...).
 fn node_keys<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 8] = [
         "nodeId",
         "nodeIds",
         "targetNodeId",
         "id",
         "parentId",
         "before",
+        "startNodeId",
+        "endNodeId",
     ];
     match v {
         Value::Object(m) => {

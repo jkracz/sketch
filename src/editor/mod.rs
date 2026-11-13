@@ -506,8 +506,8 @@ impl Editor {
             sticky_color: self.sticky_color,
             clipboard_io: self.clipboard_io.take(),
             clipboard_written: self.clipboard_written.take(),
-            agents: std::mem::take(&mut self.agents),
-            write_log: self.write_log.take(),
+            // Activity is per project; an MCP call in progress keeps logging from here.
+            write_log: self.write_log.take().map(|_| Vec::new()),
             now_ms: self.now_ms,
             ..Editor::new(doc)
         };

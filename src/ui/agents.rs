@@ -89,6 +89,10 @@ pub fn show(ed: &mut Editor, agent: AgentId) {
         .agents
         .touches_of(agent, now)
         .into_iter()
+        .filter(|(p, n)| {
+            ed.page_doc_by_id(p)
+                .is_some_and(|d| crate::agents::top_level(d, *n).is_some())
+        })
         .map(|(p, n)| (p.to_string(), n))
         .collect();
     let here = ed.active_page_id().to_string();

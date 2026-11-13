@@ -125,6 +125,56 @@ fn finish_clears_the_listed_frames_then_everything() {
 }
 
 #[test]
+fn deleting_a_child_keeps_its_frame_and_a_frame_drops_out() {
+    let mut h = host();
+    let c = caller(1, "claude-code");
+    let a = artboard(&mut h, &c, "A");
+    let b = artboard(&mut h, &c, "B");
+    let made = call_as(
+        &mut h,
+        &c,
+        1.0,
+        "write_html",
+        json!({"targetNodeId": a, "mode": "insert-children", "html": "<p>Hi</p>"}),
+    );
+    call_as(&mut h, &c, 2.0, "finish_working_on_nodes", json!({}));
+    let child = made["createdNodeIds"][0].clone();
+    call_as(&mut h, &c, 3.0, "delete_nodes", json!({"nodeIds": [child]}));
+    assert_eq!(busy(&h, 4.0), HashSet::from([num(&a)]));
+    call_as(&mut h, &c, 5.0, "finish_working_on_nodes", json!({}));
+    call_as(&mut h, &c, 6.0, "delete_nodes", json!({"nodeIds": [b]}));
+    assert!(busy(&h, 7.0).is_empty());
+    assert_eq!(h.ed.agents.active(7.0).count(), 0);
+}
+
+#[test]
+fn opening_another_project_clears_activity() {
+    let mut h = host();
+    let c = caller(1, "claude-code");
+    artboard(&mut h, &c, "A");
+    assert_eq!(h.ed.agents.active(1.0).count(), 1);
+    h.session.create(&mut h.ed, "Other").unwrap();
+    assert_eq!(h.ed.agents.active(1.0).count(), 0);
+}
+
+#[test]
+fn arrow_endpoints_mark_their_frames() {
+    let mut h = host();
+    let c = caller(1, "claude-code");
+    let a = artboard(&mut h, &c, "A");
+    let b = artboard(&mut h, &c, "B");
+    call_as(&mut h, &c, 1.0, "finish_working_on_nodes", json!({}));
+    let arrow =
+        json!({"type": "arrow", "points": [[0, 0], [100, 0]], "startNodeId": a, "endNodeId": b});
+    call_as(&mut h, &c, 2.0, "create_shape", arrow);
+    let marked = busy(&h, 3.0);
+    assert!(
+        marked.contains(&num(&a)) && marked.contains(&num(&b)),
+        "{marked:?}"
+    );
+}
+
+#[test]
 fn session_end_removes_the_agent() {
     let mut h = host();
     let c = caller(7, "claude-code");

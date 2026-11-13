@@ -204,7 +204,8 @@ impl Activity {
         }
         for (id, m) in self.marks.iter_mut() {
             if !live.contains(id) && m.gone.is_none() {
-                m.gone = Some(now);
+                // Start the fade-out at the opacity on screen, even mid fade-in.
+                m.gone = Some(now - (1.0 - m.alpha(now)) * FADE_MS);
             }
         }
         self.marks
@@ -288,6 +289,13 @@ mod tests {
         assert!((m.alpha(1000.0 + FADE_MS / 2.0) - 0.5).abs() < 1e-9);
         a.tick(1000.0 + FADE_MS, "p", &d);
         assert!(!a.animating());
+        // Finished mid fade-in: the fade-out starts where the fade-in was.
+        a.touch(1, None, "p", [f], 2000.0);
+        a.tick(2000.0, "p", &d);
+        a.finish(1);
+        a.tick(2100.0, "p", &d);
+        let m = a.marks().next().unwrap().1;
+        assert!((m.alpha(2100.0) - 0.25).abs() < 1e-9);
     }
 
     #[test]
