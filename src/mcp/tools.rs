@@ -73,7 +73,8 @@ transparent: true drops the white background.
 clips set height: \"fit-content\" with update_styles.
 - While you work, the user sees which frames you're on: every node you read or write marks \
 its top-level frame with an animated outline for 40 s, and the top bar shows your client's \
-name. The view never moves for you, so the user can keep working elsewhere. Call \
+name. The view only moves to show the first content on an empty page, so the user can keep \
+working elsewhere. Call \
 finish_working_on_nodes with the nodeIds of a frame you're done with, and without ids when \
 you're done with everything.";
 
