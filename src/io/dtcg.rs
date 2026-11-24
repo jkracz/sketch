@@ -146,15 +146,21 @@ pub fn export(set: &TokenSet, tokens: &[&Token], mode: Option<&str>) -> Value {
         if dtcg_type(t.kind) != t.kind.key() {
             ext.insert("type".into(), json!(t.kind.key()));
         }
-        // Other tools get the resolved value; Sketch restores the alias if its target exists.
-        if let TokenValue::Alias(a) = set.value_in(t, mode)
-            && !paths.contains_key(a.as_str())
-            && others
-                .iter()
-                .all(|m| set.value_in(t, Some(m)) == set.value_in(t, mode))
-            && let Some(target) = set.get(a)
-        {
-            ext.insert("alias".into(), json!(set.slug(target)));
+        // Other tools get resolved values; Sketch restores aliases whose targets exist.
+        let names: Vec<&str> = match mode {
+            Some(m) => vec![m],
+            None => set.choices().iter().map(|m| m.name.as_str()).collect(),
+        };
+        let outside: Map<String, Value> = (names.into_iter())
+            .filter_map(|m| match set.value_in(t, Some(m)) {
+                TokenValue::Alias(a) if !paths.contains_key(a.as_str()) => {
+                    Some((m.to_string(), json!(set.slug(set.get(a)?))))
+                }
+                _ => None,
+            })
+            .collect();
+        if !outside.is_empty() {
+            ext.insert("aliases".into(), Value::Object(outside));
         }
         let name = name_of(t);
         if path.join("-") != name {
@@ -233,8 +239,9 @@ struct Entry {
     group_kind: Option<Result<TokenKind, String>>,
     value: Value,
     modes: Vec<(String, Value)>,
-    /// The CSS name of a token outside the file that Sketch's export resolved an alias to.
-    alias: Option<String>,
+    /// Per mode name, the CSS name of a token outside the file that Sketch's export resolved
+    /// an alias to.
+    aliases: Vec<(String, String)>,
     description: Option<String>,
 }
 
@@ -259,7 +266,7 @@ fn collect(group: &Map<String, Value>, path: &[String], ty: Option<&str>, out: &
         if path.is_empty() {
             continue;
         }
-        if !obj.contains_key("$value") {
+        if !obj.contains_key("$value") && !obj.contains_key("$ref") {
             collect(obj, &path, ty, out);
             continue;
         }
@@ -268,13 +275,15 @@ fn collect(group: &Map<String, Value>, path: &[String], ty: Option<&str>, out: &
             .and_then(|e| e.get(EXT))
             .and_then(Value::as_object);
         let ext_str = |k: &str| ext.and_then(|e| e.get(k)).and_then(Value::as_str);
-        let mut value = obj["$value"].clone();
+        let mut value = obj.get("$value").cloned().unwrap_or_default();
         if ext.and_then(|e| e.get("em")) == Some(&json!(true)) && value.get("unit").is_some() {
             value["unit"] = json!("em");
         }
         let own = obj.get("$type").and_then(Value::as_str);
         // Untyped aliases inherit from their target before their groups.
         let (kind, group_kind) = match (ext_str("type"), own, ty) {
+            // JSON Pointer references are issue #48.
+            _ if value.is_null() => (Err("`$ref` references aren't supported yet.".into()), None),
             (Some(k), _, _) => (
                 TokenKind::from_key(k).ok_or(format!("Unknown Sketch type \"{k}\".")),
                 None,
@@ -302,7 +311,15 @@ fn collect(group: &Map<String, Value>, path: &[String], ty: Option<&str>, out: &
             group_kind,
             value,
             modes,
-            alias: ext_str("alias").map(String::from),
+            aliases: (ext
+                .and_then(|e| e.get("aliases"))
+                .and_then(Value::as_object))
+            .map(|m| {
+                (m.iter())
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
             description: obj
                 .get("$description")
                 .and_then(Value::as_str)
@@ -543,13 +560,20 @@ fn import_into(
             k => k.clone(),
         };
     }
+    let target_slug = css_slug(set.mode_name(&target).unwrap_or_default());
     for e in &mut entries {
-        let target = (e.alias.as_deref()).and_then(|a| set.by_css_name(a));
-        if let (Some(t), Ok(kind)) = (target, &e.kind)
-            && t.kind == *kind
-        {
-            e.value = json!(format!("{{{}}}", set.slug(t)));
-            e.modes.clear();
+        let Ok(kind) = e.kind.clone() else { continue };
+        for (m, a) in std::mem::take(&mut e.aliases) {
+            let Some(t) = set.by_css_name(&a).filter(|t| t.kind == kind) else {
+                continue;
+            };
+            let v = json!(format!("{{{}}}", set.slug(t)));
+            if css_slug(&m) == target_slug {
+                e.value = v;
+            } else {
+                e.modes.retain(|(x, _)| css_slug(x) != css_slug(&m));
+                e.modes.push((m, v));
+            }
         }
     }
     // Match existing tokens before alias order sets when each is written. Export numbers
@@ -909,6 +933,61 @@ mod tests {
         import(&mut empty, &v, None).unwrap();
         let t = empty.by_css_name("color-action").unwrap();
         assert_eq!(empty.css_value(t), "#2f6bff");
+    }
+
+    #[test]
+    fn aliases_to_tokens_left_out_survive_per_mode() {
+        let mut s = TokenSet::default();
+        let dark = s.modes()[1].id.clone();
+        s.create(TokenKind::Color, "brand", "#2f6bff", None)
+            .unwrap();
+        s.create_in_modes(
+            TokenKind::Color,
+            "a",
+            "var(--brand)",
+            &[(dark.clone(), "#000000".into())],
+            None,
+        )
+        .unwrap();
+        s.create_in_modes(
+            TokenKind::Color,
+            "b",
+            "#ffffff",
+            &[(dark, "var(--brand)".into())],
+            None,
+        )
+        .unwrap();
+        let picked: Vec<&Token> = s
+            .sorted()
+            .into_iter()
+            .filter(|t| t.name != "brand")
+            .collect();
+        let doc = export(&s, &picked, None);
+        let mut back = TokenSet::default();
+        back.create(TokenKind::Color, "brand", "#2f6bff", None)
+            .unwrap();
+        let r = import(&mut back, &doc, None).unwrap();
+        assert!(r.skipped.is_empty(), "{r:?}");
+        let a = back.by_css_name("a").unwrap();
+        assert_eq!(back.css_value(a), "var(--brand)");
+        assert_eq!(back.css_value_in(a, Some("Dark")), "#000000");
+        let b = back.by_css_name("b").unwrap();
+        assert_eq!(back.css_value(b), "#ffffff");
+        assert_eq!(back.css_value_in(b, Some("Dark")), "var(--brand)");
+    }
+
+    #[test]
+    fn ref_tokens_are_reported_as_skipped() {
+        let doc = json!({"$type": "color",
+            "base": {"$value": "#ffffff"},
+            "g": {"nested": {"$ref": "#/base/$value"}, "$root": {"$ref": "#/base/$value"}},
+            "uses": {"$value": "{g.nested}"}});
+        let mut s = TokenSet::default();
+        let r = import(&mut s, &doc, None).unwrap();
+        let mut skipped: Vec<&str> = r.skipped.iter().map(|(p, _)| p.as_str()).collect();
+        skipped.sort();
+        assert_eq!(skipped, ["g.$root", "g.nested", "uses"], "{r:?}");
+        assert_eq!(r.created, ["--base"]);
     }
 
     #[test]
