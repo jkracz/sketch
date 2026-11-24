@@ -50,6 +50,11 @@ For changes to the app:
 
 - `cargo fmt --check` passes.
 - `cargo clippy --all-targets -- -D warnings` passes.
+  - In `src/mcp` a panic takes down the app, so clippy rejects `unwrap()`
+    there. When the function returns a `Result`, use `?`: `node()`,
+    `node_mut()` and `world_rect()` in `src/mcp/exec.rs` turn a missing node
+    into an error the agent sees. Use `expect("<why it holds>")` only when the
+    line above guarantees the value.
 - `cargo test` passes. The tests rewrite the screenshots in
   `docs/screenshots/`, and on a Mac most come out different from the
   committed ones. Unless the change is meant to update them, restore them with
