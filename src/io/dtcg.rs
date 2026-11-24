@@ -467,8 +467,23 @@ fn mode_id(set: &mut TokenSet, name: &str, report: &mut Report) -> Result<String
 /// same type and CSS name, which takes the file's values, so a file can be imported again
 /// after it changes. `$value` goes to the mode named `mode` (the first mode when None), and
 /// modes Sketch wrote in `$extensions` go to theirs. Missing modes are added. Problems are
-/// reported per token in [`Report::skipped`]; only a document with no tokens is an error.
+/// reported per token in [`Report::skipped`], and a skipped token is left as it was. Only a
+/// bad document is an error, and then nothing changes.
 pub fn import(set: &mut TokenSet, doc: &Value, mode: Option<&str>) -> Result<Report, String> {
+    let original = set.clone();
+    let r = import_into(set, &original, doc, mode);
+    if r.is_err() {
+        *set = original;
+    }
+    r
+}
+
+fn import_into(
+    set: &mut TokenSet,
+    original: &TokenSet,
+    doc: &Value,
+    mode: Option<&str>,
+) -> Result<Report, String> {
     let root = doc
         .as_object()
         .ok_or("A DTCG file is a JSON object of groups and tokens.")?;
@@ -478,22 +493,24 @@ pub fn import(set: &mut TokenSet, doc: &Value, mode: Option<&str>) -> Result<Rep
         return Err("No tokens found. DTCG tokens are objects with a `$value`.".into());
     }
     let mut report = Report::default();
-    let target = match mode {
-        Some(m) => mode_id(set, m, &mut report)?,
-        None => set.modes()[0].id.clone(),
-    };
-    // The modes a Sketch export covers. A token without its own value in one of them
-    // follows the first mode there.
-    let mut covered = Vec::new();
-    if mode.is_none()
-        && let Some(names) = (root.get("$extensions"))
+    // The modes a Sketch export covers. `$value` holds the first, and a token without its
+    // own value in another follows the first there.
+    let listed: Vec<&str> = match mode {
+        Some(_) => Vec::new(),
+        None => (root.get("$extensions"))
             .and_then(|e| e.get(EXT))
             .and_then(|e| e.get("modes"))
             .and_then(Value::as_array)
-    {
-        for name in names.iter().skip(1).filter_map(Value::as_str) {
-            covered.push(mode_id(set, name, &mut report)?);
-        }
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default(),
+    };
+    let target = match mode.or(listed.first().copied()) {
+        Some(m) => mode_id(set, m, &mut report)?,
+        None => set.modes()[0].id.clone(),
+    };
+    let mut covered = Vec::new();
+    for name in listed.iter().skip(1) {
+        covered.push(mode_id(set, name, &mut report)?);
     }
     let by_path: HashMap<String, usize> = (entries.iter().enumerate())
         .map(|(i, e)| (e.path.clone(), i))
@@ -519,9 +536,8 @@ pub fn import(set: &mut TokenSet, doc: &Value, mode: Option<&str>) -> Result<Rep
             k => k.clone(),
         };
     }
-    // `$value` first, targets before their aliases. Other modes follow once every token
-    // exists, since their aliases can point either way.
-    let mut ids: Vec<Option<(String, Option<Token>)>> = vec![None; entries.len()];
+    // Match or create every token, in `$value` alias order so targets exist first.
+    let mut ids: Vec<Option<String>> = vec![None; entries.len()];
     let mut done = vec![false; entries.len()];
     let mut used = HashSet::new();
     loop {
@@ -542,10 +558,10 @@ pub fn import(set: &mut TokenSet, doc: &Value, mode: Option<&str>) -> Result<Rep
                 entries: &entries,
                 by_path: &by_path,
             };
-            match import_value(set, &ctx, &entries[i], &target, &used) {
-                Ok(got) => {
-                    used.insert(got.0.clone());
-                    ids[i] = Some(got);
+            match place(set, &ctx, &entries[i], &used) {
+                Ok(id) => {
+                    used.insert(id.clone());
+                    ids[i] = Some(id);
                 }
                 Err(why) => report.skipped.push((entries[i].path.clone(), why)),
             }
@@ -558,38 +574,52 @@ pub fn import(set: &mut TokenSet, doc: &Value, mode: Option<&str>) -> Result<Rep
                 .push((e.path.clone(), "Circular alias.".into()));
         }
     }
+    // Then write every mode's value. An alias can loop for a moment while its target still
+    // holds an old value, so the writes go in unchecked and broken tokens are undone after.
     let ctx = Ctx {
         entries: &entries,
         by_path: &by_path,
     };
-    // A mode alias can fail while its target still follows the first mode back to it, so
-    // retry the failures until a round fixes none.
-    let mut pending: Vec<usize> = (0..entries.len())
-        .filter(|&i| matches!(&ids[i], Some((id, _)) if set.locked(id).is_none()))
-        .collect();
     let mut failed = Vec::new();
-    while !pending.is_empty() {
-        failed.clear();
-        for &i in &pending {
-            let id = &ids[i].as_ref().unwrap().0;
-            if let Err(why) =
-                import_modes(set, &ctx, &entries[i], id, &target, &covered, &mut report)
-            {
-                failed.push((i, why));
+    for (i, id) in ids.iter().enumerate() {
+        let Some(id) = id else { continue };
+        if let Err(why) = write_modes(set, &ctx, &entries[i], id, &target, &covered, &mut report) {
+            failed.push((i, why));
+        }
+    }
+    // Undoing a token can break the tokens that alias it, so repeat until none break.
+    let mut undone = HashSet::new();
+    loop {
+        for (i, _) in &failed {
+            let id = ids[*i].as_ref().unwrap();
+            if undone.insert(id.clone()) {
+                set.restore_token(id, original);
             }
         }
-        if failed.len() == pending.len() {
+        let modes: Vec<String> = set.choices().iter().map(|m| m.name.clone()).collect();
+        let broken: Vec<(usize, String)> = (ids.iter().enumerate())
+            .filter_map(|(i, id)| {
+                let id = id.as_ref().filter(|id| !undone.contains(*id))?;
+                let m = modes
+                    .iter()
+                    .find(|m| set.resolve_in(id, Some(m)).is_none())?;
+                Some((
+                    i,
+                    format!("{m}: Circular alias, or an alias to a skipped token."),
+                ))
+            })
+            .collect();
+        if broken.is_empty() {
             break;
         }
-        pending = failed.iter().map(|(i, _)| *i).collect();
+        failed.extend(broken);
     }
     for (i, why) in failed {
         report.skipped.push((entries[i].path.clone(), why));
     }
-    for got in &ids {
-        let Some((id, before)) = got else { continue };
+    for id in ids.iter().flatten().filter(|id| !undone.contains(*id)) {
         let t = set.get(id).unwrap();
-        match before {
+        match original.get(id) {
             None => report.created.push(set.css_name(t)),
             Some(b) if b != t => report.updated.push(set.css_name(t)),
             Some(_) => report.unchanged += 1,
@@ -604,60 +634,58 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// `v` as CSS input, with an alias naming its target's CSS variable.
-    fn css(&self, set: &TokenSet, kind: TokenKind, v: &Value) -> Result<String, String> {
+    /// `v` as a value of `kind`, with an alias naming its target's CSS variable.
+    fn parse(&self, set: &TokenSet, kind: TokenKind, v: &Value) -> Result<TokenValue, String> {
         let alias = |p: &str| match self.by_path.get(p) {
             Some(&i) => Some(css_slug(&self.entries[i].name)),
             None => set.by_css_name(&path_slug(p)).map(|t| set.slug(t)),
         };
-        value_css(kind, v, &alias)
+        set.parse_value(kind, &value_css(kind, v, &alias)?)
     }
 }
 
-/// Create or update the token for `e` with its `$value` in mode `target`. Returns its id and,
-/// for an existing token, how it was before. `used` holds tokens an earlier entry matched.
-fn import_value(
+/// The token `e` updates: an unused one of the same type and CSS name, or a new one with
+/// its `$value`. `used` holds tokens an earlier entry matched.
+fn place(
     set: &mut TokenSet,
     ctx: &Ctx,
     e: &Entry,
-    target: &str,
     used: &HashSet<String>,
-) -> Result<(String, Option<Token>), String> {
+) -> Result<String, String> {
     let kind = e.kind.clone()?;
-    let raw = ctx.css(set, kind, &e.value)?;
+    let value = ctx.parse(set, kind, &e.value)?;
     let slug = css_slug(&e.name);
     let existing = (set.sorted().into_iter())
         .filter(|t| !used.contains(&t.id))
         .find(|t| set.slug(t) == slug && (t.kind == kind || t.system.is_some()))
-        .cloned();
-    let Some(old) = existing else {
-        let id = set.create(kind, &e.name, &raw, e.description.as_deref())?;
-        return Ok((id, None));
-    };
-    if let Some(why) = set.locked(&old.id) {
-        let name = set.mode_name(target).map(String::from);
-        if set.parse_value(kind, &raw).ok().as_ref() == Some(set.value_in(&old, name.as_deref())) {
-            return Ok((old.id.clone(), Some(old)));
+        .map(|t| t.id.clone());
+    if let Some(id) = existing {
+        if set.locked(&id).is_none()
+            && let Some(d) = &e.description
+        {
+            set.update(&id, None, None, Some(d))?;
         }
+        return Ok(id);
+    }
+    // Not `create`, which returns a token that already has the same name and value.
+    let id = set.add_default(kind);
+    set.set_value(&id, value);
+    if let Err(why) = set.update(
+        &id,
+        Some(&e.name),
+        None,
+        Some(e.description.as_deref().unwrap_or_default()),
+    ) {
+        set.delete(std::slice::from_ref(&id));
         return Err(why);
     }
-    let before = set.clone();
-    let done = set
-        .update_in_mode(&old.id, target, Some(&raw))
-        .and_then(|()| match &e.description {
-            Some(d) => set.update(&old.id, None, None, Some(d)),
-            None => Ok(()),
-        });
-    if let Err(why) = done {
-        *set = before;
-        return Err(why);
-    }
-    Ok((old.id.clone(), Some(old)))
+    Ok(id)
 }
 
-/// Set the other modes' values of token `id` from `e`. A mode in `covered` that `e` gives no
-/// value for follows the first mode again.
-fn import_modes(
+/// Give token `id` the file's value in each mode, unchecked: `target` takes `$value`, a mode
+/// in Sketch's extension takes its own, and a mode in `covered` the file left out follows
+/// `$value`. A locked token must already have them.
+fn write_modes(
     set: &mut TokenSet,
     ctx: &Ctx,
     e: &Entry,
@@ -667,29 +695,33 @@ fn import_modes(
     report: &mut Report,
 ) -> Result<(), String> {
     let kind = e.kind.clone()?;
-    let mut given = vec![target.to_string()];
-    let before = set.clone();
-    let added = report.modes_added.len();
-    let done = (|| {
-        for (name, v) in &e.modes {
-            let raw = ctx.css(set, kind, v)?;
-            let m = mode_id(set, name, report)?;
-            set.update_in_mode(id, &m, Some(&raw))
-                .map_err(|why| format!("{name}: {why}"))?;
-            given.push(m);
-        }
-        for m in covered.iter().filter(|m| !given.contains(m)) {
-            if set.get(id).is_some_and(|t| t.modes.contains_key(m)) {
-                set.update_in_mode(id, m, None)?;
-            }
-        }
-        Ok(())
-    })();
-    if done.is_err() {
-        *set = before;
-        report.modes_added.truncate(added);
+    let base = ctx.parse(set, kind, &e.value)?;
+    let mut values = vec![(target.to_string(), base.clone())];
+    for (name, v) in &e.modes {
+        let v = ctx
+            .parse(set, kind, v)
+            .map_err(|why| format!("{name}: {why}"))?;
+        let m = mode_id(set, name, report)?;
+        values.retain(|(x, _)| *x != m);
+        values.push((m, v));
     }
-    done
+    for m in covered {
+        if !values.iter().any(|(x, _)| x == m) {
+            values.push((m.clone(), base.clone()));
+        }
+    }
+    if let Some(why) = set.locked(id) {
+        let t = set.get(id).unwrap();
+        let same = (values.iter()).all(|(m, v)| set.value_in(t, set.mode_name(m)) == v);
+        return if same { Ok(()) } else { Err(why) };
+    }
+    // Other modes keep a value only where it differs from the first, so the first goes first.
+    let first = set.modes()[0].id.clone();
+    values.sort_by_key(|(m, _)| *m != first);
+    for (m, v) in values {
+        set.set_value_in(id, &m, v);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -930,5 +962,125 @@ mod tests {
             s.css_value(s.by_css_name("c").unwrap()),
             "rgba(255, 0, 0, 0.502)"
         );
+    }
+
+    #[test]
+    fn the_first_listed_mode_takes_the_value_even_when_it_is_not_first_here() {
+        let doc = json!({
+            "$extensions": {EXT: {"modes": ["Slate", "Light"]}},
+            "bg": {"$type": "color", "$value": "#222222",
+                "$extensions": {EXT: {"modes": {"Light": "#ffffff"}}}},
+        });
+        let mut s = TokenSet::default();
+        let r = import(&mut s, &doc, None).unwrap();
+        assert_eq!(r.modes_added, ["Slate"]);
+        let t = s.by_css_name("bg").unwrap();
+        assert_eq!(s.css_value_in(t, Some("Light")), "#ffffff");
+        assert_eq!(s.css_value_in(t, Some("Slate")), "#222222");
+    }
+
+    #[test]
+    fn mode_aliases_that_loop_only_midway_import() {
+        let alias = |v: &str| json!(format!("{{{v}}}"));
+        let modes = |x: Value, y: Value| json!({EXT: {"modes": {"X": x, "Y": y}}});
+        let doc = json!({
+            "$type": "color",
+            "$extensions": {EXT: {"modes": ["Light", "X", "Y"]}},
+            "a": {"$value": "#aaaaaa", "$extensions": modes(alias("c"), json!("#aaaaaa"))},
+            "b": {"$value": "#bbbbbb", "$extensions": modes(json!("#bbbbbb"), alias("d"))},
+            "c": {"$value": alias("b"), "$extensions": modes(alias("d"), json!("#cccccc"))},
+            "d": {"$value": alias("a"), "$extensions": modes(json!("#dddddd"), alias("c"))},
+        });
+        let mut s = TokenSet::default();
+        let r = import(&mut s, &doc, None).unwrap();
+        assert!(r.skipped.is_empty(), "{r:?}");
+        let a = s.by_css_name("a").unwrap();
+        assert_eq!(s.css_value_in(a, Some("X")), "var(--c)");
+        for t in s.sorted() {
+            for m in ["Light", "X", "Y"] {
+                assert!(s.resolve_in(&t.id, Some(m)).is_some(), "{} in {m}", t.name);
+            }
+        }
+    }
+
+    #[test]
+    fn tokens_with_the_same_name_and_value_stay_apart() {
+        let mut s = TokenSet::default();
+        let dark = s.modes()[1].id.clone();
+        for v in ["#000000", "#111111"] {
+            s.create_in_modes(
+                TokenKind::Color,
+                "x",
+                "#ffffff",
+                &[(dark.clone(), v.into())],
+                None,
+            )
+            .unwrap();
+        }
+        let doc = export(&s, &s.sorted(), None);
+        let mut back = TokenSet::default();
+        let r = import(&mut back, &doc, None).unwrap();
+        assert_eq!(r.created.len(), 2, "{r:?}");
+        assert_eq!(back.len(), 2);
+    }
+
+    #[test]
+    fn a_bad_mode_value_leaves_the_token_as_it_was() {
+        let mut s = seeded();
+        let doc = json!({"color": {"surface": {"$type": "color", "$value": "#222222",
+            "$description": "New", "$extensions": {EXT: {"modes": {"Dark": "not a color"}}}}}});
+        let r = import(&mut s, &doc, None).unwrap();
+        assert!(r.updated.is_empty(), "{r:?}");
+        assert_eq!(r.skipped.len(), 1, "{r:?}");
+        let t = s.by_css_name("color-surface").unwrap();
+        assert_eq!(s.css_value(t), "#ffffff");
+        assert_eq!(t.description, None);
+
+        // A new token another aliases is undone, and the alias with it.
+        let doc = json!({"$type": "color",
+            "n": {"$value": "#123456", "$extensions": {EXT: {"modes": {"Dark": 5}}}},
+            "m": {"$value": "{n}"}});
+        let mut s = TokenSet::default();
+        let r = import(&mut s, &doc, None).unwrap();
+        assert_eq!(r.skipped.len(), 2, "{r:?}");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn a_bad_mode_list_changes_nothing() {
+        let doc = json!({"$extensions": {EXT: {"modes": ["Light", "Dim", "!"]}},
+            "c": {"$type": "color", "$value": "#ffffff"}});
+        let mut s = TokenSet::default();
+        assert!(import(&mut s, &doc, None).is_err());
+        assert_eq!(s.modes().len(), 2);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn a_locked_token_with_other_mode_values_is_skipped() {
+        let mut src = TokenSet::default();
+        src.create(TokenKind::Color, "surface", "#ffffff", None)
+            .unwrap();
+        let link = crate::model::SystemLink {
+            id: "ds".into(),
+            name: "DS".into(),
+            prefix: "ds".into(),
+            release: 1,
+            description: None,
+            notes: None,
+            modes: Vec::new(),
+        };
+        let mut s = TokenSet::default();
+        s.attach(link, &src.publishable(), &[], &[]).unwrap();
+        let name = s.css_name(s.sorted()[0]);
+        let slug = name.trim_start_matches("--").to_string();
+        let doc = json!({
+            "$extensions": {EXT: {"modes": ["Light", "Dark"]}},
+            slug.clone(): {"$type": "color", "$value": "#ffffff",
+                "$extensions": {EXT: {"name": slug, "modes": {"Dark": "#000000"}}}},
+        });
+        let r = import(&mut s, &doc, None).unwrap();
+        assert_eq!(r.unchanged, 0, "{r:?}");
+        assert_eq!(r.skipped.len(), 1, "{r:?}");
     }
 }
