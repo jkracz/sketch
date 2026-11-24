@@ -580,6 +580,8 @@ fn import_into(
     // same-named tokens `x`, `x 2`, `x 3`... in the order it found them, so match in that
     // order; sorted keys would put `x 10` before `x 2`.
     let suffix = |p: &str| {
+        // The first of them can be a group's `$root` when another token nests under it.
+        let p = p.strip_suffix(".$root").unwrap_or(p);
         let (head, n) = p.rsplit_once(' ').unwrap_or((p, ""));
         n.parse::<u32>()
             .map_or((p.to_string(), 1), |n| (head.to_string(), n))
@@ -1000,10 +1002,12 @@ mod tests {
             s.create(TokenKind::Color, "x", &format!("#0000{i}0"), None)
                 .unwrap();
         }
+        s.create(TokenKind::Color, "x-y", "#ffffff", None).unwrap();
         let before = s.clone();
         let doc = export(&s, &s.sorted(), None);
+        assert!(doc["x"]["$root"].is_object());
         let r = import(&mut s, &doc, None).unwrap();
-        assert_eq!(r.unchanged, 13, "{r:?}");
+        assert_eq!(r.unchanged, 14, "{r:?}");
         assert_eq!(s, before);
 
         let doc = json!({"$type": "color",
