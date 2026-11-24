@@ -635,7 +635,7 @@ fn import_into(
     let mut undone = HashSet::new();
     loop {
         for (i, _) in &failed {
-            let id = ids[*i].as_ref().unwrap();
+            let id = ids[*i].as_ref().expect("only placed tokens fail");
             if undone.insert(id.clone()) {
                 set.restore_token(id, original);
             }
@@ -692,7 +692,7 @@ fn import_into(
         report.skipped.push((entries[i].path.clone(), why));
     }
     for id in ids.iter().flatten().filter(|id| !undone.contains(*id)) {
-        let t = set.get(id).unwrap();
+        let t = set.get(id).expect("a token not undone stays in the set");
         match original.get(id) {
             None => report.created.push(set.css_name(t)),
             Some(b) if b != t => report.updated.push(set.css_name(t)),
@@ -806,7 +806,7 @@ fn write_modes(
         }
     }
     if let Some(why) = set.locked(id) {
-        let t = set.get(id).unwrap();
+        let t = set.get(id).expect("place returns an existing token");
         let same =
             t.kind == kind && (values.iter()).all(|(m, v)| set.value_in(t, set.mode_name(m)) == v);
         return if same { Ok(()) } else { Err(why) };
