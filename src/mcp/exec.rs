@@ -439,7 +439,6 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                     | "create_shape"
                     | "create_tokens"
                     | "set_tokens"
-                    | "import_tokens"
                     | "create_text_styles"
                     | "set_text_styles"
             ) || super::styles::TOOLS.contains(&name)
