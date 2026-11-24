@@ -1,0 +1,2 @@
+# `clippy::unwrap_used` is on for src/mcp; tests may still unwrap.
+allow-unwrap-in-tests = true

@@ -205,7 +205,7 @@ pub fn parse(src: &str) -> Vec<Html> {
     let flush = |text: &mut String, stack: &mut Vec<Element>| {
         if !text.is_empty() {
             let t = decode_entities(text);
-            stack.last_mut().unwrap().children.push(Html::Text(t));
+            top(stack).children.push(Html::Text(t));
             text.clear();
         }
     };
@@ -226,8 +226,8 @@ pub fn parse(src: &str) -> Vec<Html> {
                 && i > 0
             {
                 while stack.len() > i {
-                    let el = stack.pop().unwrap();
-                    stack.last_mut().unwrap().children.push(Html::Element(el));
+                    let el = stack.pop().expect("the loop checks stack.len()");
+                    top(&mut stack).children.push(Html::Element(el));
                 }
             }
         } else if r.starts_with('<') && r[1..].starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -244,7 +244,7 @@ pub fn parse(src: &str) -> Vec<Html> {
             if tag == "svg" && !self_closing {
                 p.skip_to_close("svg");
                 el.raw = Some(src[start..p.pos].to_string());
-                stack.last_mut().unwrap().children.push(Html::Element(el));
+                top(&mut stack).children.push(Html::Element(el));
             } else if matches!(tag.as_str(), "script" | "style" | "textarea" | "title")
                 && !self_closing
             {
@@ -253,10 +253,10 @@ pub fn parse(src: &str) -> Vec<Html> {
                 if tag == "textarea" {
                     el.children
                         .push(Html::Text(decode_entities(&src[body_start..end])));
-                    stack.last_mut().unwrap().children.push(Html::Element(el));
+                    top(&mut stack).children.push(Html::Element(el));
                 }
             } else if self_closing || VOID.contains(&tag.as_str()) {
-                stack.last_mut().unwrap().children.push(Html::Element(el));
+                top(&mut stack).children.push(Html::Element(el));
             } else {
                 stack.push(el);
             }
@@ -269,10 +269,20 @@ pub fn parse(src: &str) -> Vec<Html> {
     }
     flush(&mut text, &mut stack);
     while stack.len() > 1 {
-        let el = stack.pop().unwrap();
-        stack.last_mut().unwrap().children.push(Html::Element(el));
+        let el = stack.pop().expect("the loop checks stack.len()");
+        top(&mut stack).children.push(Html::Element(el));
     }
-    stack.pop().unwrap().children
+    stack
+        .pop()
+        .expect("the synthetic root is never popped")
+        .children
+}
+
+/// The innermost open element.
+fn top(stack: &mut [Element]) -> &mut Element {
+    stack
+        .last_mut()
+        .expect("the synthetic root is never popped")
 }
 
 /// Inline (phrasing) elements: their content flows into the surrounding text.

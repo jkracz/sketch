@@ -254,6 +254,25 @@ pub(super) fn resolve(
     Ok((page, id))
 }
 
+fn missing(id: NodeId) -> String {
+    format!("node {} does not exist", id.0)
+}
+
+/// Node `id` of `doc`, or an error for the agent if it is gone.
+pub(super) fn node(doc: &Document, id: NodeId) -> Result<&Node, String> {
+    doc.get(id).ok_or_else(|| missing(id))
+}
+
+/// Node `id` for writing in `tx`, or an error for the agent if it is gone.
+pub(super) fn node_mut<'a>(tx: &'a mut Tx, id: NodeId) -> Result<&'a mut Node, String> {
+    tx.node_mut(id).ok_or_else(|| missing(id))
+}
+
+/// World rect of node `id`, or an error for the agent if it is gone.
+pub(super) fn world_rect(doc: &Document, id: NodeId) -> Result<Rect, String> {
+    doc.world_rect(id).ok_or_else(|| missing(id))
+}
+
 /// Resolve several ids that must all live on one page.
 pub(super) fn resolve_all(
     ed: &Editor,
@@ -867,7 +886,7 @@ fn rename_pages(ed: &mut Editor, a: &Args) -> ToolResult {
 /// Node summary with parent-relative and world positions.
 fn node_brief(ed: &Editor, page: usize, id: NodeId) -> Value {
     let doc = ed.page_doc(page);
-    let n = doc.get(id).unwrap();
+    let n = doc.get(id).expect("caller passes an existing node");
     let w = doc.world_rect(id).unwrap_or(n.rect);
     json!({
         "id": node_key(ed, page, id),
@@ -903,7 +922,7 @@ fn basic_info(host: &mut dyn Host, a: &Args) -> ToolResult {
     let mut artboards = Vec::new();
     let mut others: HashMap<&str, usize> = HashMap::new();
     for id in &doc.root {
-        let n = doc.get(*id).unwrap();
+        let n = node(doc, *id)?;
         if n.is_frame() {
             artboards.push(node_brief(ed, page, *id));
         } else {
@@ -970,9 +989,20 @@ fn selection(ed: &mut Editor) -> ToolResult {
             let mut v = node_brief(ed, page, *id);
             if let Some(ab) = artboard_of(&ed.doc, *id) {
                 v["artboardId"] = json!(node_key(ed, page, ab));
-                v["artboardName"] = json!(ed.doc.get(ab).unwrap().name);
+                v["artboardName"] = json!(
+                    ed.doc
+                        .get(ab)
+                        .expect("artboard_of returns an existing node")
+                        .name
+                );
             }
-            if let Some(t) = ed.doc.get(*id).unwrap().kind.text() {
+            if let Some(t) = ed
+                .doc
+                .get(*id)
+                .expect("filtered to existing nodes")
+                .kind
+                .text()
+            {
                 v["text"] = json!(t);
             }
             v
@@ -984,7 +1014,7 @@ fn selection(ed: &mut Editor) -> ToolResult {
 fn node_info(ed: &mut Editor, a: &Args) -> ToolResult {
     let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
     let doc = ed.page_doc(page);
-    let n = doc.get(id).unwrap();
+    let n = node(doc, id)?;
     let mut v = node_brief(ed, page, id);
     v["pageId"] = json!(ed.pages[page].id);
     v["visible"] = json!(n.visible);
@@ -1050,7 +1080,7 @@ fn tree_summary(ed: &mut Editor, a: &Args) -> ToolResult {
     };
     fn walk(ed: &Editor, page: usize, id: NodeId, d: usize, max: usize, out: &mut String) {
         let doc = ed.page_doc(page);
-        let n = doc.get(id).unwrap();
+        let n = doc.get(id).expect("walk visits existing nodes");
         let size = if matches!(n.kind, NodeKind::Text { .. }) {
             format!("{}×{}", n.rect.w.round(), n.rect.h.round())
         } else {
@@ -1155,7 +1185,7 @@ fn computed_styles(ed: &mut Editor, a: &Args) -> ToolResult {
     for k in a.strs("nodeIds")? {
         let (page, id) = resolve(ed, &k, def)?;
         let doc = ed.page_doc(page);
-        let n = doc.get(id).unwrap();
+        let n = node(doc, id)?;
         let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
         show_token_vars(&ed.tokens, n, &mut st);
         if let Some(m) = ed.tokens.mode_at(doc, id) {
@@ -1168,7 +1198,7 @@ fn computed_styles(ed: &mut Editor, a: &Args) -> ToolResult {
 
 fn fill_image(ed: &mut Editor, a: &Args) -> ToolResult {
     let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
-    let n = ed.page_doc(page).get(id).unwrap();
+    let n = node(ed.page_doc(page), id)?;
     let asset = n
         .style
         .fills
@@ -1609,7 +1639,7 @@ fn create_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                 })();
                 match made {
                     Ok(id) => {
-                        let t = tokens.get(&id).unwrap();
+                        let t = tokens.get(&id).expect("token was just created");
                         json!({"name": tokens.css_name(t), "result": "created"})
                     }
                     Err(message) => json!({"result": "error", "message": message}),
@@ -1661,7 +1691,10 @@ fn set_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
                         *tokens = before;
                         return Err(why);
                     }
-                    Ok((tokens.css_name(tokens.get(&id).unwrap()), "updated"))
+                    Ok((
+                        tokens.css_name(tokens.get(&id).ok_or("token not found after update")?),
+                        "updated",
+                    ))
                 })();
                 match done {
                     Ok((name, result)) => json!({"name": name, "result": result}),
@@ -1699,7 +1732,7 @@ fn create_text_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 })();
                 match made {
                     Ok(id) => {
-                        let s = tokens.style(&id).unwrap();
+                        let s = tokens.style(&id).expect("style was just created");
                         json!({"class": tokens.style_class(s), "result": "created"})
                     }
                     Err(message) => json!({"result": "error", "message": message}),
@@ -1735,7 +1768,11 @@ fn set_text_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     }
                     let input = style_input(&e)?;
                     tokens.update_style(&id, e.str("newName"), &input, e.str("description"))?;
-                    Ok((tokens.style_class(tokens.style(&id).unwrap()), "updated"))
+                    Ok((
+                        tokens
+                            .style_class(tokens.style(&id).ok_or("style not found after update")?),
+                        "updated",
+                    ))
                 })();
                 match done {
                     Ok((class, result)) => json!({"class": class, "result": result}),
@@ -2526,7 +2563,7 @@ fn find_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
     for (page, ids) in scope {
         let doc = ed.page_doc(page);
         'node: for id in ids {
-            let n = doc.get(id).unwrap();
+            let n = node(doc, id)?;
             let mut matched = Vec::new();
             if let Some(q) = text_q {
                 match n.kind.text() {
@@ -2693,7 +2730,7 @@ fn jsx_node(
     assets: Option<&Path>,
     out: &mut String,
 ) {
-    let n = doc.get(id).unwrap();
+    let n = doc.get(id).expect("jsx_node walks existing nodes");
     let ind = "  ".repeat(depth);
     let mut st = css::computed(n, parent_layout(doc, n).as_ref(), n.parent.is_none());
     show_token_vars(tokens, n, &mut st);
@@ -2870,7 +2907,7 @@ fn export(host: &mut dyn Host, a: &Args) -> ToolResult {
             (def, doc.root.clone(), ed.pages[def].name.clone())
         } else {
             let (page, id) = resolve(ed, key, def)?;
-            let name = ed.page_doc(page).get(id).unwrap().name.clone();
+            let name = node(ed.page_doc(page), id)?.name.clone();
             (page, vec![id], name)
         };
         let doc = ed.page_doc(page);
@@ -2929,17 +2966,19 @@ fn export_pdf(host: &mut dyn Host, a: &Args) -> ToolResult {
     let doc = ed.page_doc(page);
     let mut ids: Vec<(Rect, NodeId)> = ids
         .into_iter()
-        .map(|id| (doc.world_rect(id).unwrap(), id))
-        .collect();
+        .map(|id| Ok((world_rect(doc, id)?, id)))
+        .collect::<Result<_, String>>()?;
     ids.sort_by(|(a, _), (b, _)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
     let items: Vec<Item> = ids
         .iter()
-        .map(|(_, id)| Item {
-            name: doc.get(*id).unwrap().name.clone(),
-            doc,
-            roots: vec![*id],
+        .map(|(_, id)| {
+            Ok(Item {
+                name: node(doc, *id)?.name.clone(),
+                doc,
+                roots: vec![*id],
+            })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let path = match a.str("path") {
         Some(p) => PathBuf::from(p),
         None => {
@@ -2973,14 +3012,14 @@ fn stretches(page_id: &str, n: &Node) -> bool {
         .is_some_and(|l| l.align_cross == crate::model::Align::Start)
         && !no_stretch()
             .lock()
-            .unwrap()
+            .expect("no_stretch lock poisoned")
             .contains(&(page_id.to_string(), n.id))
 }
 
 fn remember_stretch(page_id: &str, id: NodeId, styles: &Styles) {
     if let Some((_, v)) = styles.iter().rev().find(|(k, _)| k == "alignItems") {
         let key = (page_id.to_string(), id);
-        let mut s = no_stretch().lock().unwrap();
+        let mut s = no_stretch().lock().expect("no_stretch lock poisoned");
         if matches!(v.trim(), "stretch" | "normal") {
             s.remove(&key);
         } else {
@@ -3005,7 +3044,7 @@ pub(super) fn fit_text(tx: &mut Tx, id: NodeId, keep_height: bool) {
     };
     let h = if keep_height { n.rect.h } else { l.height };
     if (n.rect.w - w).abs() > 1e-9 || (n.rect.h - h).abs() > 1e-9 {
-        let n = tx.node_mut(id).unwrap();
+        let n = tx.node_mut(id).expect("read from tx above");
         n.rect.w = w;
         n.rect.h = h;
     }
@@ -3019,7 +3058,7 @@ pub(super) fn relayout(tx: &mut Tx, id: Option<NodeId>) {
     };
     let mut cur = Some(top);
     while let Some(c) = cur {
-        let n = tx.doc().get(c).unwrap();
+        let n = tx.doc().get(c).expect("parents of an existing node exist");
         if n.layout.is_some() {
             top = c;
         }
@@ -3383,7 +3422,7 @@ impl Builder<'_, '_> {
     /// Positioning that needs the final size (right/bottom).
     fn place(&mut self, id: NodeId, a: &css::Applied, parent: &Parent) {
         if let (Some(ps), true) = (parent.size, a.right.is_some() || a.bottom.is_some()) {
-            let n = self.tx.node_mut(id).unwrap();
+            let n = self.tx.node_mut(id).expect("placed node was just built");
             if let Some(r) = a.right {
                 n.rect.x = ps.0 - n.rect.w - r;
             }
@@ -3769,7 +3808,7 @@ impl Builder<'_, '_> {
             let s = (1000.0 / natural.0.max(natural.1)).min(1.0);
             (w, h) = (Some(natural.0 * s), Some(natural.1 * s));
         }
-        let w2 = w.unwrap_or_else(|| h.unwrap() * natural.0 / natural.1);
+        let w2 = w.unwrap_or_else(|| h.expect("w or h is set above") * natural.0 / natural.1);
         let h2 = h.unwrap_or_else(|| w2 * natural.1 / natural.0);
         let mut n = Node::new(NodeId(0), NodeKind::Rect, Rect::new(0.0, 0.0, w2, h2));
         n.id = self.tx.alloc_id();
@@ -3897,14 +3936,20 @@ impl Builder<'_, '_> {
             *i += 1;
         }
         let ctx = parent.ctx();
-        let n = self.tx.node_mut(id).unwrap();
+        let n = self
+            .tx
+            .node_mut(id)
+            .expect("clone_subtree returns the new root");
         if parent.layout.is_some() {
             n.layout_child.absolute = false;
         }
         let a = css::apply(n, own, &ctx);
         self.note(&a);
         if let Some(name) = Self::layer_name(el) {
-            self.tx.node_mut(id).unwrap().name = name;
+            self.tx
+                .node_mut(id)
+                .expect("clone_subtree returns the new root")
+                .name = name;
         }
         Some(id)
     }
@@ -3943,9 +3988,18 @@ impl Builder<'_, '_> {
             *i += 1;
         }
         // Discard the main's position so root placement can find free space.
-        let r = &mut self.tx.node_mut(id).unwrap().rect;
+        let r = &mut self
+            .tx
+            .node_mut(id)
+            .expect("instantiate returns the new instance")
+            .rect;
         (r.x, r.y) = (0.0, 0.0);
-        let before = self.tx.doc().get(id).unwrap().clone();
+        let before = self
+            .tx
+            .doc()
+            .get(id)
+            .expect("instantiate returns the new instance")
+            .clone();
         let mut n = before.clone();
         if parent.layout.is_some() {
             n.layout_child.absolute = false;
@@ -3957,7 +4011,10 @@ impl Builder<'_, '_> {
         if let Some(name) = Self::layer_name(el) {
             n.name = name;
         }
-        *self.tx.node_mut(id).unwrap() = n;
+        *self
+            .tx
+            .node_mut(id)
+            .expect("instantiate returns the new instance") = n;
         self.note(&a);
         self.place(id, &a, parent);
         self.instances.push(id);
@@ -3979,13 +4036,21 @@ fn clone_subtree(
     let ids = tx.doc().subtree(src);
     let nodes: Vec<Node> = ids
         .iter()
-        .map(|i| tx.doc().get(*i).unwrap().clone())
+        .map(|i| {
+            tx.doc()
+                .get(*i)
+                .expect("subtree lists existing nodes")
+                .clone()
+        })
         .collect();
     let mut map = HashMap::new();
     for n in &nodes {
         map.insert(n.id, tx.alloc_id());
     }
-    let world = tx.doc().world_rect(src).unwrap();
+    let world = tx
+        .doc()
+        .world_rect(src)
+        .expect("caller passes an existing node");
     let origin = tx.doc().parent_origin(parent);
     for n in &nodes {
         let mut c = n.clone();
@@ -4112,7 +4177,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
     }
     if let Some(t) = target
         && !replace
-        && !ed.page_doc(page).get(t).unwrap().is_container()
+        && !node(ed.page_doc(page), t)?.is_container()
     {
         return Err("insert-children needs a frame or group target; use mode \"replace\" or target its parent".into());
     }
@@ -4126,7 +4191,7 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             // Where the new content goes.
             let (parent_id, mut index, old) = match (replace, target) {
                 (true, Some(t)) => {
-                    let n = tx.doc().get(t).unwrap();
+                    let n = tx.doc().get(t).expect("target resolved above");
                     let p = n.parent;
                     let i = tx.doc().children(p).iter().position(|c| *c == t);
                     (p, i, Some(n.clone()))
@@ -4162,18 +4227,18 @@ fn write_html(ed: &mut Editor, a: &Args) -> ToolResult {
             // into free space.
             if parent_id.is_none() {
                 for (k, id) in made.iter().enumerate() {
-                    let n = b.tx.doc().get(*id).unwrap();
+                    let n = b.tx.doc().get(*id).expect("node was just built");
                     if let Some(o) = &old
                         && k == 0
                     {
                         let (x, y) = (o.rect.x, o.rect.y);
-                        let n = b.tx.node_mut(*id).unwrap();
+                        let n = b.tx.node_mut(*id).expect("node was just built");
                         n.rect.x = x;
                         n.rect.y = y;
                     } else if n.rect.x == 0.0 && n.rect.y == 0.0 {
                         let w = n.rect.w;
                         let p = free_spot(&doc_without(b.tx.doc(), *id), w);
-                        let n = b.tx.node_mut(*id).unwrap();
+                        let n = b.tx.node_mut(*id).expect("node was just built");
                         n.rect.x = p.x;
                         n.rect.y = p.y;
                     }
@@ -4225,7 +4290,7 @@ fn instance_json(ed: &Editor, page: usize, id: NodeId) -> Value {
         })
         .collect();
     let mut v = json!({"id": node_key(ed, page, id)});
-    let n = doc.get(id).unwrap();
+    let n = doc.get(id).expect("caller passes an existing node");
     if let Some(name) = instance_of(ed, Some(n)).or_else(|| components::main_name(ed, page, n)) {
         v["component"] = json!(name);
     }
@@ -4270,7 +4335,7 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
     let (mut page, mut parent) = (def, None);
     if let Some(p) = a.str("parentId").filter(|p| !p.is_empty() && *p != ROOT) {
         let (pg, id) = resolve(ed, p, def)?;
-        if !ed.page_doc(pg).get(id).unwrap().is_container() {
+        if !node(ed.page_doc(pg), id)?.is_container() {
             return Err("parentId must be a frame or group".into());
         }
         (page, parent) = (pg, Some(id));
@@ -4360,7 +4425,7 @@ fn create_shape(ed: &mut Editor, a: &Args) -> ToolResult {
                         _ => return Err("lines and arrows need `points` ([[x1,y1],[x2,y2]]) or both startNodeId and endNodeId".into()),
                     }
                 }
-                let b = Rect::union_all(&pts.iter().map(|p| Rect::new(p.x, p.y, 0.0, 0.0)).collect::<Vec<_>>()).unwrap();
+                let b = Rect::union_all(&pts.iter().map(|p| Rect::new(p.x, p.y, 0.0, 0.0)).collect::<Vec<_>>()).expect("pts has two or more points");
                 n.rect = Rect::new(b.x - o.x, b.y - o.y, b.w.max(1.0), b.h.max(1.0));
                 if ty == "arrow" || start_node.is_some() || end_node.is_some() {
                     let local: Vec<V2> = pts.iter().map(|p| *p - b.min()).collect();
@@ -4460,8 +4525,8 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 for id in &ids {
                     let parent =
                         Parent::of(tx.doc(), &page_id, tx.doc().get(*id).and_then(|n| n.parent));
-                    let old = tx.doc().get(*id).unwrap().rect;
-                    let mut n = tx.doc().get(*id).unwrap().clone();
+                    let old = tx.doc().get(*id).expect("ids resolved above").rect;
+                    let mut n = tx.doc().get(*id).expect("ids resolved above").clone();
                     let frame = matches!(n.kind, NodeKind::Frame { .. });
                     if let Some(m) = &mode
                         && frame
@@ -4473,7 +4538,7 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         {
                             l.overrides.push("mode".into());
                         }
-                        *tx.node_mut(*id).unwrap() = n.clone();
+                        *tx.node_mut(*id).expect("ids resolved above") = n.clone();
                     }
                     let mut styles = raw.clone();
                     tokens.expand_in(&mut styles, tokens.mode_at(tx.doc(), *id));
@@ -4512,14 +4577,14 @@ fn update_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                     let new = n.rect;
                     let keep_h =
                         get(&styles, "height").is_some_and(|v| css::length(v, 16.0).is_some());
-                    *tx.node_mut(*id).unwrap() = n;
+                    *tx.node_mut(*id).expect("ids resolved above") = n;
                     remember_stretch(&page_id, *id, &styles);
                     if (old.w - new.w).abs() > 1e-9 || (old.h - new.h).abs() > 1e-9 {
                         crate::layout::resize_children(tx, *id, old, new);
                     }
                     fit_text(tx, *id, keep_h);
                     // A font change can resize text; keep the measured size through syncs.
-                    let n = tx.node_mut(*id).unwrap();
+                    let n = tx.node_mut(*id).expect("ids resolved above");
                     if (n.rect.w, n.rect.h) != (old.w, old.h) {
                         mark_override(n, "size");
                     }
@@ -4595,7 +4660,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                 .to_string())
         },
         |tx, id, t| {
-            let node = tx.node_mut(id).unwrap();
+            let node = node_mut(tx, id)?;
             let old_len = node.kind.text().map(|s| s.chars().count()).ok_or_else(|| {
                 format!(
                     "{} is a {}, not a text layer",
@@ -4603,7 +4668,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
                     node.kind.type_name()
                 )
             })?;
-            *node.kind.text_mut().unwrap() = t.clone();
+            *node.kind.text_mut().expect("checked it is text above") = t.clone();
             mark_override(node, "text");
             let len = t.chars().count();
             for s in &mut node.text_style.spans {
@@ -4617,7 +4682,7 @@ fn set_text_content(ed: &mut Editor, a: &Args) -> ToolResult {
             let size = (node.rect.w, node.rect.h);
             fit_text(tx, id, false);
             // Keep the measured size when the main syncs.
-            let node = tx.node_mut(id).unwrap();
+            let node = node_mut(tx, id)?;
             if (node.rect.w, node.rect.h) != size {
                 mark_override(node, "size");
             }
@@ -4724,7 +4789,7 @@ fn rename_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
         "Rename",
         |u| Ok(u.req_str("name")?.chars().take(50).collect::<String>()),
         |tx, id, name| {
-            let n = tx.node_mut(id).unwrap();
+            let n = node_mut(tx, id)?;
             n.name = name.clone();
             mark_override(n, "name");
             Ok(())
@@ -4784,7 +4849,7 @@ fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
                 if pp != page {
                     return Err("to copy to another page, use move_to_page with copy: true".into());
                 }
-                if !ed.page_doc(pp).get(pid).unwrap().is_container() {
+                if !node(ed.page_doc(pp), pid)?.is_container() {
                     return Err("parentId must be a frame or group".into());
                 }
                 Some(Some(pid))
@@ -4796,7 +4861,7 @@ fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
     for (page, id, parent) in jobs {
         let (new, pairs) = ed.with_page(page, |ed| {
             ed.edit("Duplicate", |tx| {
-                let n = tx.doc().get(id).unwrap();
+                let n = tx.doc().get(id).expect("resolved above");
                 let same_parent = parent.is_none_or(|p| p == n.parent);
                 let target = parent.unwrap_or(n.parent);
                 let index = if same_parent {
@@ -4809,7 +4874,7 @@ fn duplicate_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
                     None
                 };
                 let offset = if target.is_none() && n.is_frame() {
-                    let w = tx.doc().world_rect(id).unwrap();
+                    let w = tx.doc().world_rect(id).expect("resolved above");
                     free_spot(tx.doc(), w.w) - w.min()
                 } else {
                     V2::ZERO
@@ -4869,7 +4934,7 @@ fn move_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
             ed.edit("Move", |tx| -> Result<(), String> {
                 let doc = tx.doc();
                 let (target, sibling) = if let Some(s) = before.or(after) {
-                    (doc.get(s).unwrap().parent, Some(s))
+                    (node(doc, s)?.parent, Some(s))
                 } else if let Some(p) = parent {
                     (p, None)
                 } else {
@@ -4882,7 +4947,7 @@ fn move_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
                     if t == id || doc.is_ancestor(id, t) {
                         return Err("can't move a node into itself or its descendants".into());
                     }
-                    if !doc.get(t).unwrap().is_container() {
+                    if !node(doc, t)?.is_container() {
                         return Err("the destination can't have children".into());
                     }
                 }
@@ -4896,7 +4961,10 @@ fn move_nodes(ed: &mut Editor, a: &Args) -> ToolResult {
                     .collect();
                 let i = match sibling {
                     Some(s) => {
-                        list.iter().position(|c| *c == s).unwrap() + usize::from(after.is_some())
+                        list.iter()
+                            .position(|c| *c == s)
+                            .ok_or("sibling not under its parent")?
+                            + usize::from(after.is_some())
                     }
                     None => index.unwrap_or(list.len()).min(list.len()),
                 };

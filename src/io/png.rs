@@ -57,8 +57,8 @@ fn unpremultiply_edges(img: &mut image::RgbaImage) {
     for p in img.pixels_mut() {
         let a = p.0[3];
         if a > 0 && a < 255 {
-            for c in 0..3 {
-                p.0[c] = ((p.0[c] as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
+            for c in &mut p.0[..3] {
+                *c = ((*c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
             }
         }
     }

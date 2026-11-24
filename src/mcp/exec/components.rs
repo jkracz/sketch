@@ -1,6 +1,6 @@
 //! Component tools preserve the user's page and selection.
 
-use super::{Args, INSTANCE_TAG, ToolResult, node_key, page_arg, resolve, resolve_all, text};
+use super::{Args, INSTANCE_TAG, ToolResult, node, node_key, page_arg, resolve, resolve_all, text};
 use crate::editor::Editor;
 use crate::editor::structure::Source;
 use crate::mcp::html::Html;
@@ -73,13 +73,18 @@ fn root_of(ed: &Editor, page: usize, id: NodeId) -> Option<NodeId> {
 
 pub(super) fn describe(ed: &Editor, page: usize, id: NodeId, v: &mut Value) {
     let doc = ed.page_doc(page);
-    let n = doc.get(id).unwrap();
+    let n = doc.get(id).expect("caller passes an existing node");
     if n.component {
         v["instanceCount"] = json!(instance_count(ed, page, id));
     }
     if is_root(ed, page, n) {
         if let Some((mp, m)) = linked_node(ed, page, n) {
-            v["instanceOf"] = json!(ed.page_doc(mp).get(m).unwrap().name);
+            v["instanceOf"] = json!(
+                ed.page_doc(mp)
+                    .get(m)
+                    .expect("linked_node checks the main exists")
+                    .name
+            );
             v["mainComponentId"] = json!(node_key(ed, mp, m));
         }
     } else if n.instance.is_some()
@@ -116,7 +121,10 @@ pub(super) fn list(ed: &Editor) -> Value {
         .iter()
         .take(MAX_LISTED)
         .map(|(p, id)| {
-            let n = ed.page_doc(*p).get(*id).unwrap();
+            let n = ed
+                .page_doc(*p)
+                .get(*id)
+                .expect("mains lists existing nodes");
             json!({
                 "id": node_key(ed, *p, *id), "name": n.name, "pageId": ed.pages[*p].id,
                 "width": super::r2(n.rect.w), "height": super::r2(n.rect.h),
@@ -276,7 +284,7 @@ fn holds_any(
     }
     let doc = ed.page_doc(m.0);
     doc.subtree(m.1).into_iter().any(|id| {
-        let n = doc.get(id).unwrap();
+        let n = doc.get(id).expect("subtree lists existing nodes");
         id != m.1
             && is_root(ed, m.0, n)
             && linked_node(ed, m.0, n).is_some_and(|inner| holds_any(ed, inner, set, depth + 1))
@@ -289,7 +297,7 @@ pub(super) fn create_component(ed: &mut Editor, a: &Args) -> ToolResult {
         return Err("nodeIds is empty: pass the layers to make into a component".into());
     }
     for id in &ids {
-        let n = ed.page_doc(page).get(*id).unwrap();
+        let n = node(ed.page_doc(page), *id)?;
         if n.instance.is_some() && !is_root(ed, page, n) {
             let root = root_of(ed, page, *id).map_or(String::new(), |r| node_key(ed, page, r));
             return Err(format!(
@@ -313,7 +321,7 @@ pub(super) fn create_component(ed: &mut Editor, a: &Args) -> ToolResult {
         (None, status) if !status.is_empty() => return Err(status),
         (None, _) => return Err("those layers can't make a component".into()),
     };
-    let n = ed.page_doc(page).get(id).unwrap();
+    let n = node(ed.page_doc(page), id)?;
     let mut v = json!({
         "componentId": node_key(ed, page, id),
         "name": n.name,
@@ -337,7 +345,7 @@ pub(super) fn detach_instances(ed: &mut Editor, a: &Args) -> ToolResult {
     for (page, ids) in groups {
         let mut roots = Vec::new();
         for id in ids {
-            let n = ed.page_doc(page).get(id).unwrap();
+            let n = node(ed.page_doc(page), id)?;
             if is_root(ed, page, n) {
                 roots.push(id);
                 continue;
