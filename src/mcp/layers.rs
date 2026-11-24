@@ -2,7 +2,7 @@
 //! command behind the inspector and shortcuts on the given nodes instead of the selection.
 
 use super::ToolResult;
-use super::exec::{Args, node_key, page_arg, resolve_all, text};
+use super::exec::{Args, node, node_key, page_arg, resolve_all, text};
 use super::tools::{page_id, tool};
 use crate::editor::Editor;
 use crate::geom::Rect;
@@ -118,7 +118,7 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
             ed.with_page(page, |ed| {
                 ed.edit(if locked { "Lock" } else { "Unlock" }, |tx| {
                     for id in &ids {
-                        tx.node_mut(*id).unwrap().locked = locked;
+                        tx.node_mut(*id).expect("ids resolved above").locked = locked;
                     }
                 });
                 // Like the lock shortcut: a locked layer can't stay selected.
@@ -130,8 +130,11 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
         }
         "group_nodes" => {
             let doc = ed.page_doc(page);
-            let parent = doc.get(ids[0]).unwrap().parent;
-            if ids.iter().any(|id| doc.get(*id).unwrap().parent != parent) {
+            let parent = node(doc, ids[0])?.parent;
+            if ids
+                .iter()
+                .any(|id| doc.get(*id).expect("ids resolved above").parent != parent)
+            {
                 return Err(
                     "the layers must have the same parent; move_nodes can gather them".into(),
                 );
@@ -144,13 +147,13 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
             };
             text(json!({
                 "groupId": node_key(ed, page, group),
-                "childIds": keys(ed, page, &doc.get(group).unwrap().children),
+                "childIds": keys(ed, page, &node(doc, group)?.children),
             }))
         }
         "ungroup_nodes" => {
             let doc = ed.page_doc(page);
             if let Some(id) = ids.iter().find(|id| {
-                let n = doc.get(**id).unwrap();
+                let n = doc.get(**id).expect("ids resolved above");
                 !n.is_container() || n.children.is_empty()
             }) {
                 return Err(format!(
@@ -188,7 +191,7 @@ pub fn call(ed: &mut Editor, name: &str, a: &Args) -> ToolResult {
                 return Err("pass horizontal, vertical or both".into());
             }
             if let [id] = ids[..]
-                && ed.page_doc(page).get(id).unwrap().parent.is_none()
+                && node(ed.page_doc(page), id)?.parent.is_none()
             {
                 return Err(
                     "one layer aligns within its parent frame, and this one is on the page; \

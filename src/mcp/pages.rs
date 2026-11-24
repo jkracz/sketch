@@ -4,7 +4,9 @@
 //! shows its neighbor as the Pages list does.
 
 use super::ToolResult;
-use super::exec::{Args, ROOT, find_page, node_key, page_arg, relayout, resolve, text};
+use super::exec::{
+    Args, ROOT, find_page, node, node_key, page_arg, relayout, resolve, text, world_rect,
+};
 use super::tools::tool;
 use crate::editor::Editor;
 use crate::geom::{Rect, V2};
@@ -156,7 +158,11 @@ fn arrange_pages(ed: &mut Editor, a: &Args) -> ToolResult {
     }
     let ids: Vec<String> = order.iter().map(|i| ed.pages[*i].id.clone()).collect();
     for (to, id) in ids.iter().enumerate() {
-        let from = ed.pages.iter().position(|p| &p.id == id).unwrap();
+        let from = ed
+            .pages
+            .iter()
+            .position(|p| &p.id == id)
+            .expect("ids come from ed.pages");
         ed.move_page(from, to);
     }
     text(json!({"pages": page_list(ed)}))
@@ -199,7 +205,7 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
             if pp != dst {
                 return Err("parentId must be on the destination page".into());
             }
-            if !ed.page_doc(dst).get(pid).unwrap().is_container() {
+            if !node(ed.page_doc(dst), pid)?.is_container() {
                 return Err("parentId must be a frame or group".into());
             }
             Some(pid)
@@ -218,9 +224,14 @@ fn move_to_page(ed: &mut Editor, a: &Args) -> ToolResult {
     let world: Vec<Rect> = match parent {
         // Same x/y inside the new parent as inside the old one.
         Some(p) => {
-            let origin = ed.page_doc(dst).world_rect(p).unwrap().min();
+            let origin = world_rect(ed.page_doc(dst), p)?.min();
             (roots.iter())
-                .map(|r| doc.get(*r).unwrap().rect.translate(origin))
+                .map(|r| {
+                    doc.get(*r)
+                        .expect("top_level keeps existing nodes")
+                        .rect
+                        .translate(origin)
+                })
                 .collect()
         }
         None => (roots.iter())
@@ -328,7 +339,8 @@ fn stale(doc: &Document, here: &str, src: &str, moved: &HashMap<NodeId, NodeId>)
 fn relink(tx: &mut Tx, here: &str, src: &str, dst: &str, moved: &HashMap<NodeId, NodeId>) -> usize {
     let ids = stale(tx.doc(), here, src, moved);
     for id in &ids {
-        let l = tx.node_mut(*id).unwrap().instance.as_mut().unwrap();
+        let l = (tx.node_mut(*id).and_then(|n| n.instance.as_mut()))
+            .expect("stale returns linked instances");
         l.main = moved[&l.main];
         l.page = (here != dst).then(|| dst.to_string());
     }

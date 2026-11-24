@@ -16,6 +16,9 @@
 //! * [`pages`] and [`projects`]: page, project, trash and unpublish tools, each module with
 //!   its own definitions and handlers.
 
+// A panic here takes down the app on a bad agent request. Return an error instead.
+#![warn(clippy::unwrap_used)]
+
 pub mod css;
 pub mod exec;
 pub mod html;

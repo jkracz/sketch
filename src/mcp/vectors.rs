@@ -4,7 +4,8 @@
 //! world coordinates because a path's box refits after each edit, shifting local coordinates.
 
 use super::exec::{
-    Args, ROOT, fit_text, head, mark_override, page_arg, r2, relayout, resolve, resolve_all, text,
+    Args, ROOT, fit_text, head, mark_override, node, page_arg, r2, relayout, resolve, resolve_all,
+    text,
 };
 use super::tools::{page_id, styles_schema, tool};
 use super::{ToolResult, css};
@@ -410,7 +411,7 @@ fn subpaths_from_d(d: &str) -> Result<Vec<SubPath>, String> {
 
 fn set_vector_points(ed: &mut Editor, a: &Args) -> ToolResult {
     let (page, id) = resolve(ed, a.req_str("nodeId")?, page_arg(ed, a)?)?;
-    let n = ed.page_doc(page).get(id).unwrap();
+    let n = node(ed.page_doc(page), id)?;
     if !matches!(n.kind, NodeKind::Path { .. }) {
         return Err(format!(
             "{} is a {}, not a vector path; call flatten_nodes on it first",
@@ -432,8 +433,8 @@ fn set_vector_points(ed: &mut Editor, a: &Args) -> ToolResult {
     let points: usize = world.iter().map(|s| s.points.len()).sum();
     ed.with_page(page, |ed| {
         ed.edit("Edit points", |tx| {
-            let o = tx.doc().world_rect(id).unwrap().min();
-            let node = tx.node_mut(id).unwrap();
+            let o = tx.doc().world_rect(id).expect("resolved above").min();
+            let node = tx.node_mut(id).expect("resolved above");
             if let NodeKind::Path {
                 subpaths,
                 fill_rule,
@@ -655,7 +656,7 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
     for (i, u) in a.arr("updates")?.iter().enumerate() {
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, id) = resolve(ed, u.req_str("nodeId")?, def)?;
-        let n = ed.page_doc(page).get(id).unwrap();
+        let n = node(ed.page_doc(page), id)?;
         let Some(t) = n.kind.text() else {
             return Err(format!(
                 "updates[{i}]: {} is a {}, not a text or sticky layer",
@@ -693,7 +694,7 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
         ed.with_page(page, |ed| {
             ed.edit("Style text", |tx| {
                 for (id, e) in &list {
-                    let node = tx.node_mut(*id).unwrap();
+                    let node = tx.node_mut(*id).expect("resolved above");
                     for &(s, t) in &e.ranges {
                         if e.reset {
                             clear_range(&mut node.text_style, s, t);
@@ -717,7 +718,7 @@ fn set_text_range_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 continue;
             }
             seen.push(*id);
-            let n = ed.page_doc(page).get(*id).unwrap();
+            let n = node(ed.page_doc(page), *id)?;
             results.push(json!({
                 "id": super::exec::node_key(ed, page, *id),
                 "textRanges": text_ranges(n.kind.text().map_or("", String::as_str), &n.text_style),
@@ -821,7 +822,7 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
     };
     let NodeKind::Connector {
         points, start, end, ..
-    } = &tx.doc().get(id).unwrap().kind
+    } = &tx.doc().get(id).expect("world_rect found it above").kind
     else {
         return;
     };
@@ -854,7 +855,7 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
             ..s
         }),
     };
-    let node = tx.node_mut(id).unwrap();
+    let node = tx.node_mut(id).expect("world_rect found it above");
     if let NodeKind::Connector {
         start,
         end,
@@ -870,7 +871,7 @@ fn apply_arrow(tx: &mut Tx, id: NodeId, e: &ArrowEdit) {
             *route = r;
             // Match the inspector's two-endpoint route unless explicit points define a polyline.
             if r == Route::Straight && e.points.is_none() && pts.len() > 2 {
-                pts = vec![pts[0], *pts.last().unwrap()];
+                pts = vec![pts[0], pts[pts.len() - 1]];
             }
         }
         if let Some(h) = e.start_head {
@@ -890,7 +891,7 @@ fn update_arrows(ed: &mut Editor, a: &Args) -> ToolResult {
     for (i, u) in a.arr("updates")?.iter().enumerate() {
         let u = Args(u.as_object().ok_or("each update must be an object")?);
         let (page, id) = resolve(ed, u.req_str("nodeId")?, def)?;
-        let n = ed.page_doc(page).get(id).unwrap();
+        let n = node(ed.page_doc(page), id)?;
         if !matches!(n.kind, NodeKind::Connector { .. }) {
             return Err(format!(
                 "updates[{i}]: {} is a {}, not an arrow; create arrows with create_shape type \"arrow\"",
@@ -919,7 +920,7 @@ fn update_arrows(ed: &mut Editor, a: &Args) -> ToolResult {
                 continue;
             }
             seen.push(*id);
-            let n = ed.page_doc(page).get(*id).unwrap();
+            let n = node(ed.page_doc(page), *id)?;
             let mut v = json!({"id": super::exec::node_key(ed, page, *id)});
             node_details(ed, page, n, &mut v);
             results.push(v);
@@ -965,7 +966,7 @@ fn create_stroke(ed: &mut Editor, a: &Args) -> ToolResult {
     let (mut page, mut parent) = (def, None);
     if let Some(p) = a.str("parentId").filter(|p| !p.is_empty() && *p != ROOT) {
         let (pg, id) = resolve(ed, p, def)?;
-        if !ed.page_doc(pg).get(id).unwrap().is_container() {
+        if !node(ed.page_doc(pg), id)?.is_container() {
             return Err("parentId must be a frame or group".into());
         }
         (page, parent) = (pg, Some(id));

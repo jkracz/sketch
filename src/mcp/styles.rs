@@ -248,7 +248,7 @@ fn create_effect_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                 })();
                 match made {
                     Ok(id) => {
-                        let s = tokens.effect_style(&id).unwrap();
+                        let s = tokens.effect_style(&id).expect("style was just created");
                         json!({"var": tokens.effect_style_var(s), "result": "created"})
                     }
                     Err(message) => json!({"result": "error", "message": message}),
@@ -292,7 +292,9 @@ fn set_effect_styles(ed: &mut Editor, a: &Args) -> ToolResult {
                         effects,
                         e.str("description"),
                     )?;
-                    let s = tokens.effect_style(&id).unwrap();
+                    let s = tokens
+                        .effect_style(&id)
+                        .ok_or("style not found after update")?;
                     Ok((tokens.effect_style_var(s), "updated"))
                 })();
                 match done {

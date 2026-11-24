@@ -49,6 +49,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros",
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio-util = "0.7"
 
+[lints.clippy]
+# Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
+undocumented_unsafe_blocks = "warn"
+
 [profile.release]
 debug = false
 

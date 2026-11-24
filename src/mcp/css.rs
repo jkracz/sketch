@@ -1144,7 +1144,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                         let i = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
                             .iter()
                             .position(|x| x == k)
-                            .unwrap();
+                            .expect("k is one of the listed keys");
                         layout_mut(n).padding[i] = p;
                         true
                     }
@@ -1420,7 +1420,7 @@ pub fn apply(n: &mut Node, styles: &[(String, String)], ctx: &Context) -> Applie
                     ]
                     .iter()
                     .position(|x| x == k)
-                    .unwrap();
+                    .expect("k is one of the listed keys");
                     let mut rr = n.style.corner_radii();
                     rr[i] = r;
                     n.style.radii = Some(rr);
