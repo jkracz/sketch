@@ -568,11 +568,13 @@ fn import_into(
                 continue;
             };
             let v = json!(format!("{{{}}}", set.slug(t)));
+            // The file's own value for that mode stays after the alias. It no longer applies,
+            // but a bad one still skips the token.
             if css_slug(&m) == target_slug {
-                e.value = v;
+                let own = std::mem::replace(&mut e.value, v);
+                e.modes.push((m, own));
             } else {
-                e.modes.retain(|(x, _)| css_slug(x) != css_slug(&m));
-                e.modes.push((m, v));
+                e.modes.insert(0, (m, v));
             }
         }
     }
@@ -747,6 +749,14 @@ impl Ctx<'_> {
                 return Err(format!("{{{p}}} isn't a {} token.", kind.label()));
             }
             return Ok(TokenValue::Alias(t.id.clone()));
+        }
+        if let Some(p) = alias_path(v) {
+            let group = format!("{p}.");
+            if self.by_path.keys().any(|k| k.starts_with(&group)) {
+                return Err(format!(
+                    "{{{p}}} is a group. Use {{{p}.$root}} for its own token."
+                ));
+            }
         }
         let alias = |p: &str| set.by_css_name(&path_slug(p)).map(|t| set.slug(t));
         set.parse_value(kind, &value_css(kind, v, &alias)?)
@@ -976,6 +986,31 @@ mod tests {
         let b = back.by_css_name("b").unwrap();
         assert_eq!(back.css_value(b), "#ffffff");
         assert_eq!(back.css_value_in(b, Some("Dark")), "var(--brand)");
+    }
+
+    #[test]
+    fn restoring_an_alias_still_checks_the_files_values() {
+        let mut s = TokenSet::default();
+        s.create(TokenKind::Color, "brand", "#2f6bff", None)
+            .unwrap();
+        s.create(TokenKind::Color, "action", "#000000", None)
+            .unwrap();
+        let before = s.clone();
+        let doc = json!({"action": {"$type": "color", "$value": "not a color",
+            "$extensions": {EXT: {"aliases": {"Light": "brand"}}}}});
+        let r = import(&mut s, &doc, None).unwrap();
+        assert_eq!(r.skipped.len(), 1, "{r:?}");
+        assert_eq!(s, before);
+
+        // An alias to a group in the file needs `.$root`, even if a token has its CSS name.
+        let doc = json!({"$type": "color",
+            "color": {"accent": {"500": {"$value": "#ff0000"}}},
+            "link": {"$value": "{color.accent}"}});
+        s.create(TokenKind::Color, "color-accent", "#00ff00", None)
+            .unwrap();
+        let r = import(&mut s, &doc, None).unwrap();
+        let skipped: Vec<&str> = r.skipped.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(skipped, ["link"], "{r:?}");
     }
 
     #[test]
