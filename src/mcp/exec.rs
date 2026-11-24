@@ -1646,7 +1646,9 @@ fn import_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
     let r = ed.edit_tokens("Import tokens", None, |t| {
         crate::io::dtcg::import(t, &doc, mode)
     })?;
-    let skipped: Vec<Value> = (r.skipped.iter())
+    let skipped: Vec<Value> = r
+        .skipped
+        .iter()
         .map(|(path, why)| json!({"token": path, "reason": why}))
         .collect();
     text(json!({

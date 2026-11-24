@@ -557,7 +557,11 @@ impl App {
     }
 
     fn export_tokens(&mut self) {
-        let name = (self.session.project.as_ref()).map_or("tokens", |p| p.manifest.name.as_str());
+        let name = self
+            .session
+            .project
+            .as_ref()
+            .map_or("tokens", |p| p.manifest.name.as_str());
         let Some(p) = rfd::FileDialog::new()
             .add_filter("Design tokens", &["json"])
             .set_file_name(format!("{name}.tokens.json"))
@@ -585,14 +589,17 @@ impl App {
             .map_err(|e| e.to_string())
             .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()));
         let r = doc.and_then(|doc| {
-            (self.ed).edit_tokens("Import tokens", None, |t| {
+            self.ed.edit_tokens("Import tokens", None, |t| {
                 crate::io::dtcg::import(t, &doc, None)
             })
         });
         match r {
             Ok(r) if r.skipped.is_empty() => self.ed.status = r.summary(),
             Ok(r) => {
-                let list: Vec<String> = (r.skipped.iter().take(12))
+                let list: Vec<String> = r
+                    .skipped
+                    .iter()
+                    .take(12)
                     .map(|(path, why)| format!("{path}: {why}"))
                     .collect();
                 let more = r.skipped.len().saturating_sub(list.len());

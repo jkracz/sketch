@@ -127,14 +127,14 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                     !ed.tokens.is_empty(),
                     egui::Button::new("Export DTCG file…"),
                 )
-                .on_hover_text("Save the tokens as a W3C Design Tokens .tokens.json file")
+                .on_hover_text("Save a W3C Design Tokens .tokens.json file")
                 .clicked()
             {
                 ed.requests.push(AppRequest::ExportTokens);
             }
             if ui
                 .button("Import DTCG file…")
-                .on_hover_text("Add or update tokens from a W3C Design Tokens .tokens.json file")
+                .on_hover_text("Add or update tokens from a .tokens.json file")
                 .clicked()
             {
                 ed.requests.push(AppRequest::ImportTokens);

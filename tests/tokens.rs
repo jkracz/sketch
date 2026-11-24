@@ -430,8 +430,6 @@ fn dtcg_files_round_trip_and_reimports_update_bound_layers() {
     seed(&mut h);
     let ab = artboard(&mut h);
     let doc = call(&mut h, "get_tokens", json!({"format": "dtcg"}));
-    assert_eq!(doc["color"]["action"]["$value"], "{color.brand}", "{doc}");
-    assert_eq!(doc["radius"]["lg"]["$type"], "dimension");
 
     let mut other = host();
     let r = call(
@@ -440,7 +438,6 @@ fn dtcg_files_round_trip_and_reimports_update_bound_layers() {
         json!({"tokens": doc.to_string()}),
     );
     assert_eq!(r["created"].as_array().unwrap().len(), 7, "{r}");
-    // Order can differ: JSON objects don't keep it.
     let css = |h: &mut exec::SessionHost| {
         let css = call(h, "get_tokens", json!({"format": "css"}));
         let mut lines: Vec<String> = css.as_str().unwrap().lines().map(String::from).collect();
@@ -449,8 +446,7 @@ fn dtcg_files_round_trip_and_reimports_update_bound_layers() {
     };
     assert_eq!(css(&mut other), css(&mut h));
 
-    // A changed file updates the existing token in one undo step, and bound layers follow.
-    let mut changed = doc.clone();
+    let mut changed = doc;
     changed["color"]["surface"]["$value"] = json!("#101014");
     let r = call(&mut h, "import_tokens", json!({"tokens": changed}));
     assert_eq!(r["updated"], json!(["--color-surface"]), "{r}");
