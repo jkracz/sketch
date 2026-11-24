@@ -552,20 +552,32 @@ fn import_into(
             e.modes.clear();
         }
     }
-    // Match existing tokens in file order, before alias order sets when each is written. An
-    // unedited Sketch export lists same-named tokens in the order it found them.
+    // Match existing tokens before alias order sets when each is written. Export numbers
+    // same-named tokens `x`, `x 2`, `x 3`... in the order it found them, so match in that
+    // order; sorted keys would put `x 10` before `x 2`.
+    let suffix = |p: &str| {
+        let (head, n) = p.rsplit_once(' ').unwrap_or((p, ""));
+        n.parse::<u32>()
+            .map_or((p.to_string(), 1), |n| (head.to_string(), n))
+    };
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| suffix(&entries[i].path));
+    let existing = set.sorted();
     let mut used = HashSet::new();
-    let matched: Vec<Option<String>> = (entries.iter())
-        .map(|e| {
-            let kind = e.kind.clone().ok()?;
-            let slug = css_slug(&e.name);
-            let t = (set.sorted().into_iter())
-                .filter(|t| !used.contains(&t.id))
-                .find(|t| set.slug(t) == slug && (t.kind == kind || t.system.is_some()))?;
+    let mut matched: Vec<Option<String>> = vec![None; entries.len()];
+    for i in order {
+        let Ok(kind) = entries[i].kind.clone() else {
+            continue;
+        };
+        let slug = css_slug(&entries[i].name);
+        let t = (existing.iter())
+            .filter(|t| !used.contains(&t.id))
+            .find(|t| set.slug(t) == slug && (t.kind == kind || t.system.is_some()));
+        if let Some(t) = t {
             used.insert(t.id.clone());
-            Some(t.id.clone())
-        })
-        .collect();
+            matched[i] = Some(t.id.clone());
+        }
+    }
     // Place alias targets first so aliases can use their token IDs.
     let mut ids: Vec<Option<String>> = vec![None; entries.len()];
     let mut bases: Vec<Option<TokenValue>> = vec![None; entries.len()];
@@ -905,10 +917,14 @@ mod tests {
         s.create(TokenKind::Color, "z", "#00ff00", None).unwrap();
         s.create(TokenKind::Color, "x", "var(--z)", None).unwrap();
         s.create(TokenKind::Color, "x", "#0000ff", None).unwrap();
+        for i in 0..10 {
+            s.create(TokenKind::Color, "x", &format!("#0000{i}0"), None)
+                .unwrap();
+        }
         let before = s.clone();
         let doc = export(&s, &s.sorted(), None);
         let r = import(&mut s, &doc, None).unwrap();
-        assert_eq!(r.unchanged, 3, "{r:?}");
+        assert_eq!(r.unchanged, 13, "{r:?}");
         assert_eq!(s, before);
 
         let doc = json!({"$type": "color",
