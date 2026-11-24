@@ -257,10 +257,11 @@ other sizes are `dimension`, and line height and opacity are `number`. Sketch ke
 type, other modes' values and the exact name under `$extensions["sketch-rs"]`, so a file
 exported here imports back unchanged. On import, group paths join with `-`
 (`color.brand.500` becomes `--color-brand-500`). A token with the same type and CSS name as an
-existing one updates it, so importing a changed file again syncs it. A `dimension` or `number`
-takes its type from its name (radius, font size, line height, opacity...) and is spacing
-otherwise. Shadow, typography and other composite tokens are skipped, and the import lists
-what it skipped.
+existing one updates it, so importing a changed file again syncs it. A `dimension` takes its
+type from its name (radius, font size, letter spacing...) and is spacing otherwise. A `number`
+needs a name that says line height, opacity or font weight. Shadow, typography and other
+composite tokens are skipped, as is any token with a bad value in one of its modes, and the
+import lists what it skipped. A skipped token stays as it was.
 
 In the Design panel, the diamond next to a property opens the token picker. It appears once
 the project has a token of the right type, and lights up when a token owns the property.

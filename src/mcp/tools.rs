@@ -805,10 +805,12 @@ fn core_definitions() -> Vec<Value> {
              aliases become aliases. A token with the same type and CSS name as an existing \
              one updates it, so importing a changed file again syncs it. Types: color, \
              dimension, fontFamily, fontWeight and number, plus Sketch's and Tokens Studio's \
-             type names; a dimension or number takes its Sketch type from the name (radius, \
-             fontSize, lineHeight, opacity...) and is spacing otherwise. Composite types \
-             (shadow, typography, border...) and duration are skipped. One undo step; results \
-             list created, updated and skipped tokens with reasons.",
+             type names; a dimension takes its Sketch type from the name (radius, fontSize, \
+             letterSpacing...) and is spacing otherwise, and a number needs a name saying \
+             lineHeight, opacity or fontWeight. Composite types (shadow, typography, \
+             border...) and duration are skipped, as is a token with a bad value in any mode; \
+             a skipped token stays as it was. One undo step; results list created, updated \
+             and skipped tokens with reasons.",
             json!({
                 "tokens": {"description": "The DTCG document, as a JSON object or a string of JSON."},
                 "mode": {"type": "string", "description": "The mode `$value` goes to, such as \"Dark\" for a dark theme file. Added when missing. Defaults to the first mode. Import the first mode's file before other modes'."},
