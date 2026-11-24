@@ -254,7 +254,8 @@ The **⋯** menu also exports and imports [W3C Design Tokens](https://www.design
 (DTCG) `.tokens.json` files, the format Tokens Studio and Style Dictionary use. Names split
 on `/`, `.` and `-` into groups, and aliases become `{group.token}` references. Spacing, radius and
 other sizes are `dimension`, and line height and opacity are `number`. Sketch keeps their own
-type, other modes' values and the exact name under `$extensions["sketch-rs"]`, so a file
+type, other modes' values, the exact name and aliases to tokens left out of the file under
+`$extensions["sketch-rs"]`, so a file
 exported here imports back unchanged. On import, group paths join with `-`
 (`color.brand.500` becomes `--color-brand-500`). A token with the same type and CSS name as an
 existing one updates it, so importing a changed file again syncs it. A `dimension` takes its
