@@ -130,6 +130,10 @@ pub enum AppRequest {
     PlaceImage,
     /// Pick an image for fill layer `.1` of these layers.
     ImageFill(Vec<NodeId>, usize),
+    /// Save the project's tokens as a DTCG `.tokens.json` file.
+    ExportTokens,
+    /// Pick a DTCG `.tokens.json` file and import its tokens.
+    ImportTokens,
 }
 
 #[derive(Debug, Clone)]

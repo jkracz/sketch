@@ -4,7 +4,7 @@
 //! property.
 
 use super::{UiState, c32, from32};
-use crate::editor::Editor;
+use crate::editor::{AppRequest, Editor};
 use crate::model::{Mode, NodeId, SystemLink, Token, TokenKind, TokenProp, TokenValue};
 use crate::theme::{self, Icon};
 use egui::{Popup, PopupCloseBehavior, RichText, Ui};
@@ -121,6 +121,23 @@ pub fn panel(ui: &mut Ui, ed: &mut Editor, st: &mut UiState) {
                 .clicked()
             {
                 ui.ctx().copy_text(sheet(true));
+            }
+            if ui
+                .add_enabled(
+                    !ed.tokens.is_empty(),
+                    egui::Button::new("Export DTCG file…"),
+                )
+                .on_hover_text("Save the tokens as a W3C Design Tokens .tokens.json file")
+                .clicked()
+            {
+                ed.requests.push(AppRequest::ExportTokens);
+            }
+            if ui
+                .button("Import DTCG file…")
+                .on_hover_text("Add or update tokens from a W3C Design Tokens .tokens.json file")
+                .clicked()
+            {
+                ed.requests.push(AppRequest::ImportTokens);
             }
             if ui
                 .add_enabled(ed.can_paste_tokens(), egui::Button::new("Paste tokens"))
