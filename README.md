@@ -169,7 +169,7 @@ written for Paper work here too.
 | Read | `get_basic_info`, `get_selection`, `get_node_info`, `get_children`, `get_tree_summary`, `get_computed_styles`, `get_jsx`, `find_nodes`, `get_fill_image`, `get_font_family_info`, `search_fonts`, `get_guide` |
 | See | `get_screenshot` (PNG image content of a node or the page), `export` (PNG/SVG/PDF files), `export_combined_pdf` |
 | Write | `create_artboard`, `write_html`, `update_styles`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes`, `finish_working_on_nodes` (saves) |
-| Design tokens | `get_tokens` (JSON, CSS or Tailwind), `create_tokens`, `set_tokens`, `create_text_styles`, `set_text_styles` |
+| Design tokens | `get_tokens` (JSON, CSS, Tailwind or DTCG), `create_tokens`, `set_tokens`, `import_tokens` (DTCG), `create_text_styles`, `set_text_styles` |
 | Design systems | `list_design_systems`, `get_design_system` (filter by type or name), `use_design_system`, `remove_design_system`, `publish_design_system` |
 | Sketch extras | `create_shape` (rectangles, ellipses, diamonds, stars, stickies, text, lines, arrows bound to shapes), `update_arrows` (rebind, reroute, heads), `create_stroke` (pencil), `select_nodes`, `undo`, `redo` |
 | Library & import | `list_library_items`, `add_library_item`, `insert_library_item`, `update_library_items` (rename, remove), `import_excalidraw` (scene onto a page or into a new project; `.excalidrawlib` into the library) |
@@ -249,6 +249,20 @@ its name, value and note, and right-click to duplicate, copy, paste or delete. �
 Shift-click select several. A value can point at another token of the same type with
 `var(--other-token)`. The **⋯** menu copies every token as CSS or Tailwind, and tokens pasted
 into another project are independent copies.
+
+The **⋯** menu also exports and imports [W3C Design Tokens](https://www.designtokens.org/)
+(DTCG) `.tokens.json` files, the format Tokens Studio and Style Dictionary use. Names split
+on `/`, `.` and `-` into groups, and aliases become `{group.token}` references. Spacing, radius and
+other sizes are `dimension`, and line height and opacity are `number`. Sketch keeps their own
+type, other modes' values, the exact name and aliases to tokens left out of the file under
+`$extensions["sketch-rs"]`, so a file
+exported here imports back unchanged. On import, group paths join with `-`
+(`color.brand.500` becomes `--color-brand-500`). A token with the same type and CSS name as an
+existing one updates it, so importing a changed file again syncs it. A `dimension` takes its
+type from its name (radius, font size, letter spacing...) and is spacing otherwise. A `number`
+needs a name that says line height, opacity or font weight. Shadow, typography and other
+composite tokens are skipped, as is any token with a bad value in one of its modes, and the
+import lists what it skipped. A skipped token stays as it was.
 
 In the Design panel, the diamond next to a property opens the token picker. It appears once
 the project has a token of the right type, and lights up when a token owns the property.

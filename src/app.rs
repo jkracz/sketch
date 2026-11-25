@@ -556,6 +556,68 @@ impl App {
         }
     }
 
+    fn export_tokens(&mut self) {
+        let name = self
+            .session
+            .project
+            .as_ref()
+            .map_or("tokens", |p| p.manifest.name.as_str());
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Design tokens", &["json"])
+            .set_file_name(format!("{name}.tokens.json"))
+            .save_file()
+        else {
+            return;
+        };
+        let all = self.ed.tokens.sorted();
+        let doc = crate::io::dtcg::export(&self.ed.tokens, &all, None);
+        let json = serde_json::to_string_pretty(&doc).unwrap_or_default();
+        match crate::io::atomic::write(&p, json.as_bytes()) {
+            Ok(()) => self.ed.status = format!("Exported {} tokens", all.len()),
+            Err(e) => self.error(format!("Could not save {}: {e}", p.display())),
+        }
+    }
+
+    fn import_tokens(&mut self) {
+        let Some(p) = rfd::FileDialog::new()
+            .add_filter("Design tokens", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let doc = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()));
+        let r = doc.and_then(|doc| {
+            self.ed.edit_tokens("Import tokens", None, |t| {
+                crate::io::dtcg::import(t, &doc, None)
+            })
+        });
+        match r {
+            Ok(r) if r.skipped.is_empty() => self.ed.status = r.summary(),
+            Ok(r) => {
+                let list: Vec<String> = r
+                    .skipped
+                    .iter()
+                    .take(12)
+                    .map(|(path, why)| format!("{path}: {why}"))
+                    .collect();
+                let more = r.skipped.len().saturating_sub(list.len());
+                let mut msg = format!("{}.\n\nSkipped:\n{}", r.summary(), list.join("\n"));
+                if more > 0 {
+                    msg.push_str(&format!("\n…and {more} more"));
+                }
+                self.ed.status = r.summary();
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Sketch")
+                    .set_description(msg)
+                    .show();
+            }
+            Err(e) => self.error(format!("Could not import {}: {e}", p.display())),
+        }
+    }
+
     fn export_roots(&self) -> Option<Vec<crate::model::NodeId>> {
         let sel = self.ed.top_selection();
         (!sel.is_empty()).then_some(sel)
@@ -652,6 +714,8 @@ impl App {
                     self.export(spec);
                 }
                 AppRequest::Export(spec) => self.export(spec),
+                AppRequest::ExportTokens => self.export_tokens(),
+                AppRequest::ImportTokens => self.import_tokens(),
                 AppRequest::CopyAsPng => {
                     let roots = self.export_roots();
                     let Some(gpu) = self.offscreen() else {

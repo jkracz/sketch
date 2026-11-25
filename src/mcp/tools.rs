@@ -45,7 +45,8 @@ add_library_item, insert_library_item, update_library_items. import_excalidraw b
 .excalidraw scenes and .excalidrawlib libraries.
 - Design tokens are project-wide CSS variables: get_tokens, create_tokens, set_tokens. Use \
 var(--token) in update_styles and write_html styles to bind a property to a token, so later \
-token changes reach it.
+token changes reach it. Use import_tokens and get_tokens with format \"dtcg\" to exchange \
+W3C Design Tokens documents.
 - Text styles name a set of text settings, like Heading/L. get_tokens lists them as classes. \
 Apply one with class=\"heading-l\" in write_html or {\"textStyle\": \"heading-l\"} in \
 update_styles; create_text_styles and set_text_styles manage them.
@@ -743,7 +744,8 @@ fn core_definitions() -> Vec<Value> {
              `--elevation-2-backdrop-blur` when it has blurs).",
             json!({
                 "system": {"type": "string", "description": "A design system the file uses (id, name or prefix) to list its tokens instead, or \"all\" for every token."},
-                "format": {"type": "string", "enum": ["json", "css", "tailwind"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block."},
+                "format": {"type": "string", "enum": ["json", "css", "tailwind", "dtcg"], "description": "\"json\" (default) returns structured tokens, \"css\" a `:root { ... }` stylesheet, \"tailwind\" a Tailwind v4 `@theme { ... }` block, and \"dtcg\" a W3C Design Tokens document that omits text and effect styles."},
+                "mode": {"type": "string", "description": "For \"dtcg\", export only this mode as `$value`. By default, export the first mode as `$value` and overrides in `$extensions[\"sketch-rs\"].modes`."},
                 "namePattern": {"type": "string", "description": "Glob matched against the full CSS variable name, ignoring case. `*` is the wildcard: \"--color-*\", \"*-500\", \"*brand*\". Text styles match as \".class\"."},
                 "types": types_filter(),
             }),
@@ -792,6 +794,24 @@ fn core_definitions() -> Vec<Value> {
                 },
                 "required": ["name"],
             }}}),
+            &["tokens"],
+            false,
+        ),
+        tool(
+            "import_tokens",
+            "Imports a W3C Design Tokens (DTCG) document in the same format as get_tokens \
+             with format \"dtcg\". Group paths become CSS names (`color.brand.500` becomes \
+             `--color-brand-500`), and import preserves `{path}` aliases. Tokens with the same \
+             type and CSS name update in place. Supports color, dimension, fontFamily, \
+             fontWeight, number, and Sketch and Tokens Studio type names. For a dimension, \
+             the name determines the type, with spacing as the default. A number needs a name \
+             indicating lineHeight, opacity, or fontWeight. Unsupported types and tokens with \
+             an invalid value in any mode are skipped and left intact. Import is one undo step \
+             and reports created and updated tokens and reasons for skips.",
+            json!({
+                "tokens": {"description": "The DTCG document, as a JSON object or a string of JSON."},
+                "mode": {"type": "string", "description": "Import `$value` into this mode, creating it if needed. By default, use the first mode listed in the extension or the project's first mode. When importing separate theme files, start with the first mode."},
+            }),
             &["tokens"],
             false,
         ),

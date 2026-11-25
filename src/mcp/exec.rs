@@ -486,6 +486,7 @@ pub fn call(host: &mut dyn Host, name: &str, args: &Value) -> ToolResult {
                 "publish_design_system" => publish_design_system(host, &a),
                 "create_tokens" => create_tokens(ed, &a),
                 "set_tokens" => set_tokens(ed, &a),
+                "import_tokens" => import_tokens(ed, &a),
                 "create_text_styles" => create_text_styles(ed, &a),
                 "set_text_styles" => set_text_styles(ed, &a),
                 "create_component" => components::create_component(ed, &a),
@@ -1606,10 +1607,57 @@ fn get_tokens(host: &mut dyn Host, a: &Args) -> ToolResult {
             }
             Ok(vec![Out::Text(css)])
         }
+        "dtcg" => {
+            let mode = match a.str("mode") {
+                Some(m) => Some(
+                    &tokens
+                        .find_choice(m)
+                        .ok_or_else(|| {
+                            let names: Vec<&str> =
+                                tokens.choices().iter().map(|m| m.name.as_str()).collect();
+                            format!(
+                                "No mode named \"{m}\". The file's modes: {}.",
+                                names.join(", ")
+                            )
+                        })?
+                        .name,
+                ),
+                None => None,
+            };
+            let doc = crate::io::dtcg::export(tokens, &chosen, mode.map(String::as_str));
+            Ok(vec![Out::Text(
+                serde_json::to_string_pretty(&doc).unwrap_or_default(),
+            )])
+        }
         f => Err(format!(
-            "format must be \"json\", \"css\" or \"tailwind\", not `{f}`"
+            "format must be \"json\", \"css\", \"tailwind\" or \"dtcg\", not `{f}`"
         )),
     }
+}
+
+fn import_tokens(ed: &mut Editor, a: &Args) -> ToolResult {
+    let doc = match a.get("tokens").ok_or("missing `tokens`")? {
+        Value::String(s) => {
+            serde_json::from_str(s).map_err(|e| format!("`tokens` isn't valid JSON: {e}"))?
+        }
+        v => v.clone(),
+    };
+    let mode = a.str("mode");
+    let r = ed.edit_tokens("Import tokens", None, |t| {
+        crate::io::dtcg::import(t, &doc, mode)
+    })?;
+    let skipped: Vec<Value> = r
+        .skipped
+        .iter()
+        .map(|(path, why)| json!({"token": path, "reason": why}))
+        .collect();
+    text(json!({
+        "created": r.created,
+        "updated": r.updated,
+        "unchanged": r.unchanged,
+        "skipped": skipped,
+        "modesAdded": r.modes_added,
+    }))
 }
 
 fn create_tokens(ed: &mut Editor, a: &Args) -> ToolResult {

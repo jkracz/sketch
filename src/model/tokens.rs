@@ -1026,6 +1026,22 @@ impl TokenSet {
         Ok(())
     }
 
+    /// Put token `id` back as `from` has it, or remove it if `from` has none.
+    pub fn restore_token(&mut self, id: &str, from: &TokenSet) {
+        let old = from.tokens.iter().position(|t| t.id == id);
+        match (self.tokens.iter().position(|t| t.id == id), old) {
+            (Some(i), Some(j)) => self.tokens[i] = from.tokens[j].clone(),
+            (Some(i), None) => {
+                self.tokens.remove(i);
+            }
+            (None, Some(j)) => {
+                let t = from.tokens[j].clone();
+                self.tokens.insert(j.min(self.tokens.len()), t);
+            }
+            (None, None) => {}
+        }
+    }
+
     /// Set a literal for one mode directly, like [`set_value`](Self::set_value).
     pub fn set_value_in(&mut self, id: &str, mode: &str, value: TokenValue) {
         if self.modes.first().is_some_and(|m| m.id == mode) {
